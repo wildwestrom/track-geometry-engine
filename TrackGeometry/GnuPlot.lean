@@ -1,4 +1,5 @@
 import TrackGeometry.Lib
+import TrackGeometry.Real
 
 /-! ## GNUPlot CSV output for railway alignments
 
@@ -34,12 +35,6 @@ section Sampling
 All sampling functions use fuel-based recursion (`fuel : Nat` decreases each step)
 for termination, avoiding the need for `Nat`→`α` casts and keeping the code
 computable for any `[TrackScalar α]`. -/
-
-/-- `natToScalar` converts a `Nat` to `α` by repeated addition from `One`/`Zero`.
-    O(n), but fine for small `n` (e.g. `numPts ≤ 10000`). -/
-def natToScalar [TrackScalar α] : Nat → α
-  | 0 => 0
-  | n + 1 => natToScalar n + 1
 
 /-- Sample `numPts` points uniformly along a `RailwayAlignment`.
 
@@ -106,6 +101,33 @@ def sampleByStep [TrackScalar α] {cA cB : Curvature α}
       | [] => [(totalLen, p)]
     | none => pts
 
+/-- Sample `numPts` points uniformly along an `AlignmentPath` (the PI-builder output).
+    Mirrors `sampleUniform` but walks the flat piece array instead of a
+    join-indexed `RailwayAlignment`. -/
+def samplePathUniform [TrackScalar α]
+    (path : AlignmentPath α) (numPts : Nat) : List (α × Vec3 α) :=
+  let totalLen := path.length
+  if numPts ≤ 1 then
+    match path.pointAt 0 with
+    | some p => [(0, p)]
+    | none => []
+  else
+    let numSteps := numPts - 1
+    let step : α := totalLen / natToScalar numSteps
+    let rec go (fuel : Nat) (s : α) (acc : List (α × Vec3 α)) : List (α × Vec3 α) :=
+      if fuel = 0 then acc
+      else
+        match path.pointAt s with
+        | some p => go (fuel - 1) (s + step) (acc ++ [(s, p)])
+        | none => go (fuel - 1) (s + step) acc
+    let pts := go numPts 0 []
+    match path.pointAt totalLen with
+    | some p =>
+      match pts with
+      | (sLast, _) :: _ => if sLast < totalLen then pts ++ [(totalLen, p)] else pts
+      | [] => [(totalLen, p)]
+    | none => pts
+
 end Sampling
 
 section Formatting
@@ -156,6 +178,15 @@ def alignmentToCSV [TrackScalar α] {cA cB : Curvature α}
     (fmt : α → String)
     (includeHeader : Bool := true) : String :=
   let samples := sampleUniform align numPts
+  toCSVString samples fmt includeHeader
+
+/-- Convenience: sample an `AlignmentPath` uniformly and produce a CSV string. -/
+def pathToCSV [TrackScalar α]
+    (path : AlignmentPath α)
+    (numPts : Nat := 1000)
+    (fmt : α → String)
+    (includeHeader : Bool := true) : String :=
+  let samples := samplePathUniform path numPts
   toCSVString samples fmt includeHeader
 
 /-- Convenience: sample by step size and produce a CSV string. -/

@@ -44,22 +44,26 @@ def rfloatExample1 : RailwayAlignment RFloat .straight (.curved ⟨500.0⟩) :=
       (Segment.transitionIn radius (.gn 2) p1 dir0to1 transitionLen .clothoid))
     (Segment.arc radius p2 p3 dirAtP2)
 
--- Example 2: Automatically determine the alignment from placed points.
--- Immediate-mode style: each `.place` is like a mouse click. The builder stores
--- the click history; `.current` replays the placement machine to get the alignment.
-def rfloatExample2 : AlignmentBuilder RFloat :=
-  AlignmentBuilder.empty ⟨1.0⟩
-    |>.place (Vec3.mk ⟨0.0⟩   ⟨0.0⟩  ⟨0.0⟩)
-    |>.place (Vec3.mk ⟨10.0⟩  ⟨0.0⟩  ⟨0.0⟩)
-    |>.place (Vec3.mk ⟨110.0⟩ ⟨50.0⟩ ⟨0.0⟩)
+-- PI-based placement. Points are points of intersection (PIs): the alignment runs
+-- along the legs and rounds each interior corner with a circular arc. The radius is
+-- auto-selected to fit a tangent budget; only the first/last PI lie on the line.
+def designParams : DesignParams RFloat :=
+  { legBudget := ⟨0.4⟩, straightThreshold := ⟨0.02⟩ }
 
--- Crazier alignment to test the edge cases.
-def rfloatExample3 : AlignmentBuilder RFloat :=
-  AlignmentBuilder.empty ⟨1.0⟩
-    |>.place (Vec3.mk ⟨20.0⟩   ⟨40.0⟩   ⟨0.0⟩)
-    |>.place (Vec3.mk ⟨-100.0⟩ ⟨-100.0⟩ ⟨0.0⟩)
-    |>.place (Vec3.mk ⟨50.0⟩   ⟨-50.0⟩  ⟨0.0⟩)
-    |>.place (Vec3.mk ⟨75.0⟩   ⟨80.0⟩  ⟨0.0⟩)
+-- Example 2: one interior corner.
+def example2PIs : Array (Vec3 RFloat) := #[
+  Vec3.mk ⟨0.0⟩   ⟨0.0⟩  ⟨0.0⟩,
+  Vec3.mk ⟨100.0⟩ ⟨0.0⟩  ⟨0.0⟩,
+  Vec3.mk ⟨200.0⟩ ⟨80.0⟩ ⟨0.0⟩
+]
+
+-- Example 3: several corners (sharper, both turn directions).
+def example3PIs : Array (Vec3 RFloat) := #[
+  Vec3.mk ⟨20.0⟩   ⟨40.0⟩   ⟨0.0⟩,
+  Vec3.mk ⟨-100.0⟩ ⟨-100.0⟩ ⟨0.0⟩,
+  Vec3.mk ⟨50.0⟩   ⟨-50.0⟩  ⟨0.0⟩,
+  Vec3.mk ⟨75.0⟩   ⟨80.0⟩   ⟨0.0⟩
+]
 
 def main : IO Unit := do
   let fmt : RFloat → String := λ x => formatFloat x.val
@@ -72,29 +76,21 @@ def main : IO Unit := do
   writeCSV "scripts/example1_points.csv" pts1
 
   -- Example 2
-  match rfloatExample2.current with
-  | some ⟨_, _, align⟩ =>
-    let csv2 := alignmentToCSV align 1000 fmt
-    writeCSV "scripts/example2.csv" csv2
-  | none => IO.println "Example 2: not enough points for an alignment"
-  let pts2 := placedPointsToCSV rfloatExample2.points fmt
-  writeCSV "scripts/example2_points.csv" pts2
+  let path2 := buildPath example2PIs designParams
+  writeCSV "scripts/example2.csv" (pathToCSV path2 1000 fmt)
+  writeCSV "scripts/example2_points.csv" (placedPointsToCSV example2PIs fmt)
 
   -- Example 3
-  match rfloatExample3.current with
-  | some ⟨_, _, align⟩ =>
-    let csv3 := alignmentToCSV align 1000 fmt
-    writeCSV "scripts/example3.csv" csv3
-  | none => IO.println "Example 3: not enough points for an alignment"
-  let pts3 := placedPointsToCSV rfloatExample3.points fmt
-  writeCSV "scripts/example3_points.csv" pts3
+  let path3 := buildPath example3PIs designParams
+  writeCSV "scripts/example3.csv" (pathToCSV path3 1000 fmt)
+  writeCSV "scripts/example3_points.csv" (placedPointsToCSV example3PIs fmt)
 
   let gp := gnuplotScript [
     ("scripts/example1.csv", "Example 1 (manually placing segments)",
      some "scripts/example1_points.csv"),
-    ("scripts/example2.csv", "Example 2 (auto-placement algorithm)",
+    ("scripts/example2.csv", "Example 2 (PI: one corner)",
      some "scripts/example2_points.csv"),
-    ("scripts/example3.csv", "Example 3 (auto-placement crazier)",
+    ("scripts/example3.csv", "Example 3 (PI: several corners)",
      some "scripts/example3_points.csv"),
   ]
   writeCSV "scripts/plot.gnuplot" gp

@@ -1,9 +1,9 @@
-import Mathlib.MeasureTheory.Integral.IntervalIntegral.Basic
-
 /-! ## Scalar typeclass for track geometry
 
 `TrackScalar α` captures everything we need from a scalar type to do track geometry:
-basic arithmetic, order, trig functions, and Fresnel integrals.
+basic arithmetic, order, trig functions, and square roots. Clothoid offsets are
+obtained by Gauss–Legendre quadrature over these primitives, so no special
+integral functions are needed in the interface.
 
 We deliberately extend only the individual operation typeclasses that both `ℝ` and
 `Float` satisfy, avoiding `Field` and `LinearOrder` (which `Float` doesn't satisfy).
@@ -24,8 +24,6 @@ class TrackScalar (α : Type) extends
   arccos : α → α
   sqrt : α → α
   pi : α
-  fresnelC : α → α
-  fresnelS : α → α
   beq : α → α → Bool
   decEq : (a b : α) → Decidable (a = b)
   decLe : (a b : α) → Decidable (a ≤ b)
@@ -39,7 +37,7 @@ instance [h : TrackScalar α] : DecidableRel (· < · : α → α → Prop) := h
 /-! ## 3D vector type
 
 `Vec3 α` is `Fin 3 → α` — three components of scalar type `α`.
-Use `![x, y, z]` (standard Lean matrix notation) to construct vectors.
+Use `Vec3.mk x y z` to construct vectors.
 All arithmetic (`+`, `-`, `•`, etc.) comes from the `Pi` instances automatically.
 -/
 
@@ -57,7 +55,7 @@ instance [Neg α] : Neg (Vec3 α) := ⟨λ v i => -v i⟩
 instance [Mul α] : SMul α (Vec3 α) := ⟨λ r v i => r * v i⟩
 
 /-- Construct a vector from three components. -/
-def mk (x y z : α) : Vec3 α := ![x, y, z]
+def mk (x y z : α) : Vec3 α := fun i => if i = 0 then x else if i = 1 then y else z
 
 /-- Dot product. -/
 def dot [Add α] [Mul α] (v w : Vec3 α) : α := (v 0 * w 0) + (v 1 * w 1) + (v 2 * w 2)
@@ -150,43 +148,6 @@ inductive Segment (α : Type) : Curvature α → Curvature α → Type where
       (curveType : TransitionCurveType := .clothoid) :
       Segment α (.curved radius) .straight
 
-/-! ## Placement algorithm -/
-
-/-- Compute the signed radius of the circle that:
-    - passes through `p` with tangent direction `v` at `p`,
-    - and also passes through `q`.
-
-    Derivation: center C = p + r·(perp v / |v|).
-    |q - C|² = r²  →  |q-p|² - 2r·(q-p)·(n/|v|) = 0  →  r = |q-p|²·|v| / (2·(q-p)·n)
-    where n = perp v (magnitude |v|). The |v| factor in the numerator handles
-    unnormalized tangent directions.
-
-    Returns `none` if the denominator is zero (meaning q-p is parallel to v,
-    i.e. the points are collinear — use a straight segment instead). -/
-def computeRadius [TrackScalar α] (p q v : Vec3 α) : Option α :=
-  let d := q - p
-  let n := Vec3.perp v
-  let num := Vec3.normSq d * Vec3.norm v
-  let den := (1 + 1) * Vec3.dot d n
-  if den = 0 then none else some (num / den)
-
-/-- Given `lastPt` (P), the tangent direction `lastDir` (v) at P, and a new point Q,
-    decide whether the next segment is straight or curved.
-
-    Returns:
-    - `Sum.inl ()` if the points are (approximately) collinear → use a straight segment.
-    - `Sum.inr r` if the points form a circular arc of signed radius `r`.
-      Positive `r` means the curve turns left (counterclockwise from v).
-      Negative `r` means the curve turns right. -/
-def classifyNextSegment [TrackScalar α]
-    (lastPt lastDir newPt : Vec3 α) (straightThreshold : α) : Sum Unit α :=
-  if collinear lastPt newPt (lastPt + lastDir) straightThreshold then
-    Sum.inl ()
-  else
-    match computeRadius lastPt newPt lastDir with
-    | none => Sum.inl ()
-    | some r => Sum.inr r
-
 /-! ## Tangent direction after a segment -/
 
 /-- Tangent direction at the end of a straight segment from `p` to `q`.
@@ -244,142 +205,59 @@ def RailwayAlignment.length {α : Type} [TrackScalar α] {cA cB : Curvature α} 
   | .single seg => seg.length
   | .append al seg => al.length + seg.length
 
-inductive PlacementState (α : Type) : Option (Curvature α) → Type where
-  | empty : PlacementState α none
-  | onePoint (p : Vec3 α) : PlacementState α (some .straight)
-  | building (lastDir : Vec3 α)
-             (curvature : Curvature α)
-             (alignment : RailwayAlignment α .straight curvature)
-             (lastPt : Vec3 α)
-             : PlacementState α (some curvature)
-
-/-! ## The placement function -/
-
-/-- Place a new point and return the updated placement state.
-
-    The behavior depends on the current curvature at the end of the alignment:
-
-    * From `.straight`:
-      - Collinear click → appends `Segment.straight`
-      - Off-line click → appends `Segment.transitionIn r` to start a curve
-
-    * From `.curved r`:
-      - Click near the circle of radius `r` → appends `Segment.arc r`
-      - Click off the circle → appends `Segment.transitionOut r` to return to straight
-
-    The `straightThreshold` controls how close to collinear a click must be
-    before we treat it as a straight continuation. -/
-def place [TrackScalar α]
-    {s : Option (Curvature α)} (state : PlacementState α s)
-    (newPt : Vec3 α) (straightThreshold : α) :
-    Σ (s' : Option (Curvature α)), PlacementState α s' :=
-  match state with
-  | .empty => ⟨some .straight, .onePoint newPt⟩
-  | .onePoint p =>
-    let dir := newPt - p
-    ⟨some .straight, .building dir .straight (.single (.straight p newPt)) newPt⟩
-  | .building lastDir curvature alignment lastPt =>
-    match classifyNextSegment lastPt lastDir newPt straightThreshold with
-    | Sum.inl () =>
-      let chordLen := Vec3.dist lastPt newPt
-      match curvature with
-      | .straight =>
-        let newRailwayAlignment :=
-          RailwayAlignment.append alignment (.straight lastPt newPt)
-        let newDir := straightEndTangent lastPt newPt
-        ⟨some .straight, .building newDir .straight newRailwayAlignment newPt⟩
-      | .curved rOld =>
-        let seg : Segment α (.curved rOld) .straight :=
-          .transitionOut rOld (.gn 2) lastPt lastDir chordLen .clothoid
-        let newRailwayAlignment := RailwayAlignment.append alignment seg
-        let newDir := straightEndTangent lastPt newPt
-        ⟨some .straight, .building newDir .straight newRailwayAlignment newPt⟩
-    | Sum.inr r =>
-      let chordLen := Vec3.dist lastPt newPt
-      match curvature with
-      | .straight =>
-        let seg : Segment α .straight (.curved r) :=
-          .transitionIn r (.gn 2) lastPt lastDir chordLen .clothoid
-        let newRailwayAlignment := RailwayAlignment.append alignment seg
-        let center := circleCenter lastPt lastDir r
-        let newDir := arcEndTangent center newPt r
-        ⟨some (.curved r), .building newDir (.curved r) newRailwayAlignment newPt⟩
-      | .curved rOld =>
-        if TrackScalar.beq r rOld then
-          let newRailwayAlignment := RailwayAlignment.append alignment
-            (.arc rOld lastPt newPt lastDir)
-          let center := circleCenter lastPt lastDir rOld
-          let newDir := arcEndTangent center newPt rOld
-          ⟨some (.curved rOld), .building newDir (.curved rOld) newRailwayAlignment newPt⟩
-        else
-          let seg : Segment α (.curved rOld) .straight :=
-            .transitionOut rOld (.gn 2) lastPt lastDir chordLen .clothoid
-          let newRailwayAlignment := RailwayAlignment.append alignment seg
-          let newDir := straightEndTangent lastPt newPt
-          ⟨some .straight, .building newDir .straight newRailwayAlignment newPt⟩
-
-/-! ## Immediate-mode builder
-
-`AlignmentBuilder` is the user-facing surface for placing points one at a time
-(e.g. one per mouse click). It stores only the raw click history plus the
-straight-threshold; the type-indexed `PlacementState`/`place` machine is replayed
-on demand by `current`.
-
-Storing the history (rather than the live `PlacementState`) makes `place` and
-`undo` trivial array operations and keeps the curvature type index hidden, so
-every builder operation has the same type and chains with `|>.`. -/
-
-structure AlignmentBuilder (α : Type) where
-  /-- How close to collinear a click must be to count as a straight continuation. -/
-  threshold : α
-  /-- The click history, in placement order. -/
-  points : Array (Vec3 α)
-
-namespace AlignmentBuilder
-
-/-- An empty builder carrying the collinearity threshold. -/
-def empty (threshold : α) : AlignmentBuilder α := ⟨threshold, #[]⟩
-
-/-- Record a new point (e.g. a mouse click). -/
-def place (b : AlignmentBuilder α) (p : Vec3 α) : AlignmentBuilder α :=
-  { b with points := b.points.push p }
-
-/-- Drop the most recently placed point. No-op on an empty builder. -/
-def undo (b : AlignmentBuilder α) : AlignmentBuilder α :=
-  { b with points := b.points.pop }
-
-/-- Replay the placement machine over the click history and extract the alignment
-    as it currently stands. Call after each `place`/`undo` to redraw.
-
-    Returns `none` until at least two points have been placed (no complete
-    segment exists yet). The final curvature indices stay existential (`Σ`)
-    because they depend on where the points fell. -/
-def current [TrackScalar α] (b : AlignmentBuilder α) :
-    Option (Σ cA cB : Curvature α, RailwayAlignment α cA cB) :=
-  let init : Σ s : Option (Curvature α), PlacementState α s := ⟨none, .empty⟩
-  -- `_root_.place` (the placement machine), not the `AlignmentBuilder.place` field.
-  let final := b.points.foldl (fun st p => _root_.place st.2 p b.threshold) init
-  match final with
-  | ⟨_, .building _ curvature alignment _⟩ => some ⟨.straight, curvature, alignment⟩
-  | _ => none
-
-end AlignmentBuilder
-
-/-! ## Fresnel integrals and transition curves
-
-The Fresnel integrals C(t) and S(t) for clothoid computations.
-For `ℝ` these are defined via integrals. For `Float` they'd be polynomial approximations.
--/
-
-/-- The Fresnel cosine integral: C(t) = ∫₀ᵗ cos(π·u²/2) du -/
-noncomputable def fresnelC (t : ℝ) : ℝ :=
-  ∫ u in (0 : ℝ)..t, Real.cos (Real.pi * u ^ 2 / 2)
-
-/-- The Fresnel sine integral: S(t) = ∫₀ᵗ sin(π·u²/2) du -/
-noncomputable def fresnelS (t : ℝ) : ℝ :=
-  ∫ u in (0 : ℝ)..t, Real.sin (Real.pi * u ^ 2 / 2)
-
 /-! ## Transition curve evaluation -/
+
+/-- `natToScalar` injects a `Nat` into `α` by repeated addition from `Zero`/`One`.
+    O(n), but only ever called on small constants (quadrature orders, panel counts).
+    Lets generic `[TrackScalar α]` code use integer literals beyond `0`/`1` without an
+    `OfNat` superclass. -/
+def natToScalar [TrackScalar α] : Nat → α
+  | 0 => 0
+  | n + 1 => natToScalar n + 1
+
+/-! ### Gauss–Legendre quadrature
+
+We evaluate clothoid offsets by integrating the unit tangent `(cos θ(u), sin θ(u))`
+directly, rather than reducing to Fresnel integrals. The heading is the running
+turn angle `θ(u) = κ₀·u + ½·κ'·u²` of a linearly-varying-curvature transition.
+
+The integrator is a **composite 3-point Gauss–Legendre rule**: `[0, s]` is split into
+`clothoidPanels` equal panels and the 3-point rule (exact for quintics) is applied on
+each. The 3-point data — nodes `±√(3/5)`, `0` with weights `5/9, 8/9, 5/9` — is built
+from `0`, `1`, division and `sqrt`, so the whole thing stays generic over any
+`TrackScalar` (no decimal literals required) and needs no Fresnel primitives. -/
+
+/-- Number of equal panels used by the composite Gauss–Legendre clothoid integrator.
+    16 panels of a quintic-exact rule resolve any realistic transition (total turn
+    angle well under a full turn) to far better than float precision. -/
+def clothoidPanels : Nat := 16
+
+/-- Integrate `(cos θ(u), sin θ(u))` over `u ∈ [0, s]` with composite 3-point
+    Gauss–Legendre quadrature, where `θ(u) = κ₀·u + ½·κ'·u²`. Returns the local
+    offset `(xLocal, yLocal)` — displacement along and perpendicular to the start
+    tangent. -/
+def clothoidOffset [TrackScalar α] (κ₀ κ' s : α) (panels : Nat) : α × α :=
+  let two   : α := natToScalar 2
+  let node  : α := TrackScalar.sqrt (natToScalar 3 / natToScalar 5)  -- √(3/5)
+  let wSide : α := natToScalar 5 / natToScalar 9                     -- 5/9
+  let wMid  : α := natToScalar 8 / natToScalar 9                     -- 8/9
+  let h     : α := s / natToScalar panels
+  let half  : α := h / two
+  let heading : α → α := fun u => κ₀ * u + (κ' * u * u) / two
+  Id.run do
+    let mut sumC : α := 0
+    let mut sumS : α := 0
+    for k in [0:panels] do
+      let m  : α := natToScalar k * h + half          -- panel midpoint
+      let u0 : α := m - half * node
+      let u2 : α := m + half * node
+      sumC := sumC + wSide * TrackScalar.cos (heading u0)
+                   + wMid  * TrackScalar.cos (heading m)
+                   + wSide * TrackScalar.cos (heading u2)
+      sumS := sumS + wSide * TrackScalar.sin (heading u0)
+                   + wMid  * TrackScalar.sin (heading m)
+                   + wSide * TrackScalar.sin (heading u2)
+    return (half * sumC, half * sumS)
 
 /-- Evaluate a point along a clothoid transition at arc-length `s` (0 ≤ s ≤ L).
 
@@ -390,48 +268,19 @@ noncomputable def fresnelS (t : ℝ) : ℝ :=
     - `L`: total length of the transition
     - `s`: arc-length parameter
 
-    Curvature varies linearly: κ(s) = κ₀ + (κ₁ - κ₀)·s/L.
-    The position is ∫₀ˢ (cos θ(u), sin θ(u)) du where θ(u) = ∫₀ᵘ κ(t) dt,
-    which reduces to scaled/rotated Fresnel integrals. -/
+    Curvature varies linearly: κ(s) = κ₀ + (κ₁ - κ₀)·s/L, so the heading at distance
+    `u` is θ(u) = κ₀·u + ½·κ'·u² with κ' = (κ₁ - κ₀)/L. The position is the integral
+    ∫₀ˢ (cos θ(u), sin θ(u)) du in the local frame `(v̂, n̂)`, evaluated by
+    Gauss–Legendre quadrature. This single expression covers the straight (κ ≡ 0),
+    circular (κ' = 0) and genuine-clothoid cases without special-casing — the heading
+    integral degenerates correctly on its own. -/
 def clothoidPoint [TrackScalar α] (p v : Vec3 α) (κ₀ κ₁ L s : α) : Vec3 α :=
   let κ' := (κ₁ - κ₀) / L
-  if κ' = 0 then
-    -- Constant curvature: degenerate to circular arc (or straight)
-    if κ₀ = 0 then
-      Vec3.lerp p (p + v) (s / L)
-    else
-      let absκ₀ := if κ₀ > 0 then κ₀ else -κ₀
-      let radius := 1 / absκ₀
-      let n := Vec3.perp v
-      let vNormSq := Vec3.normSq v
-      let center := p + (radius / vNormSq) • n
-      let angle := κ₀ * s
-      let radialStart := p - center
-      let cosA := TrackScalar.cos angle
-      let sinA := TrackScalar.sin angle
-      let rotated : Vec3 α :=
-        Vec3.mk (cosA * radialStart 0 - sinA * radialStart 1)
-                (sinA * radialStart 0 + cosA * radialStart 1)
-                (radialStart 2)
-      center + rotated
-  else
-    -- Nonzero curvature rate: use Fresnel integrals
-    let absκ' := if κ' > 0 then κ' else -κ'
-    let a := TrackScalar.sqrt (absκ' / TrackScalar.pi)
-    let t₀ := a * (κ₀ / κ')
-    let tₛ := a * (s + κ₀ / κ')
-    let φ₀ := - (κ₀ * κ₀) / ((1 + 1) * κ')
-    let cosφ₀ := TrackScalar.cos φ₀
-    let sinφ₀ := TrackScalar.sin φ₀
-    let ΔC := TrackScalar.fresnelC tₛ - TrackScalar.fresnelC t₀
-    let ΔS := TrackScalar.fresnelS tₛ - TrackScalar.fresnelS t₀
-    let sign := if κ' > 0 then 1 else -1
-    let xLocal := (1 / a) * (cosφ₀ * ΔC - sinφ₀ * sign * ΔS)
-    let yLocal := (1 / a) * (sinφ₀ * ΔC + cosφ₀ * sign * ΔS)
-    let vNormSq := Vec3.normSq v
-    let vUnit := if vNormSq = 0 then v else (1 / TrackScalar.sqrt vNormSq) • v
-    let nUnit := Vec3.perp vUnit
-    p + xLocal • vUnit + yLocal • nUnit
+  let (xLocal, yLocal) := clothoidOffset κ₀ κ' s clothoidPanels
+  let vNormSq := Vec3.normSq v
+  let vUnit := if vNormSq = 0 then v else (1 / TrackScalar.sqrt vNormSq) • v
+  let nUnit := Vec3.perp vUnit
+  p + xLocal • vUnit + yLocal • nUnit
 
 /-- Evaluate a point along a transition curve at arc-length `s` (0 ≤ s ≤ L). -/
 def transitionPoint [TrackScalar α]
@@ -487,23 +336,137 @@ where
         let localT := t - prevLen
         if localT ≤ seg.length then some (seg.pointAt localT) else none
 
-/-! ## ℝ instance
+/-! ## PI-based (Point of Intersection) construction
 
-Uses mathlib's `Real.cos`, `Real.sin`, etc. and the integral-based Fresnel definitions above.
--/
+The user places PIs — vertices of a tangent polyline. The alignment runs straight
+along the legs and rounds each *interior* corner with a circular arc tangent to both
+legs. The first and last PI are true endpoints (on the alignment); interior PIs are
+cut (the arc misses them).
 
-noncomputable instance : TrackScalar ℝ where
-  cos := Real.cos
-  sin := Real.sin
-  arccos := Real.arccos
-  sqrt := Real.sqrt
-  pi := Real.pi
-  fresnelC := fresnelC
-  fresnelS := fresnelS
-  beq a b := a == b
-  decEq a b := inferInstanceAs (Decidable (a = b))
-  decLe a b := inferInstanceAs (Decidable (a ≤ b))
-  decLt a b := inferInstanceAs (Decidable (a < b))
+Radius is not supplied. Each corner gets a tangent *budget* — a fraction of the
+shorter adjacent leg. Since the tangent pullback is `T = R·tan(Δ/2)`, the radius is
+whatever fits the budget: `R = T / tan(Δ/2)`. Sharp corners get a small radius,
+gentle corners a large one; near-straight corners are skipped entirely.
+
+This produces an `AlignmentPath`: a flat array of type-correct segments with the
+*join* continuity erased. Transitions/clothoids — and graduation back to the fully
+join-indexed `RailwayAlignment` — come in a later step. -/
+
+/-- A single geometry piece with its curvature indices hidden, so heterogeneous
+    segments can share one array. -/
+structure AnySegment (α : Type) where
+  cA : Curvature α
+  cB : Curvature α
+  seg : Segment α cA cB
+
+/-- Wrap a segment, inferring its curvature indices. -/
+def AnySegment.of {α : Type} {cA cB : Curvature α} (s : Segment α cA cB) : AnySegment α :=
+  ⟨cA, cB, s⟩
+
+/-- Arc-length of the underlying segment. -/
+def AnySegment.length [TrackScalar α] (e : AnySegment α) : α := e.seg.length
+
+/-- Sample the underlying segment at local arc-length `t`. -/
+def AnySegment.pointAt [TrackScalar α] (e : AnySegment α) (t : α) : Vec3 α := e.seg.pointAt t
+
+/-- A flat sequence of geometry pieces (straights and arcs), join continuity erased. -/
+structure AlignmentPath (α : Type) where
+  segments : Array (AnySegment α)
+
+/-- Total arc-length: sum of the piece lengths. -/
+def AlignmentPath.length [TrackScalar α] (path : AlignmentPath α) : α :=
+  path.segments.foldl (fun acc e => acc + e.length) 0
+
+/-- Sample at global arc-length `s`, walking the pieces. `none` if out of range. -/
+def AlignmentPath.pointAt [TrackScalar α] (path : AlignmentPath α) (s : α) : Option (Vec3 α) :=
+  if s < 0 then none
+  else
+    let rec go (segs : List (AnySegment α)) (t : α) : Option (Vec3 α) :=
+      match segs with
+      | [] => none
+      | e :: rest =>
+        let len := e.length
+        if t ≤ len then some (e.pointAt t) else go rest (t - len)
+    go path.segments.toList s
+
+/-- Design parameters for auto-radius PI construction. -/
+structure DesignParams (α : Type) where
+  /-- Fraction (≤ 0.5) of the shorter adjacent leg a single corner may consume. -/
+  legBudget : α
+  /-- Corners whose `|sin Δ|` is below this are treated as straight (no arc). -/
+  straightThreshold : α
+
+/-- A solved circular fillet at one interior PI. -/
+structure Corner (α : Type) where
+  /-- Tangent→curve point (arc start), on the incoming leg. -/
+  pc : Vec3 α
+  /-- Curve→tangent point (arc end), on the outgoing leg. -/
+  pt : Vec3 α
+  /-- Signed radius (>0 left turn, <0 right turn). -/
+  radius : α
+  /-- Unit tangent direction at `pc`. -/
+  tangentIn : Vec3 α
+
+/-- Solve the circular fillet at interior PI `b`, between prev PI `a` and next PI `c`,
+    consuming `budget` of tangent length along each leg.
+
+    Returns `none` when the legs are (near) collinear — the corner is straight and
+    contributes no arc. The tangent points sit `budget` back from `b` along each leg,
+    and `R = budget / tan(Δ/2)` so the arc is exactly tangent to both legs. -/
+def solveCorner [TrackScalar α] (a b c : Vec3 α) (budget straightThreshold : α) :
+    Option (Corner α) :=
+  let dIn := b - a
+  let dOut := c - b
+  let nIn := Vec3.norm dIn
+  let nOut := Vec3.norm dOut
+  if nIn = 0 ∨ nOut = 0 then none
+  else
+    let uIn := (1 / nIn) • dIn
+    let uOut := (1 / nOut) • dOut
+    let sinSigned := Vec3.crossZ uIn uOut          -- signed sin Δ
+    let sinAbs := if sinSigned > 0 then sinSigned else -sinSigned
+    if sinAbs ≤ straightThreshold then none
+    else
+      let cosD := Vec3.dot uIn uOut                 -- cos Δ
+      let tanHalf := (1 - cosD) / sinAbs            -- tan(Δ/2) = (1 - cos Δ)/sin Δ
+      let absR := budget / tanHalf
+      let r := if sinSigned > 0 then absR else -absR
+      some {
+        pc := b - budget • uIn,
+        pt := b + budget • uOut,
+        radius := r,
+        tangentIn := uIn
+      }
+
+/-- Build an `AlignmentPath` from a polyline of PIs.
+
+    The first and last PIs are endpoints. Each interior PI is rounded with a circular
+    arc whose radius fits a tangent budget = `legBudget × (shorter adjacent leg)`.
+    Near-collinear corners pass straight through. -/
+def buildPath [TrackScalar α] (pts : Array (Vec3 α)) (dp : DesignParams α) : AlignmentPath α :=
+  let n := pts.size
+  if n < 2 then ⟨#[]⟩
+  else
+    let z : Vec3 α := Vec3.mk 0 0 0
+    let get := fun i => (pts[i]?).getD z
+    let out : Array (AnySegment α) := Id.run do
+      let mut acc : Array (AnySegment α) := #[]
+      let mut cursor : Vec3 α := get 0
+      for i in [1 : n - 1] do
+        let a := get (i - 1)
+        let b := get i
+        let c := get (i + 1)
+        let budget := dp.legBudget * min (Vec3.dist a b) (Vec3.dist b c)
+        match solveCorner a b c budget dp.straightThreshold with
+        | none => pure ()
+        | some corner =>
+          acc := acc.push (AnySegment.of (Segment.straight cursor corner.pc))
+          acc := acc.push (AnySegment.of
+            (Segment.arc corner.radius corner.pc corner.pt corner.tangentIn))
+          cursor := corner.pt
+      acc := acc.push (AnySegment.of (Segment.straight cursor (get (n - 1))))
+      return acc
+    ⟨out⟩
 
 /-- Computable `Float` wrapper. `RFloat` is a newtype around `Float` with structural
     `DecidableEq` (treating `NaN = NaN`), making `TrackScalar RFloat` fully computable
@@ -516,11 +479,21 @@ structure RFloat where
 
 namespace RFloat
 
-/-- Computable `DecidableEq` via `Float.beq`. Both proof branches use `sorry`
-    because `Float` has no `DecidableEq` in Lean, but this is fine for `#eval`
-    (proofs aren't evaluated at runtime). -/
+/-- `Float.toBits` is injective: a `Float` is uniquely determined by its 64-bit
+    IEEE-754 representation (`toBits`/`ofBits` are a bijection). This is true by
+    construction, but unprovable in-kernel because `Float`'s payload type is
+    `opaque` (see `FloatSpec` in `Init.Data.Float`) — Lean exposes decidable `<`/`≤`
+    for `Float` but deliberately no decidable `=`. -/
+axiom Float.toBits_inj {a b : Float} (h : a.toBits = b.toBits) : a = b
+
+/-- Computable `DecidableEq` for `RFloat`, deciding propositional equality via the
+    underlying bit pattern. Unlike a `Float.beq`-based version, this matches `=`
+    exactly: bitwise-identical NaNs are equal, and `+0.0`/`-0.0` are distinct. -/
 instance : DecidableEq RFloat := λ a b =>
-  if Float.beq a.val b.val then isTrue (by sorry) else isFalse (by sorry)
+  if h : a.val.toBits = b.val.toBits then
+    isTrue (by cases a; cases b; exact congrArg RFloat.mk (Float.toBits_inj h))
+  else
+    isFalse (λ hab => h (by rw [hab]))
 
 instance : Add RFloat := ⟨λ a b => ⟨a.val + b.val⟩⟩
 instance : Sub RFloat := ⟨λ a b => ⟨a.val - b.val⟩⟩
@@ -537,70 +510,14 @@ instance : Min RFloat := ⟨λ a b => ⟨min a.val b.val⟩⟩
 end RFloat
 
 /-- Computable `TrackScalar` instance for `RFloat`. All operations delegate to `Float`.
-    Fresnel integrals use a placeholder (to be replaced with a polynomial approximation). -/
+    Clothoid offsets come from Gauss–Legendre quadrature over these primitives, so no
+    Fresnel functions are needed here. -/
 instance : TrackScalar RFloat where
   cos x := ⟨Float.cos x.val⟩
   sin x := ⟨Float.sin x.val⟩
   arccos x := ⟨Float.acos x.val⟩
   sqrt x := ⟨Float.sqrt x.val⟩
   pi := ⟨2 * Float.acos 0⟩
-  fresnelC t :=
-    -- Numerical approximation of C(t) = ∫₀ᵗ cos(π·u²/2) du
-    -- Uses the auxiliary functions f and g from Abramowitz & Stegun 7.3.27-28.
-    -- Accurate to ~2e-6 for all t ≥ 0; extended to negative t by odd symmetry.
-    let x := t.val
-    let ax := if x < 0 then -x else x
-    let v :=
-      if ax < 1.6 then
-        -- Small-argument power series (enough terms for 6-digit accuracy)
-        let x2 := ax * ax
-        let x4 := x2 * x2
-        let pi := 2 * Float.acos 0
-        let piH := pi / 2
-        -- C(t) = Σ (-1)^n (πt²/2)^(2n) t / ((4n+1)(2n)!)  (first 7 terms)
-        let t1 := ax
-        let t2 := -(piH * piH) * x4 * ax / (5 * 2)
-        let t3 := (piH * piH) * (piH * piH) * x4 * x4 * ax / (9 * 24)
-        let t4 := -((piH^6) * x4 * x4 * x4 * ax) / (13 * 720)
-        let t5 := ((piH^8) * x4 * x4 * x4 * x4 * ax) / (17 * 40320)
-        let t6 := -((piH^10) * x4 * x4 * x4 * x4 * x4 * ax) / (21 * 3628800)
-        t1 + t2 + t3 + t4 + t5 + t6
-      else
-        -- Large-argument asymptotic expansion via auxiliary functions f and g
-        let pi := 2 * Float.acos 0
-        let x2 := ax * ax
-        let pix2 := pi * x2
-        let f := (1 / (pi * ax)) * (1 - 3 / (pix2 * pix2) + 105 / (pix2 * pix2 * pix2 * pix2))
-        let g := (1 / (pi * x2)) * (1 - 15 / (pix2 * pix2) + 945 / (pix2 * pix2 * pix2 * pix2))
-        0.5 + f * Float.sin (pix2 / 2) - g * Float.cos (pix2 / 2)
-    ⟨if x < 0 then -v else v⟩
-  fresnelS t :=
-    -- Numerical approximation of S(t) = ∫₀ᵗ sin(π·u²/2) du
-    -- Same approach as fresnelC above.
-    let x := t.val
-    let ax := if x < 0 then -x else x
-    let v :=
-      if ax < 1.6 then
-        let x2 := ax * ax
-        let x4 := x2 * x2
-        let pi := 2 * Float.acos 0
-        let piH := pi / 2
-        -- S(t) = Σ (-1)^n (πt²/2)^(2n+1) t / ((4n+3)(2n+1)!)  (first 7 terms)
-        let t1 := piH * x2 * ax / 3
-        let t2 := -(piH^3) * x4 * x2 * ax / (7 * 6)
-        let t3 := (piH^5) * x4 * x4 * x2 * ax / (11 * 120)
-        let t4 := -((piH^7) * x4 * x4 * x4 * x2 * ax) / (15 * 5040)
-        let t5 := ((piH^9) * x4 * x4 * x4 * x4 * x2 * ax) / (19 * 362880)
-        let t6 := -((piH^11) * x4 * x4 * x4 * x4 * x4 * x2 * ax) / (23 * 39916800)
-        t1 + t2 + t3 + t4 + t5 + t6
-      else
-        let pi := 2 * Float.acos 0
-        let x2 := ax * ax
-        let pix2 := pi * x2
-        let f := (1 / (pi * ax)) * (1 - 3 / (pix2 * pix2) + 105 / (pix2 * pix2 * pix2 * pix2))
-        let g := (1 / (pi * x2)) * (1 - 15 / (pix2 * pix2) + 945 / (pix2 * pix2 * pix2 * pix2))
-        0.5 - f * Float.cos (pix2 / 2) - g * Float.sin (pix2 / 2)
-    ⟨if x < 0 then -v else v⟩
   beq a b := Float.beq a.val b.val
   decEq a b := inferInstanceAs (Decidable (a = b))
   decLe a b := Float.decLe a.val b.val
