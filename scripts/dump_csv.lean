@@ -48,7 +48,7 @@ def rfloatExample1 : RailwayAlignment RFloat .straight (.curved ⟨500.0⟩) :=
 -- along the legs and rounds each interior corner with a circular arc. The radius is
 -- auto-selected to fit a tangent budget; only the first/last PI lie on the line.
 def designParams : DesignParams RFloat :=
-  { legBudget := ⟨0.4⟩, straightThreshold := ⟨0.02⟩ }
+  { legBudget := ⟨0.4⟩, straightThreshold := ⟨0.02⟩, transitionLengthRatio := ⟨0.5⟩ }
 
 -- Example 2: one interior corner.
 def example2PIs : Array (Vec3 RFloat) := #[

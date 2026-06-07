@@ -21,7 +21,6 @@
         devShell = pkgs.mkShell {
           packages = [
             # Build tools
-            pkgs.just
             pkgs.gnuplot
 
             # C

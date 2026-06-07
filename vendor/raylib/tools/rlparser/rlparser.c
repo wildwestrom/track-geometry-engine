@@ -62,6 +62,7 @@
 #include <stdio.h>              // Required for: printf(), fopen(), fseek(), ftell(), fread(), fclose()
 #include <stdbool.h>            // Required for: bool
 #include <ctype.h>              // Required for: isdigit()
+#include <string.h>             // Required for: strcmp(), strcpy(), strchr() (CODE format patch)
 
 #define MAX_DEFINES_TO_PARSE    2048    // Maximum number of defines to parse
 #define MAX_STRUCTS_TO_PARSE      64    // Maximum number of structures to parse
@@ -1491,6 +1492,241 @@ static char *TextReplace(char *text, const char *replace, const char *by)
 */
 
 // Export parsed data in desired format
+//----------------------------------------------------------------------------------
+// CODE format: emit minimal Lean 4 raylib bindings + C marshalling shims (PATCH)
+//
+// Implements the stubbed `case CODE:` of ExportParsedData. Gated by the curated
+// allowlists below, it emits two files from the parsed model:
+//   * Lean `@[extern]` declarations  -> the --output path (passed as `outFile`)
+//   * C `LEAN_EXPORT` shims          -> ffi/raylib_shims.c (relative to CWD; run from
+//                                        repo root)
+// Struct values cross the FFI as Lean constructor objects; box/unbox helpers are
+// generated from each struct's field list using the Lean object layout (object fields
+// in slots 0..n-1, scalar fields packed after sizeof(void*)*numObjs bytes). This is
+// correct for POD structs whose scalar fields share one size (true for our allowlist);
+// mixed-size scalar structs would need size-descending ordering.
+//----------------------------------------------------------------------------------
+#define CODE_ALEN(a) ((int)(sizeof(a)/sizeof((a)[0])))
+
+static const char *codeFuncs[] = {
+    "SetConfigFlags", "InitWindow", "CloseWindow", "WindowShouldClose", "SetExitKey",
+    "HideCursor",
+    "SetTraceLogLevel", "GetScreenWidth", "GetScreenHeight", "GetWindowScaleDPI",
+    "SetMouseScale", "GetMouseWheelMove", "GetMousePosition", "GetMouseDelta",
+    "GetScreenToWorld2D", "IsMouseButtonDown", "IsMouseButtonPressed", "IsKeyPressed",
+    "IsKeyDown",
+    "BeginDrawing", "EndDrawing", "ClearBackground", "BeginMode2D", "EndMode2D",
+    "DrawLine", "DrawLineV", "DrawLineEx", "DrawCircleV", "DrawText", "DrawFPS", "MeasureText"
+};
+static const char *codeStructs[] = { "Vector2", "Color", "Camera2D" };
+static const char *codeEnumMembers[] = {
+    "MOUSE_BUTTON_LEFT", "MOUSE_BUTTON_RIGHT", "MOUSE_BUTTON_MIDDLE", "KEY_C",
+    "KEY_Z", "KEY_LEFT_CONTROL", "KEY_RIGHT_CONTROL", "KEY_LEFT_SHIFT", "KEY_RIGHT_SHIFT",
+    "KEY_LEFT_BRACKET", "KEY_RIGHT_BRACKET",
+    "LOG_DEBUG", "FLAG_VSYNC_HINT", "FLAG_WINDOW_HIGHDPI"
+};
+static const char *codeColors[] = { "BLACK", "WHITE", "RED", "GRAY", "RAYWHITE", "GREEN" };
+
+static bool CodeInList(const char *name, const char **list, int n)
+{
+    for (int i = 0; i < n; i++) if (strcmp(name, list[i]) == 0) return true;
+    return false;
+}
+
+static bool CodeIsStruct(const char *t) { return CodeInList(t, codeStructs, CODE_ALEN(codeStructs)); }
+
+// Lean type for a C type in a binding signature (no `@&` prefix).
+static const char *CodeLeanType(const char *t)
+{
+    if (strcmp(t, "void") == 0) return "Unit";
+    if (strcmp(t, "bool") == 0) return "Bool";
+    if (strcmp(t, "int") == 0) return "UInt32";
+    if (strcmp(t, "unsigned int") == 0) return "UInt32";
+    if (strcmp(t, "float") == 0) return "Float";
+    if (strcmp(t, "double") == 0) return "Float";
+    if (strcmp(t, "const char *") == 0) return "String";
+    if (CodeIsStruct(t)) return t;
+    return NULL;
+}
+
+// Lean type for a struct field.
+static const char *CodeLeanFieldType(const char *t)
+{
+    if (strcmp(t, "float") == 0) return "Float";
+    if (strcmp(t, "double") == 0) return "Float";
+    if (strcmp(t, "unsigned char") == 0) return "UInt8";
+    if (CodeIsStruct(t)) return t;
+    return NULL;
+}
+
+// C type of a shim parameter (how Lean passes the value).
+static const char *CodeCType(const char *t)
+{
+    if (strcmp(t, "bool") == 0) return "uint8_t";
+    if (strcmp(t, "int") == 0) return "uint32_t";
+    if (strcmp(t, "unsigned int") == 0) return "uint32_t";
+    if (strcmp(t, "float") == 0) return "double";
+    if (strcmp(t, "double") == 0) return "double";
+    if (strcmp(t, "const char *") == 0) return "b_lean_obj_arg";
+    if (CodeIsStruct(t)) return "b_lean_obj_arg";
+    return NULL;
+}
+
+static bool CodeBorrowed(const char *t) { return (strcmp(t, "const char *") == 0) || CodeIsStruct(t); }
+
+// Size (bytes) of a scalar field's slot in a Lean constructor object.
+static int CodeScalarSize(const char *t) { return (strcmp(t, "unsigned char") == 0) ? 1 : 8; }
+
+// Print the C expression converting shim parameter `name` to a raylib argument.
+static void CodePrintUnbox(FILE *f, const char *t, const char *name)
+{
+    if (strcmp(t, "bool") == 0) fprintf(f, "(bool)%s", name);
+    else if (strcmp(t, "int") == 0) fprintf(f, "(int)%s", name);
+    else if (strcmp(t, "unsigned int") == 0) fprintf(f, "(unsigned int)%s", name);
+    else if (strcmp(t, "float") == 0) fprintf(f, "(float)%s", name);
+    else if (strcmp(t, "double") == 0) fprintf(f, "%s", name);
+    else if (strcmp(t, "const char *") == 0) fprintf(f, "lean_string_cstr(%s)", name);
+    else if (CodeIsStruct(t)) fprintf(f, "lean_raylib_%s_unbox(%s)", t, name);
+}
+
+static void CodeEmitStructLean(FILE *f, StructInfo *s)
+{
+    fprintf(f, "structure %s where\n", s->name);
+    for (int i = 0; i < s->fieldCount; i++)
+        fprintf(f, "  %s : %s\n", s->fieldName[i], CodeLeanFieldType(s->fieldType[i]));
+    fprintf(f, "  deriving Inhabited\n\n");
+}
+
+static void CodeEmitStructHelpers(FILE *f, StructInfo *s)
+{
+    int numObjs = 0, scalarBytes = 0;
+    for (int i = 0; i < s->fieldCount; i++)
+    {
+        if (CodeIsStruct(s->fieldType[i])) numObjs++;
+        else scalarBytes += CodeScalarSize(s->fieldType[i]);
+    }
+
+    // unbox: Lean ctor object -> C struct
+    fprintf(f, "static inline %s lean_raylib_%s_unbox(b_lean_obj_arg o) {\n", s->name, s->name);
+    fprintf(f, "    %s r;\n", s->name);
+    int objIdx = 0, soff = 0;
+    for (int i = 0; i < s->fieldCount; i++)
+    {
+        const char *t = s->fieldType[i], *n = s->fieldName[i];
+        if (CodeIsStruct(t)) { fprintf(f, "    r.%s = lean_raylib_%s_unbox(lean_ctor_get(o, %d));\n", n, t, objIdx); objIdx++; }
+        else if (strcmp(t, "unsigned char") == 0) { fprintf(f, "    r.%s = lean_ctor_get_uint8(o, sizeof(void*)*%d + %d);\n", n, numObjs, soff); soff += 1; }
+        else { fprintf(f, "    r.%s = (%s)lean_ctor_get_float(o, sizeof(void*)*%d + %d);\n", n, t, numObjs, soff); soff += 8; }
+    }
+    fprintf(f, "    return r;\n}\n\n");
+
+    // box: C struct -> fresh Lean ctor object
+    fprintf(f, "static inline lean_obj_res lean_raylib_%s_box(%s s) {\n", s->name, s->name);
+    fprintf(f, "    lean_object* o = lean_alloc_ctor(0, %d, %d);\n", numObjs, scalarBytes);
+    objIdx = 0; soff = 0;
+    for (int i = 0; i < s->fieldCount; i++)
+    {
+        const char *t = s->fieldType[i], *n = s->fieldName[i];
+        if (CodeIsStruct(t)) { fprintf(f, "    lean_ctor_set(o, %d, lean_raylib_%s_box(s.%s));\n", objIdx, t, n); objIdx++; }
+        else if (strcmp(t, "unsigned char") == 0) { fprintf(f, "    lean_ctor_set_uint8(o, sizeof(void*)*%d + %d, s.%s);\n", numObjs, soff, n); soff += 1; }
+        else { fprintf(f, "    lean_ctor_set_float(o, sizeof(void*)*%d + %d, (double)s.%s);\n", numObjs, soff, n); soff += 8; }
+    }
+    fprintf(f, "    return o;\n}\n\n");
+}
+
+// Number of real params, collapsing a lone `(void)`.
+static int CodeRealParamCount(FunctionInfo *fn)
+{
+    if (fn->paramCount == 1 && strcmp(fn->paramType[0], "void") == 0) return 0;
+    return fn->paramCount;
+}
+
+static void CodeEmitFunctionLean(FILE *f, FunctionInfo *fn)
+{
+    char camel[64];
+    strcpy(camel, fn->name);
+    camel[0] = (char)tolower((unsigned char)camel[0]);
+    int pc = CodeRealParamCount(fn);
+    fprintf(f, "@[extern \"lean_raylib__%s\"]\n", fn->name);
+    fprintf(f, "opaque %s", camel);
+    for (int p = 0; p < pc; p++)
+    {
+        const char *t = fn->paramType[p];
+        fprintf(f, " (%s : %s%s)", fn->paramName[p], CodeBorrowed(t) ? "@& " : "", CodeLeanType(t));
+    }
+    fprintf(f, " : IO %s\n\n", CodeLeanType(fn->retType));
+}
+
+static void ExportCodeBindings(FILE *leanOut)
+{
+    int nStructs = CODE_ALEN(codeStructs), nFuncs = CODE_ALEN(codeFuncs);
+    int nColors = CODE_ALEN(codeColors), nEnums = CODE_ALEN(codeEnumMembers);
+
+    // ----- Lean bindings (--output) -----
+    fprintf(leanOut, "-- GENERATED by rlparser --format CODE -- do not edit\n");
+    fprintf(leanOut, "-- Minimal Raylib bindings for the track geometry UI.\n\n");
+    fprintf(leanOut, "namespace Raylib\n\n");
+
+    for (int i = 0; i < structCount; i++)
+        if (CodeInList(structs[i].name, codeStructs, nStructs)) CodeEmitStructLean(leanOut, &structs[i]);
+
+    for (int i = 0; i < defineCount; i++)
+    {
+        if (defines[i].type != COLOR || !CodeInList(defines[i].name, codeColors, nColors)) continue;
+        const char *br = strchr(defines[i].value, '{');
+        int r, g, b, a;
+        if (br && sscanf(br + 1, " %d , %d , %d , %d", &r, &g, &b, &a) == 4)
+            fprintf(leanOut, "def %s : Color := Color.mk %d %d %d %d\n", defines[i].name, r, g, b, a);
+    }
+    fprintf(leanOut, "\n");
+
+    for (int i = 0; i < enumCount; i++)
+        for (int v = 0; v < enums[i].valueCount; v++)
+            if (CodeInList(enums[i].valueName[v], codeEnumMembers, nEnums))
+                fprintf(leanOut, "def %s : UInt32 := %d\n", enums[i].valueName[v], enums[i].valueInteger[v]);
+    fprintf(leanOut, "\n");
+
+    for (int i = 0; i < funcCount; i++)
+        if (CodeInList(funcs[i].name, codeFuncs, nFuncs)) CodeEmitFunctionLean(leanOut, &funcs[i]);
+
+    fprintf(leanOut, "end Raylib\n");
+
+    // ----- C shims (ffi/raylib_shims.c) -----
+    FILE *cf = fopen("ffi/raylib_shims.c", "wt");
+    if (cf == NULL) { printf("CODE: ERROR opening ffi/raylib_shims.c (run from repo root)\n"); return; }
+    fprintf(cf, "// GENERATED by rlparser --format CODE -- do not edit\n");
+    fprintf(cf, "#include <raylib.h>\n#include <lean/lean.h>\n\n");
+
+    for (int i = 0; i < structCount; i++)
+        if (CodeInList(structs[i].name, codeStructs, nStructs)) CodeEmitStructHelpers(cf, &structs[i]);
+
+    for (int i = 0; i < funcCount; i++)
+    {
+        if (!CodeInList(funcs[i].name, codeFuncs, nFuncs)) continue;
+        FunctionInfo *fn = &funcs[i];
+        int pc = CodeRealParamCount(fn);
+        fprintf(cf, "LEAN_EXPORT lean_obj_res lean_raylib__%s(", fn->name);
+        for (int p = 0; p < pc; p++) fprintf(cf, "%s %s, ", CodeCType(fn->paramType[p]), fn->paramName[p]);
+        fprintf(cf, "lean_obj_arg world) {\n    (void)world;\n");
+
+        bool isVoid = (strcmp(fn->retType, "void") == 0);
+        if (isVoid) fprintf(cf, "    %s(", fn->name);
+        else fprintf(cf, "    %s v = %s(", fn->retType, fn->name);
+        for (int p = 0; p < pc; p++) { if (p) fprintf(cf, ", "); CodePrintUnbox(cf, fn->paramType[p], fn->paramName[p]); }
+        fprintf(cf, ");\n");
+
+        const char *rt = fn->retType;
+        if (isVoid) fprintf(cf, "    return lean_io_result_mk_ok(lean_box(0));\n");
+        else if (strcmp(rt, "bool") == 0) fprintf(cf, "    return lean_io_result_mk_ok(lean_box(v ? 1 : 0));\n");
+        else if (strcmp(rt, "int") == 0 || strcmp(rt, "unsigned int") == 0) fprintf(cf, "    return lean_io_result_mk_ok(lean_box_uint32((uint32_t)v));\n");
+        else if (strcmp(rt, "float") == 0) fprintf(cf, "    return lean_io_result_mk_ok(lean_box_float((double)v));\n");
+        else if (strcmp(rt, "double") == 0) fprintf(cf, "    return lean_io_result_mk_ok(lean_box_float(v));\n");
+        else if (CodeIsStruct(rt)) fprintf(cf, "    return lean_io_result_mk_ok(lean_raylib_%s_box(v));\n", rt);
+        fprintf(cf, "}\n\n");
+    }
+    fclose(cf);
+    printf("CODE: wrote Lean bindings (--output) and ffi/raylib_shims.c\n");
+}
+
 static void ExportParsedData(const char *fileName, int format)
 {
     FILE *outFile = fopen(fileName, "wt");
@@ -2007,7 +2243,7 @@ static void ExportParsedData(const char *fileName, int format)
             fprintf(outFile, "  }\n");
             fprintf(outFile, "}\n");
         } break;
-        case CODE:
+        case CODE: ExportCodeBindings(outFile); break;
         default: break;
     }
 

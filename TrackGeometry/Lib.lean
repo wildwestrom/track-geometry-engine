@@ -170,6 +170,13 @@ def circleCenter [TrackScalar α] (p v : Vec3 α) (r : α) : Vec3 α :=
   let n := Vec3.perp v
   p + (r / Vec3.norm v) • n
 
+/-- Rotate a vector by angle `φ` in the XY-plane (counterclockwise for `φ > 0`),
+    preserving the Z component. -/
+def Vec3.rotateXY [TrackScalar α] (φ : α) (v : Vec3 α) : Vec3 α :=
+  let c := TrackScalar.cos φ
+  let s := TrackScalar.sin φ
+  Vec3.mk (c * v 0 - s * v 1) (s * v 0 + c * v 1) (v 2)
+
 /-- Arc length given center, endpoints, and radius. Uses arccos of the angle between
     radial vectors. -/
 def arcLength [TrackScalar α] (center startPt endPt : Vec3 α) (r : α) : α :=
@@ -395,26 +402,44 @@ structure DesignParams (α : Type) where
   legBudget : α
   /-- Corners whose `|sin Δ|` is below this are treated as straight (no arc). -/
   straightThreshold : α
+  /-- Spiral (clothoid) length per unit radius, the `c` in `Ls = c·R`. Equivalently
+      the spiral angle is `θs = c/2`, constant across corners (clamped to `Δ/2` on
+      sharp corners so a non-negative circular arc always remains). `0` disables
+      transitions, recovering a pure straight→arc→straight corner.
 
-/-- A solved circular fillet at one interior PI. -/
-structure Corner (α : Type) where
-  /-- Tangent→curve point (arc start), on the incoming leg. -/
-  pc : Vec3 α
-  /-- Curve→tangent point (arc end), on the outgoing leg. -/
-  pt : Vec3 α
-  /-- Signed radius (>0 left turn, <0 right turn). -/
-  radius : α
-  /-- Unit tangent direction at `pc`. -/
-  tangentIn : Vec3 α
+      This is a geometric stand-in for the eventual design criterion: at speed `V` a
+      clothoid imposes jerk ≈ `V³/(R·Ls)`, so a jerk-limited policy would replace this
+      constant with a speed-dependent ratio — the construction below is unchanged. -/
+  transitionLengthRatio : α
 
-/-- Solve the circular fillet at interior PI `b`, between prev PI `a` and next PI `c`,
-    consuming `budget` of tangent length along each leg.
+/-- A solved corner at one interior PI: where the incoming straight ends
+    (`entryPoint`), where the outgoing straight resumes (`exitPoint`), and the curved
+    `pieces` between them (a circular arc, optionally bracketed by entry/exit clothoids). -/
+structure CornerSolution (α : Type) where
+  /-- Where the straight leading into the corner ends (start of the first piece). -/
+  entryPoint : Vec3 α
+  /-- Where the straight leaving the corner begins (end of the last piece). -/
+  exitPoint : Vec3 α
+  /-- Curved geometry through the corner, in order. -/
+  pieces : Array (AnySegment α)
 
-    Returns `none` when the legs are (near) collinear — the corner is straight and
-    contributes no arc. The tangent points sit `budget` back from `b` along each leg,
-    and `R = budget / tan(Δ/2)` so the arc is exactly tangent to both legs. -/
-def solveCorner [TrackScalar α] (a b c : Vec3 α) (budget straightThreshold : α) :
-    Option (Corner α) :=
+/-- Solve the corner at interior PI `b`, between prev PI `a` and next PI `c`, consuming
+    `budget` of tangent length along each leg. Returns `none` when the legs are (near)
+    collinear — the corner is straight and contributes nothing.
+
+    With `dp.transitionLengthRatio = 0` this is the classic circular fillet: the tangent
+    points sit `budget` back from `b` along each leg and `R = budget / tan(Δ/2)`, so the
+    arc is exactly tangent to both legs.
+
+    Otherwise the corner is the standard symmetric spiral: an entry clothoid, a circular
+    arc, and an exit clothoid. The spiral angle is `θs = min(c/2, Δ/2)` (`c =
+    transitionLengthRatio`). Using the clothoid's shift `p = R·P` and abscissa offset
+    `k = R·K` — where `(P, K)` come from a unit clothoid of spiral angle `θs` — the total
+    tangent distance is `T = (R + p)·tan(Δ/2) + k`. Holding `T = budget` (so the corner
+    fits the leg exactly as before) gives `R = budget / ((1+P)·tan(Δ/2) + K)`, and the
+    spiral length is `Ls = 2·R·θs` (= `c·R` when unclamped). -/
+def solveCorner [TrackScalar α] (a b c : Vec3 α) (budget : α) (dp : DesignParams α) :
+    Option (CornerSolution α) :=
   let dIn := b - a
   let dOut := c - b
   let nIn := Vec3.norm dIn
@@ -425,18 +450,49 @@ def solveCorner [TrackScalar α] (a b c : Vec3 α) (budget straightThreshold : �
     let uOut := (1 / nOut) • dOut
     let sinSigned := Vec3.crossZ uIn uOut          -- signed sin Δ
     let sinAbs := if sinSigned > 0 then sinSigned else -sinSigned
-    if sinAbs ≤ straightThreshold then none
+    if sinAbs ≤ dp.straightThreshold then none
     else
+      let two : α := natToScalar 2
+      let leftTurn := sinSigned > 0
+      let signOf := fun (x : α) => if leftTurn then x else -x
       let cosD := Vec3.dot uIn uOut                 -- cos Δ
       let tanHalf := (1 - cosD) / sinAbs            -- tan(Δ/2) = (1 - cos Δ)/sin Δ
-      let absR := budget / tanHalf
-      let r := if sinSigned > 0 then absR else -absR
-      some {
-        pc := b - budget • uIn,
-        pt := b + budget • uOut,
-        radius := r,
-        tangentIn := uIn
-      }
+      let Δ := TrackScalar.arccos (max (-1) (min 1 cosD))
+      let θs := min (dp.transitionLengthRatio / two) (Δ / two)
+      if θs ≤ 0 then
+        -- No transitions: classic circular fillet (straight → arc → straight).
+        let absR := budget / tanHalf
+        let r := signOf absR
+        let pc := b - budget • uIn
+        let pt := b + budget • uOut
+        some { entryPoint := pc, exitPoint := pt,
+               pieces := #[AnySegment.of (Segment.arc r pc pt uIn)] }
+      else
+        -- Symmetric spiral corner. Shift constants from a unit clothoid (R = 1).
+        let Ls1 := two * θs
+        let (X1, Y1) := clothoidOffset 0 (1 / Ls1) Ls1 clothoidPanels
+        let P := Y1 - (1 - TrackScalar.cos θs)
+        let K := X1 - TrackScalar.sin θs
+        let absR := budget / ((1 + P) * tanHalf + K)
+        let r := signOf absR
+        let Ls := two * absR * θs
+        let ts := b - budget • uIn                    -- entry tangent→spiral point
+        let sc := clothoidPoint ts uIn 0 (1 / r) Ls Ls -- entry spiral end = arc start
+        let tanSC := Vec3.rotateXY (signOf θs) uIn     -- tangent at sc
+        let φ := Δ - two * θs                          -- circular arc central angle (≥ 0)
+        let o := circleCenter sc tanSC r               -- arc center
+        let cs := o + Vec3.rotateXY (signOf φ) (sc - o) -- arc end = exit spiral start
+        let tanCS := Vec3.rotateXY (signOf φ) tanSC     -- tangent at cs
+        let entrySeg := AnySegment.of
+          (Segment.transitionIn (radius := r) (startPt := ts) (startTangent := uIn)
+            (length := Ls))
+        let exitSeg := AnySegment.of
+          (Segment.transitionOut (radius := r) (startPt := cs) (startTangent := tanCS)
+            (length := Ls))
+        let pieces :=
+          if φ ≤ dp.straightThreshold then #[entrySeg, exitSeg]
+          else #[entrySeg, AnySegment.of (Segment.arc r sc cs tanSC), exitSeg]
+        some { entryPoint := ts, exitPoint := exitSeg.pointAt Ls, pieces := pieces }
 
 /-- Build an `AlignmentPath` from a polyline of PIs.
 
@@ -457,13 +513,13 @@ def buildPath [TrackScalar α] (pts : Array (Vec3 α)) (dp : DesignParams α) : 
         let b := get i
         let c := get (i + 1)
         let budget := dp.legBudget * min (Vec3.dist a b) (Vec3.dist b c)
-        match solveCorner a b c budget dp.straightThreshold with
+        match solveCorner a b c budget dp with
         | none => pure ()
-        | some corner =>
-          acc := acc.push (AnySegment.of (Segment.straight cursor corner.pc))
-          acc := acc.push (AnySegment.of
-            (Segment.arc corner.radius corner.pc corner.pt corner.tangentIn))
-          cursor := corner.pt
+        | some sol =>
+          acc := acc.push (AnySegment.of (Segment.straight cursor sol.entryPoint))
+          for piece in sol.pieces do
+            acc := acc.push piece
+          cursor := sol.exitPoint
       acc := acc.push (AnySegment.of (Segment.straight cursor (get (n - 1))))
       return acc
     ⟨out⟩
