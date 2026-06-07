@@ -51,6 +51,31 @@ def record (h : History σ) (s : σ) : History σ :=
   let newNode : Node σ := { state := s, parent := some h.current, children := #[], active := 0 }
   { nodes := (h.nodes.set! h.current cur').push newNode, current := newIdx }
 
+/-- Replace the current node's state in place, without creating a new node. Used for
+    continuous edits (e.g. dragging a point) where every intermediate frame would
+    otherwise become its own undo step; record once at the start, then update here. -/
+def setCurrent (h : History σ) (s : σ) : History σ :=
+  { h with nodes := h.nodes.set! h.current { curNode h with state := s } }
+
+/-- Discard the current node if it is the newest leaf and move back to its parent.
+    This is for edits that were recorded speculatively and then canceled before they
+    became real user-visible history. -/
+def discardCurrentLeaf (h : History σ) : History σ :=
+  let cur := curNode h
+  match cur.parent with
+  | none => h
+  | some p =>
+      let parent := h.nodes[p]!
+      let lastChild := parent.children[parent.children.size - 1]?
+      if cur.children.size = 0 && h.current + 1 = h.nodes.size && lastChild == some h.current then
+        let oldChildCount := parent.children.size
+        let parent' :=
+          { parent with
+            children := parent.children.pop
+            active := if oldChildCount ≤ 1 then 0 else min parent.active (oldChildCount - 2) }
+        { nodes := (h.nodes.set! p parent').pop, current := p }
+      else h
+
 /-- Move the cursor to the parent, if any. Child/active metadata is left intact so a
     following `redo` returns to the same place. -/
 def undo (h : History σ) : History σ :=

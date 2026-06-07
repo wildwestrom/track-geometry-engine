@@ -20,9 +20,6 @@
         legacyPackages = pkgs;
         devShell = pkgs.mkShell {
           packages = [
-            # Build tools
-            pkgs.gnuplot
-
             # C
             pkgs.clang-tools
             pkgs.pkg-config

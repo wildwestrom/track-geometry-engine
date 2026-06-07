@@ -20,11 +20,9 @@ TrackGeometry.lean        Top-level module (imports everything below)
 TrackGeometry/
   Lib.lean        ← START HERE. Core: TrackScalar, Vec3, Segment, clothoid, PI builder (buildPath), RFloat instance.
   Real.lean         The exact ℝ instance of TrackScalar (Mathlib).
-  GnuPlot.lean      Sample alignments → CSV + gnuplot script generation.
   History.lean      Generic undo/redo *tree* (used by the UI).
   Raylib.lean       Generated Raylib FFI bindings (do not edit; see `lake build raylibBindings`).
 Main.lean           Interactive raylib UI (exe `track`), written in Lean.
-scripts/dump_csv.lean   Headless demo: writes example CSVs + plot.gnuplot.
 ffi/raylib_shims.c      Generated C FFI shim (the only C in the project).
 vendor/raylib/          Vendored raylib.
 	tools/rlparser/rlparser.c    FFI shim generator. Edit this file if you need new bindings from raylib not yet present. **Do not** hand-edit the auto generated `raylib_shims.c` or `Raylib.lean`
@@ -35,14 +33,7 @@ lakefile.lean, flake.nix   Build config.
 
 Enter the dev shell first (Nix + direnv): `direnv allow`, or `nix develop`.
 
-### Headless: generate plots
-
-```shell
-lake env lean --run scripts/dump_csv.lean   # writes scripts/example*.csv + plot.gnuplot
-gnuplot --persist scripts/plot.gnuplot      # view the alignments
-```
-
-### Interactive UI
+Most likely this project is using Jujutsu (`jj`) for version control. Instead of git, use `jj` whenever possible.
 
 ```shell
 lake exe track             # build vendored raylib + Lean exe `track`, then launch the window
@@ -61,12 +52,19 @@ resolves the Lean module graph before custom targets run); regenerate the
 bindings by hand only after bumping the vendored raylib.
 
 UI controls:
-- **left-click** place PI
-- **right-click / C** clear
+- **F1** instruction mode with all keybindings
+- **F3** toggle FPS
+- **left-click** place / continue line
+- **endpoint click** resume building from that end
+- **drag point** move a PI
+- **drag curve end** resize that corner
+- **L** cycle an interior PI through short / left-loop / right-loop winding
+- **right-click / Esc** finish or cancel active line
 - **scroll** zoom
 - **middle-drag** pan
 - **Ctrl+Z** undo
 - **Ctrl+Shift+Z** redo
+- **1 / 2** switch segment-type / speed view
 - **[ ]** switch redo branch. The history tree is drawn top-right.
 
 ## Where to look
@@ -75,5 +73,3 @@ UI controls:
 - How a curve is sampled → `clothoidPoint`, `Segment.pointAt`, `AlignmentPath.pointAt`.
 - How corners become arcs → `solveCorner`, `buildPath`.
 - How the UI uses it → `Main.lean` (`step` calls `buildPath` + `pointAt`).
-- Worked examples → `scripts/dump_csv.lean`.
-- 
