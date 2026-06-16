@@ -47,8 +47,6 @@ def fmtG (x : Float) : String :=
 def FONT : UInt32 := 8
 def MAX_PI : Nat := 512
 def CURVE_SAMPLES : Nat := 400
-def MIN_ZOOM : Float := 0.015625
-def MAX_ZOOM : Float := 64.0
 /-- Snap radius, in screen pixels, for grabbing a line endpoint. Converted to
     world units per frame (`SNAP_PX / zoom`) so it's zoom-independent. -/
 def SNAP_PX : Float := 20.0
@@ -89,9 +87,15 @@ def designParams : DesignParams RFloat :=
 /-! ### Speed view: per-segment operating speed and a green→red colour ramp. -/
 
 def MPS_TO_KMH : Float := 3.6
-/-- Design-speed ceiling, as a raw `Float` (the green end of the speed ramp). -/
+/-- Design-speed ceiling, as a raw `Float`. -/
 def designSpeedF : Float := designParams.maxDesignSpeed.val
 def aMaxF : Float := designParams.maxLateralAccel.val
+
+/-- Speed-view colour-ramp endpoints (m/s), an absolute scale independent of the
+    route. Anything at or below `SPEED_RAMP_MIN` is red; at or above `SPEED_RAMP_MAX`
+    is green. Constants for now; can be made configurable later. -/
+def SPEED_RAMP_MIN : Float := 30.0  / MPS_TO_KMH   -- 30 km/h
+def SPEED_RAMP_MAX : Float := 300.0 / MPS_TO_KMH   -- 300 km/h
 
 /-- Operating speed (scene-units/s) a piece is designed for: `min(designSpeed,
     √(a_max·|R|))` for curved pieces (radius read straight off the segment), and the
@@ -122,6 +126,66 @@ def speedColor (minS maxS s : Float) : Color :=
       (230.0 - 190.0 * u, 200.0, 40.0)
   Color.mk (chan r) (chan g) (chan b) 255
 
+/-! ## 3D math, vectors, and the orbit camera -/
+
+def CAM_FOVY : Float := 60.0
+def MIN_DIST : Float := 5.0
+/-- Max orbit distance, kept under raylib's far-clip (`RL_CULL_DISTANCE_FAR`) so the
+    target plane never falls outside the view frustum when zoomed all the way out. -/
+def MAX_DIST : Float := 9000.0
+
+/-! ### Small 3D vector helpers (raylib `Vector3`, world space). -/
+@[inline] def sub3 (a b : Vector3) : Vector3 := ⟨a.x - b.x, a.y - b.y, a.z - b.z⟩
+@[inline] def add3 (a b : Vector3) : Vector3 := ⟨a.x + b.x, a.y + b.y, a.z + b.z⟩
+@[inline] def scale3 (s : Float) (v : Vector3) : Vector3 := ⟨s * v.x, s * v.y, s * v.z⟩
+@[inline] def dot3 (a b : Vector3) : Float := a.x * b.x + a.y * b.y + a.z * b.z
+@[inline] def cross3 (a b : Vector3) : Vector3 :=
+  ⟨a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x⟩
+@[inline] def len3 (v : Vector3) : Float := Float.sqrt (dot3 v v)
+@[inline] def norm3 (v : Vector3) : Vector3 :=
+  let l := len3 v; if l < 1e-12 then v else scale3 (1.0 / l) v
+
+/-- raylib `Vector3` → geometry `Vec3 RFloat`. -/
+@[inline] def toGeo (p : Vector3) : Vec3 RFloat := Vec3.mk (rf p.x) (rf p.y) (rf p.z)
+/-- geometry `Vec3 RFloat` → raylib `Vector3`. -/
+@[inline] def ofGeo (p : Vec3 RFloat) : Vector3 := ⟨(p 0).val, (p 1).val, (p 2).val⟩
+
+/-- Orbit camera state: a target point with a spherical eye offset. World-up is +z
+    (elevation), so `yaw` swings the eye around the vertical and `pitch` raises/lowers it. -/
+structure OrbitCam where
+  target   : Vector3
+  distance : Float
+  yaw      : Float
+  pitch    : Float
+  deriving Inhabited
+
+/-- Unit eye-from-target direction for the current yaw/pitch. -/
+@[inline] def OrbitCam.dir (o : OrbitCam) : Vector3 :=
+  let cp := Float.cos o.pitch
+  ⟨cp * Float.cos o.yaw, cp * Float.sin o.yaw, Float.sin o.pitch⟩
+
+/-- The per-frame raylib `Camera3D` (perspective, world-up = +z). -/
+def OrbitCam.toCamera3D (o : OrbitCam) : Camera3D :=
+  { position := add3 o.target (scale3 o.distance o.dir),
+    target := o.target, up := ⟨0.0, 0.0, 1.0⟩,
+    fovy := CAM_FOVY, projection := CAMERA_PERSPECTIVE }
+
+/-- Intersect a ray with the horizontal plane `z = planeZ`; `none` if parallel to it or
+    the hit lies behind the ray origin. -/
+def rayPlaneZ (ray : Ray) (planeZ : Float) : Option Vector3 :=
+  let dz := ray.direction.z
+  if dz == 0.0 then none
+  else
+    let t := (planeZ - ray.position.z) / dz
+    if t < 0.0 then none
+    else some ⟨ray.position.x + t * ray.direction.x, ray.position.y + t * ray.direction.y, planeZ⟩
+
+/-- World point under the cursor on the horizontal plane `z = planeZ` (the ground by
+    default). `none` when the cursor ray misses the plane. -/
+def screenToGround (mouse : Vector2) (cam : Camera3D) (planeZ : Float := 0.0) :
+    IO (Option Vector3) := do
+  return rayPlaneZ (← getScreenToWorldRay mouse cam) planeZ
+
 /-! ## UI state -/
 
 /-- One point of intersection: its world position, an optional per-corner tangent
@@ -130,7 +194,7 @@ def speedColor (minS maxS s : Float) : Color :=
     `none` means the automatic `legBudget`-derived size. The override travels with its
     corner across inserts, prepends, and undo (it's attached to the point, not an index). -/
 structure PI where
-  pos     : Vector2
+  pos     : Vector3
   budget  : Option Float := none
   winding : Int := 0
   deriving Inhabited
@@ -141,11 +205,14 @@ structure PI where
 abbrev Line := Array PI
 
 /-- One sampled point on a rendered alignment. `segmentColor` is the segment-type
-    colour used by view 1; `speed` feeds the speed ramp in view 2. -/
+    colour used by view 1; `speed` feeds the speed ramp in view 2. `label`, set only on
+    the sample at a straight's or arc's midpoint, is that section's speed restriction
+    (m/s) drawn as a number in the speed view. -/
 structure CurveSample where
-  pos          : Vector2
+  pos          : Vector3
   segmentColor : Color
   speed        : Float
+  label        : Option Float := none
   deriving Inhabited
 
 /-- The line-building finite state machine.
@@ -160,37 +227,54 @@ structure CurveSample where
       Escape / right-click discards the one-point draft as if it was never started;
       otherwise it just returns to `idle`.
     * `pressed lineIdx ptIdx press` — the mouse went down on point `ptIdx` of line
-      `lineIdx` (snapped) at world position `press`; we don't yet know if this is a
-      click or a drag. Releasing without moving is a click; moving past a threshold
-      starts a drag.
-    * `dragging lineIdx ptIdx` — point `ptIdx` of line `lineIdx` follows the cursor
-      until the button is released.
+      `lineIdx` (snapped); `press` is the cursor's *screen* position at that moment. We
+      don't yet know if this is a click or a drag. Releasing without moving is a click;
+      moving past a threshold (in screen pixels) starts a drag.
+    * `dragging lineIdx ptIdx grab` — point `ptIdx` of line `lineIdx` follows the cursor
+      until the button is released. `grab` is the world offset between the point and the
+      cursor's ground hit captured when the drag began, so the point tracks the *change* in
+      cursor position rather than snapping under it.
     * `bracketPressed lineIdx piIdx isEntry press` — the mouse went down on a green
       curve-end bracket (the entry bracket when `isEntry`, else the exit) of the curve
       at interior PI `piIdx`; like `pressed`, a release without movement is a no-op and
       moving past the threshold begins a resize.
     * `resizing lineIdx piIdx isEntry` — dragging that bracket along its leg, growing or
-      shrinking the curve by overriding PI `piIdx`'s tangent budget. -/
+      shrinking the curve by overriding PI `piIdx`'s tangent budget.
+    * `axisPressed lineIdx ptIdx axis press` — the mouse went down on one of PI `ptIdx`'s
+      translate-gizmo shafts (`axis` is 0=X, 1=Y, 2=Z); like `pressed`, a release without
+      movement is a no-op and moving past the threshold begins an axis-constrained drag.
+    * `axisDragging lineIdx ptIdx axis grab` — dragging PI `ptIdx` along world `axis` only,
+      tracking the closest point between the mouse ray and the axis line through the PI.
+      `grab` is the same change-tracking offset as `dragging` (here along the axis). -/
 inductive Mode
   | idle
   | building (lineIdx : Nat) (atEnd provisional recorded : Bool)
   | pressed (lineIdx ptIdx : Nat) (press : Vector2)
-  | dragging (lineIdx ptIdx : Nat)
+  | dragging (lineIdx ptIdx : Nat) (grab : Vector3)
   | bracketPressed (lineIdx piIdx : Nat) (isEntry : Bool) (press : Vector2)
   | resizing (lineIdx piIdx : Nat) (isEntry : Bool)
+  | axisPressed (lineIdx ptIdx axis : Nat) (press : Vector2)
+  | axisDragging (lineIdx ptIdx axis : Nat) (grab : Vector3)
+
+/-- The PI at `lineIdx`/`ptIdx`, or `none` if either index is out of range. The one place
+    bounds are checked when reaching into the (line, point) grid. -/
+@[inline] def getPI? (lines : Array Line) (lineIdx ptIdx : Nat) : Option PI :=
+  if h : lineIdx < lines.size then lines[lineIdx][ptIdx]? else none
+
+/-- Whether `lineIdx`/`ptIdx` references an existing PI. -/
+@[inline] def validPt (lines : Array Line) (lineIdx ptIdx : Nat) : Bool :=
+  (getPI? lines lineIdx ptIdx).isSome
 
 /-- Drop back to `idle` if a referenced line/point no longer exists (e.g. after an
     undo removed the line). Indices are otherwise stable across history moves. -/
 def Mode.revalidate : Mode → Array Line → Mode
-  | .building idx e p r, lines => if idx < lines.size then .building idx e p r else .idle
-  | .pressed l p press, lines =>
-      if h : l < lines.size then (if p < lines[l].size then .pressed l p press else .idle) else .idle
-  | .dragging l p, lines =>
-      if h : l < lines.size then (if p < lines[l].size then .dragging l p else .idle) else .idle
-  | .bracketPressed l p e press, lines =>
-      if h : l < lines.size then (if p < lines[l].size then .bracketPressed l p e press else .idle) else .idle
-  | .resizing l p e, lines =>
-      if h : l < lines.size then (if p < lines[l].size then .resizing l p e else .idle) else .idle
+  | .building idx e p r, lines    => if idx < lines.size then .building idx e p r else .idle
+  | .pressed l p press, lines     => if validPt lines l p then .pressed l p press else .idle
+  | .dragging l p g, lines        => if validPt lines l p then .dragging l p g else .idle
+  | .bracketPressed l p e press, lines => if validPt lines l p then .bracketPressed l p e press else .idle
+  | .resizing l p e, lines        => if validPt lines l p then .resizing l p e else .idle
+  | .axisPressed l p ax press, lines   => if validPt lines l p then .axisPressed l p ax press else .idle
+  | .axisDragging l p ax g, lines => if validPt lines l p then .axisDragging l p ax g else .idle
   | .idle, _ => .idle
 
 /-- An in-flight background resample. Every expensive `sampleCurve` runs here, off the
@@ -205,7 +289,7 @@ inductive PendingResample where
   | full (task : Task (Array (Array CurveSample)))
 
 structure UI where
-  camera : Camera2D
+  camera : OrbitCam
   /-- Undo/redo *tree* of the placed lines (each a polyline of PIs in world
       coordinates). The current node's state is the live set of lines. -/
   hist : History.History (Array Line)
@@ -240,12 +324,12 @@ structure UI where
 
 /-- Add a PI at either end of an existing line. -/
 @[inline] def addPIAtEnd! (lines : Array Line) (lineIdx : Nat) (atEnd : Bool)
-    (pos : Vector2) : Array Line :=
+    (pos : Vector3) : Array Line :=
   updateLine! lines lineIdx fun line =>
     if atEnd then line.push { pos := pos } else #[({ pos := pos } : PI)] ++ line
 
 /-- Move one PI inside an existing line. The caller must have validated both indices. -/
-@[inline] def setPIPos! (lines : Array Line) (lineIdx ptIdx : Nat) (pos : Vector2) :
+@[inline] def setPIPos! (lines : Array Line) (lineIdx ptIdx : Nat) (pos : Vector3) :
     Array Line :=
   updateLine! lines lineIdx fun line =>
     line.set! ptIdx { line[ptIdx]! with pos := pos }
@@ -265,47 +349,24 @@ structure UI where
 
 /-! ## HUD helpers (screen space) -/
 
-/-- Crosshair at the cursor plus a world-coordinate readout. -/
-def drawMouse (camera : Camera2D) : IO Unit := do
-  let mp ← getMousePosition
-  let wp ← getScreenToWorld2D mp camera
-  let dpi ← getWindowScaleDPI
-  let sp : Vector2 := ⟨mp.x / dpi.x, mp.y / dpi.y⟩
+/-- Crosshair at the cursor plus the ground-plane coordinate under it. The cursor is
+    already in logical screen space, the same space 2D drawing uses, so no scaling. -/
+def drawMouse (cam : Camera3D) (mouse : Vector2) (showCoords : Bool := true) : IO Unit := do
+  let sp := mouse
   let size := 6.0
   drawLine (f2u (sp.x - size)) (f2u sp.y) (f2u (sp.x + size - 1.0)) (f2u sp.y) FG
   drawLine (f2u sp.x) (f2u (sp.y - size)) (f2u sp.x) (f2u (sp.y + size - 1.0)) FG
-  drawText s!"({fmtFixed wp.x 1},{fmtFixed wp.y 1})" (f2u (sp.x + 1.0)) (f2u (sp.y + 1.0)) FONT FG
-
-/-- Screen-space scale bar (bottom-right): a "nice" 1/2/5×10ⁿ world distance. -/
-def drawScaleBar (camera : Camera2D) (dpi : Vector2) : IO Unit := do
-  let targetPx := 96.0
-  let pxPerWorld := camera.zoom / dpi.x
-  let rawWorld := targetPx / pxPerWorld
-  let e := Float.floor (Float.log rawWorld / Float.log 10.0)
-  let p10 := Float.exp (e * Float.log 10.0)
-  let f := rawWorld / p10
-  let nf := if f < 1.5 then 1.0 else if f < 3.5 then 2.0 else if f < 7.5 then 5.0 else 10.0
-  let niceWorld := nf * p10
-  let barPx := niceWorld * pxPerWorld
-  let label := s!"{fmtG niceWorld} u"
-  let tw := Float.ofNat (← measureText label FONT).toNat
-  let sw := Float.ofNat (← getScreenWidth).toNat
-  let sh := Float.ofNat (← getScreenHeight).toNat
-  let x1 := sw - 8.0
-  let x0 := x1 - barPx
-  let y := sh - 12.0
-  let tick := 4.0
-  drawText label (f2u (x0 - tw - 6.0)) (f2u (y - Float.ofNat FONT.toNat / 2.0)) FONT FG
-  drawLine (f2u x0) (f2u y) (f2u x1) (f2u y) FG
-  drawLine (f2u x0) (f2u (y - tick)) (f2u x0) (f2u y) FG
-  drawLine (f2u x1) (f2u (y - tick)) (f2u x1) (f2u y) FG
+  if showCoords then
+    match ← screenToGround mouse cam with
+    | some g => drawText s!"({fmtFixed g.x 1},{fmtFixed g.y 1})" (f2u (sp.x + 1.0)) (f2u (sp.y + 1.0)) FONT FG
+    | none   => pure ()
 
 /-- Modal help screen for all interactive controls. -/
 def drawInstructions (showFPS : Bool) (view : Nat) : IO Unit := do
   let sw := Float.ofNat (← getScreenWidth).toNat
   let sh := Float.ofNat (← getScreenHeight).toNat
   let panelW := min (sw - 48.0) 560.0
-  let panelH := min (sh - 48.0) 310.0
+  let panelH := min (sh - 48.0) 330.0
   let x := max 12.0 ((sw - panelW) / 2.0)
   let y := max 12.0 ((sh - panelH) / 2.0)
   let bg := Color.mk 0 0 0 232
@@ -317,12 +378,14 @@ def drawInstructions (showFPS : Bool) (view : Nat) : IO Unit := do
     ("F3", s!"toggle FPS ({if showFPS then "shown" else "hidden"})"),
     ("Left click", "place a PI, continue a line, or grab a point"),
     ("Endpoint click", "resume building from that end"),
-    ("Drag point", "move a PI"),
+    ("Drag point", "move a PI on the ground plane"),
+    ("Drag X/Y/Z handle", "move a PI along one axis (Z = elevation)"),
     ("Drag curve end", "resize that corner"),
     ("L", "cycle selected corner winding"),
     ("Right click / Esc", "finish or cancel the active line"),
-    ("Mouse wheel", "zoom toward the cursor"),
-    ("Middle drag", "pan"),
+    ("Mouse wheel", "dolly (zoom) the camera"),
+    ("Middle drag", "orbit the camera"),
+    ("Shift + Middle drag", "pan the camera"),
     ("Ctrl+Z", "undo"),
     ("Ctrl+Shift+Z", "redo"),
     ("[ / ]", "switch redo branch"),
@@ -422,40 +485,35 @@ def drawHistory (h : History.History (Array Line)) : IO Unit := do
 
 /-! ## Snapping & curve sampling -/
 
-/-- Squared world distance between two points (avoids a `sqrt`). -/
+/-- Squared distance between two screen points (avoids a `sqrt`). -/
 @[inline] def dist2 (a b : Vector2) : Float :=
   let dx := a.x - b.x; let dy := a.y - b.y; dx * dx + dy * dy
-
-/-! ### Small 2D vector helpers (world space). -/
-@[inline] def sub2 (a b : Vector2) : Vector2 := ⟨a.x - b.x, a.y - b.y⟩
-@[inline] def add2 (a b : Vector2) : Vector2 := ⟨a.x + b.x, a.y + b.y⟩
-@[inline] def scale2 (s : Float) (v : Vector2) : Vector2 := ⟨s * v.x, s * v.y⟩
-@[inline] def dot2 (a b : Vector2) : Float := a.x * b.x + a.y * b.y
-/-- Rotate 90° counterclockwise. -/
-@[inline] def perp2 (v : Vector2) : Vector2 := ⟨-v.y, v.x⟩
-@[inline] def v2ToV3 (p : Vector2) : Vec3 RFloat := Vec3.mk (rf p.x) (rf p.y) (rf 0.0)
-@[inline] def v3ToV2 (p : Vec3 RFloat) : Vector2 := ⟨(p 0).val, (p 1).val⟩
 
 /-- A reference to a single PI the cursor can grab to drag: which line, which index
     within that line, and its world position. -/
 structure PointRef where
   lineIdx : Nat
   ptIdx   : Nat
-  pos     : Vector2
+  pos     : Vector3
 
-/-- The PI nearest `target` within `thresh` world units, across every point of every
-    line, if any. Used to grab a point for dragging. -/
-def nearestPoint (lines : Array Line) (target : Vector2) (thresh : Float) : Option PointRef := Id.run do
+/-- The PI nearest the cursor within `thresh` *screen pixels*, across every point of every
+    line. Projects each PI to the screen and compares pixel distance, so snapping is
+    uniform regardless of depth; PIs behind the camera are skipped. -/
+def nearestPoint (lines : Array Line) (cam : Camera3D) (mouse : Vector2) (thresh : Float) :
+    IO (Option PointRef) := do
   let mut best : Option PointRef := none
   let mut bestD := thresh * thresh
+  let fwd := sub3 cam.target cam.position
   for h : i in [0:lines.size] do
     let line := lines[i]
     for h : j in [0:line.size] do
       let p := line[j].pos
-      let d := dist2 p target
-      if d ≤ bestD then
-        bestD := d
-        best := some { lineIdx := i, ptIdx := j, pos := p }
+      if dot3 (sub3 p cam.position) fwd > 0.0 then
+        let sp ← getWorldToScreen p cam
+        let d := dist2 sp mouse
+        if d ≤ bestD then
+          bestD := d
+          best := some { lineIdx := i, ptIdx := j, pos := p }
   return best
 
 /-- Sample one line's smooth alignment into a polyline for drawing (empty if the
@@ -463,21 +521,26 @@ def nearestPoint (lines : Array Line) (target : Vector2) (thresh : Float) : Opti
 def sampleCurve (line : Line) : Array CurveSample := Id.run do
   let mut out := #[]
   if line.size ≥ 2 then
-    let pts := line.map fun q => Vec3.mk (rf q.pos.x) (rf q.pos.y) (rf 0.0)
+    let pts := line.map fun q => toGeo q.pos
     let path := buildPath pts designParams (line.map fun q => q.budget.map rf) (line.map (·.winding))
     let total := path.length |>.val
     if total > 0.0 then
-      -- Sample each piece on its own so points carry their segment's colour and
-      -- operating speed; a piece gets samples proportional to its share of the total.
       for e in path.segments do
-        let col := segColor e
-        let spd := segSpeed e
-        let segLen := e.length.val
-        let nsamp := max 2 (Float.ceil (Float.ofNat CURVE_SAMPLES * segLen / total)).toUInt64.toNat
-        for j in [0:nsamp + 1] do
-          let t := segLen * Float.ofNat j / Float.ofNat nsamp
+        let color := segColor e
+        let speed := segSpeed e
+        let segment_len := e.length.val
+        let num_of_samples := max 2 (Float.ceil (Float.ofNat CURVE_SAMPLES * segment_len / total)).toUInt64.toNat
+        -- Straights and arcs carry a speed-restriction label at their midpoint sample;
+        -- transitions share their corner's arc speed, so we don't double-label them.
+        let labeled := match e with
+          | ⟨_, _, .straight ..⟩ | ⟨_, _, .arc ..⟩ => true
+          | _                                      => false
+        let midSample := num_of_samples / 2
+        for j in [0:num_of_samples + 1] do
+          let t := segment_len * Float.ofNat j / Float.ofNat num_of_samples
           let q := e.pointAt (rf t)
-          out := out.push { pos := ⟨(q 0).val, (q 1).val⟩, segmentColor := col, speed := spd }
+          let label := if labeled && j == midSample then some speed else none
+          out := out.push { pos := ofGeo q, segmentColor := color, speed := speed, label := label }
   return out
 
 /-! ## Curve-end control points (green brackets)
@@ -493,10 +556,10 @@ actually drawn there. -/
 structure CurveEnd where
   lineIdx : Nat
   piIdx   : Nat
-  entry   : Vector2
-  exit    : Vector2
-  uIn     : Vector2
-  uOut    : Vector2
+  entry   : Vector3
+  exit    : Vector3
+  uIn     : Vector3
+  uOut    : Vector3
 
 /-- Curve-end data for interior PI `i` of `line` (index `li`), or `none` when that
     corner is degenerate or near-straight — the same condition under which `solveCorner`
@@ -507,15 +570,15 @@ def cornerEnd (li : Nat) (line : Line) (i : Nat) : Option CurveEnd := Id.run do
   let a := line[i-1]!.pos
   let b := line[i]!.pos
   let c := line[i+1]!.pos
-  match cornerLayout (v2ToV3 a) (v2ToV3 b) (v2ToV3 c) designParams
+  match cornerLayout (toGeo a) (toGeo b) (toGeo c) designParams
       (line[i]!.budget.map rf) line[i]!.winding with
   | none => return none
   | some layout =>
       return some {
         lineIdx := li, piIdx := i,
-        entry := v3ToV2 layout.entryPoint,
-        exit  := v3ToV2 layout.exitPoint,
-        uIn := v3ToV2 layout.uIn, uOut := v3ToV2 layout.uOut }
+        entry := ofGeo layout.entryPoint,
+        exit  := ofGeo layout.exitPoint,
+        uIn := ofGeo layout.uIn, uOut := ofGeo layout.uOut }
 
 /-- Every curve endpoint across every line. -/
 def curveEnds (lines : Array Line) : Array CurveEnd := Id.run do
@@ -530,17 +593,23 @@ def curveEnds (lines : Array Line) : Array CurveEnd := Id.run do
 def curveEndAt (lines : Array Line) (li pi : Nat) : Option CurveEnd :=
   if h : li < lines.size then cornerEnd li lines[li] pi else none
 
-/-- The curve endpoint nearest `target` within `thresh` world units: `(lineIdx, piIdx,
-    isEntry, pos)`. Used to highlight brackets on hover and to grab one for resizing. -/
-def nearestCurveEnd (lines : Array Line) (target : Vector2) (thresh : Float) :
-    Option (Nat × Nat × Bool × Vector2) := Id.run do
-  let mut best : Option (Nat × Nat × Bool × Vector2) := none
+/-- The curve endpoint nearest the cursor within `thresh` *screen pixels*: `(lineIdx,
+    piIdx, isEntry, pos)`. Used to highlight markers on hover and to grab one for
+    resizing. Endpoints behind the camera are skipped. -/
+def nearestCurveEnd (lines : Array Line) (cam : Camera3D) (mouse : Vector2) (thresh : Float) :
+    IO (Option (Nat × Nat × Bool × Vector3)) := do
+  let mut best : Option (Nat × Nat × Bool × Vector3) := none
   let mut bestD := thresh * thresh
+  let fwd := sub3 cam.target cam.position
   for ce in curveEnds lines do
-    let dE := dist2 ce.entry target
-    if dE ≤ bestD then bestD := dE; best := some (ce.lineIdx, ce.piIdx, true, ce.entry)
-    let dX := dist2 ce.exit target
-    if dX ≤ bestD then bestD := dX; best := some (ce.lineIdx, ce.piIdx, false, ce.exit)
+    if dot3 (sub3 ce.entry cam.position) fwd > 0.0 then
+      let sp ← getWorldToScreen ce.entry cam
+      let dE := dist2 sp mouse
+      if dE ≤ bestD then bestD := dE; best := some (ce.lineIdx, ce.piIdx, true, ce.entry)
+    if dot3 (sub3 ce.exit cam.position) fwd > 0.0 then
+      let sp ← getWorldToScreen ce.exit cam
+      let dX := dist2 sp mouse
+      if dX ≤ bestD then bestD := dX; best := some (ce.lineIdx, ce.piIdx, false, ce.exit)
   return best
 
 /-- What the cursor is close enough to interact with. -/
@@ -549,57 +618,187 @@ inductive HitTarget where
   | curveEnd (lineIdx piIdx : Nat) (isEntry : Bool)
 
 /-- Snap to the nearest interactive target, preferring the closer of a PI and a
-    curve-end bracket when both are under the cursor. -/
-def hitTargetAt (lines : Array Line) (target : Vector2) (thresh : Float) : Option HitTarget :=
-  let pPI := nearestPoint lines target thresh
-  let pCE := nearestCurveEnd lines target thresh
-  let useCE := match pPI, pCE with
-    | some pr, some (_, _, _, cePos) => decide (dist2 cePos target < dist2 pr.pos target)
-    | none, some _ => true
-    | _, _ => false
+    curve-end marker (in screen pixels) when both are under the cursor. -/
+def hitTargetAt (lines : Array Line) (cam : Camera3D) (mouse : Vector2) (thresh : Float) :
+    IO (Option HitTarget) := do
+  let pPI ← nearestPoint lines cam mouse thresh
+  let pCE ← nearestCurveEnd lines cam mouse thresh
+  let useCE ← match pPI, pCE with
+    | some pr, some (_, _, _, cePos) => do
+        let spP ← getWorldToScreen pr.pos cam
+        let spC ← getWorldToScreen cePos cam
+        pure (decide (dist2 spC mouse < dist2 spP mouse))
+    | none, some _ => pure true
+    | _, _ => pure false
   match (if useCE then none else pPI), (if useCE then pCE else none) with
-  | some pr, _ => some (.point pr)
-  | _, some (l, p, isEntry, _) => some (.curveEnd l p isEntry)
-  | none, none => none
+  | some pr, _ => return some (.point pr)
+  | _, some (l, p, isEntry, _) => return some (.curveEnd l p isEntry)
+  | none, none => return none
 
-/-- Bright lime for the curve-end brackets. -/
+/-- Bright lime for the curve-end markers. -/
 def BRACKET_COLOR : Color := GREEN
 
-/-- Draw a green "[" bracket hugging a curve end. `anchor` is the curve endpoint and
-    `tangent` is the unit direction *into* the curve, so the ticks point at the arc.
-    Sized in screen pixels via `/ zoom`; one thick linear-spline polyline. -/
-def drawBracket (anchor tangent : Vector2) (zoom : Float) : IO Unit := do
-  let n := perp2 tangent
-  let h := 12.0 / zoom
-  let k := 8.0 / zoom
-  let p1 := add2 anchor (scale2 h n)
-  let p2 := sub2 anchor (scale2 h n)
-  drawSplineLinear #[add2 p1 (scale2 k tangent), p1, p2, add2 p2 (scale2 k tangent)]
-    (3.0 / zoom) BRACKET_COLOR
+/-- Draw both grab markers of a corner (entry and exit) as small spheres, sized relative
+    to the camera distance so they stay roughly constant on screen. -/
+def drawCurveBrackets (ce : CurveEnd) (dist : Float) : IO Unit := do
+  let r := dist * 0.004
+  drawSphere ce.entry r BRACKET_COLOR
+  drawSphere ce.exit  r BRACKET_COLOR
 
-/-- Draw both brackets of a corner (entry faces along `uIn`, exit back along `-uOut`). -/
-def drawCurveBrackets (ce : CurveEnd) (zoom : Float) : IO Unit := do
-  drawBracket ce.entry ce.uIn zoom
-  drawBracket ce.exit (scale2 (-1.0) ce.uOut) zoom
+/-- Adaptive reference grid on the ground plane (`z = 0`), drawn with 3D lines (raylib's
+    `drawGrid` lies in the XZ plane). It follows the camera target in XY and sizes its
+    cells to the camera distance — rounded to a "nice" 1/2/5×10ⁿ world spacing — so a
+    constant number of lines always fills the view at any zoom. Lines snap to multiples of
+    the spacing so they don't swim while panning. -/
+def drawGroundGrid (center : Vector3) (dist : Float) (col : Color) : IO Unit := do
+  -- nice cell size: aim for ~`dist/6` world units per cell, rounded to 1/2/5×10ⁿ
+  let raw := dist / 6.0
+  let p10 := Float.exp (Float.floor (Float.log raw / Float.log 10.0) * Float.log 10.0)
+  let f := raw / p10
+  let step := (if f < 1.5 then 1.0 else if f < 3.5 then 2.0 else if f < 7.5 then 5.0 else 10.0) * p10
+  let n := 20                                  -- 2n+1 lines each way → fixed line budget
+  let half := step * Float.ofNat n
+  let cx := Float.floor (center.x / step) * step   -- snap origin to the grid
+  let cy := Float.floor (center.y / step) * step
+  for i in [0:2 * n + 1] do
+    let off := Float.ofNat i * step - half
+    drawLine3D ⟨cx + off, cy - half, 0.0⟩ ⟨cx + off, cy + half, 0.0⟩ col   -- ∥ Y
+    drawLine3D ⟨cx - half, cy + off, 0.0⟩ ⟨cx + half, cy + off, 0.0⟩ col   -- ∥ X
+
+/-- A horizontal ring (in the plane `z = center.z`) as a closed 3D polyline. Used to
+    mark a PI whose corner winds the long way around. -/
+def drawRing3D (center : Vector3) (radius : Float) (col : Color) : IO Unit := do
+  let n := 24
+  for i in [0:n] do
+    let a0 := 2.0 * Raylib.PI * Float.ofNat i / Float.ofNat n
+    let a1 := 2.0 * Raylib.PI * Float.ofNat (i + 1) / Float.ofNat n
+    drawLine3D ⟨center.x + radius * Float.cos a0, center.y + radius * Float.sin a0, center.z⟩
+               ⟨center.x + radius * Float.cos a1, center.y + radius * Float.sin a1, center.z⟩ col
+
+/-! ## Translate gizmo (X/Y/Z axis handles)
+
+A Blender-style three-axis handle that appears on the PI under the cursor. Its shafts are
+sized by camera distance to a roughly constant screen length; grabbing one constrains the
+drag to that world axis, which is the only way to change a PI's elevation (Z) — plain point
+drags slide along the ground plane. -/
+
+/-- World-space shaft length as a fraction of the camera distance (≈ constant on screen). -/
+def GIZMO_LEN_FACTOR : Float := 0.07
+/-- Screen-pixel tolerance for grabbing an axis shaft. -/
+def AXIS_GRAB_PX : Float := 9.0
+/-- Screen-pixel radius around a PI within which its gizmo is shown / armed. Larger than the
+    shaft length so the whole gizmo stays interactive once the cursor is near the PI. -/
+def GIZMO_PX : Float := 80.0
+
+/-- The three world axes, indexed 0=X, 1=Y, 2=Z. -/
+def axisDir : Nat → Vector3
+  | 0 => ⟨1.0, 0.0, 0.0⟩
+  | 1 => ⟨0.0, 1.0, 0.0⟩
+  | _ => ⟨0.0, 0.0, 1.0⟩
+/-- Per-axis colour (X red, Y green, Z blue). -/
+def axisColor : Nat → Color
+  | 0 => RED
+  | 1 => GREEN
+  | _ => SKYBLUE
+/-- Highlight tint for the armed/hovered axis. -/
+def AXIS_HL : Color := Color.mk 255 255 140 255
+
+/-- Distance from point `p` to segment `[a,b]`, all in 2D screen space. -/
+def distToSeg (p a b : Vector2) : Float :=
+  let abx := b.x - a.x; let aby := b.y - a.y
+  let len2 := abx * abx + aby * aby
+  let t := if len2 < 1e-9 then 0.0
+           else clampF 0.0 1.0 (((p.x - a.x) * abx + (p.y - a.y) * aby) / len2)
+  let dx := p.x - (a.x + t * abx); let dy := p.y - (a.y + t * aby)
+  Float.sqrt (dx * dx + dy * dy)
+
+/-- The gizmo axis nearest the cursor for the PI at `p`, with its screen-pixel distance:
+    projects each shaft `[p, p + axis·len]` to the screen and measures cursor proximity. -/
+def nearestAxis (p : Vector3) (dist : Float) (cam : Camera3D) (mouse : Vector2) :
+    IO (Option (Nat × Float)) := do
+  let sp ← getWorldToScreen p cam
+  let len := dist * GIZMO_LEN_FACTOR
+  let mut best : Option (Nat × Float) := none
+  for a in [0:3] do
+    let st ← getWorldToScreen (add3 p (scale3 len (axisDir a))) cam
+    let d := distToSeg mouse sp st
+    match best with
+    | some (_, bd) => if d < bd then best := some (a, d)
+    | none         => best := some (a, d)
+  return best
+
+/-- The PI under the cursor (within `GIZMO_PX`), paired with the gizmo axis its shaft is
+    close enough to grab (within `AXIS_GRAB_PX`), if any. `none` when no PI is near. Shared
+    by the hover highlight and the click-to-grab path so both arm the same axis. -/
+def armedAxis (lines : Array Line) (cam : Camera3D) (mouse : Vector2) (dist : Float) :
+    IO (Option (PointRef × Option Nat)) := do
+  match ← nearestPoint lines cam mouse GIZMO_PX with
+  | none    => return none
+  | some pr =>
+      match ← nearestAxis pr.pos dist cam mouse with
+      | some (a, d) => return some (pr, if d ≤ AXIS_GRAB_PX then some a else none)
+      | none        => return some (pr, none)
+
+/-- New world position when dragging PI `p` along world `axis`: the point on the axis line
+    through `p` closest to the cursor's pick ray. `none` when the axis is ~parallel to the
+    view ray (the constraint is then ill-conditioned, so we skip the frame). -/
+def axisDragPos (p : Vector3) (axis : Nat) (cam : Camera3D) (mouse : Vector2) :
+    IO (Option Vector3) := do
+  let ray ← getScreenToWorldRay mouse cam
+  let u := axisDir axis
+  let r := sub3 p ray.position
+  let e := dot3 ray.direction ray.direction
+  let b := dot3 u ray.direction
+  let denom := e - b * b                 -- a = u·u = 1
+  if denom < 1e-9 then return none
+  let s := (b * dot3 ray.direction r - e * dot3 u r) / denom
+  return some (add3 p (scale3 s u))
+
+/-- Draw the three-axis translate gizmo at `p`, sized to the camera distance. `active`
+    (if any) is highlighted; the rest use their axis colours. Each axis is a thin cylinder
+    shaft capped with a cone arrowhead. -/
+def drawGizmo (p : Vector3) (dist : Float) (active : Option Nat) : IO Unit := do
+  let len := dist * GIZMO_LEN_FACTOR
+  let r := dist * 0.0012
+  for a in [0:3] do
+    let u := axisDir a
+    let col := if active == some a then AXIS_HL else axisColor a
+    let neck := add3 p (scale3 (len * 0.8) u)
+    drawCylinderEx p neck r r 8 col
+    drawCylinderEx neck (add3 p (scale3 len u)) (r * 2.8) 0.0 10 col
 
 /-! ## Per-frame helpers -/
 
-/-- Apply camera-only inputs: wheel zoom toward the cursor and middle-drag pan. -/
-def updateCameraFromInput (cam : Camera2D) (enabled : Bool) : IO Camera2D := do
-  let mut cam := cam
+/-- True if either key is currently held (e.g. left or right Shift). -/
+@[inline] def isKeyDownEither (a b : UInt32) : IO Bool :=
+  (· || ·) <$> isKeyDown a <*> isKeyDown b
+
+/-- Apply camera-only inputs: wheel dollies (zooms), middle-drag orbits, and
+    Shift+middle-drag pans the target across the view plane. -/
+def updateCameraFromInput (o : OrbitCam) (enabled : Bool) : IO OrbitCam := do
+  let mut o := o
   let wheel ← getMouseWheelMove
   if enabled && wheel != 0.0 then
-    let mp ← getMousePosition
-    let mw ← getScreenToWorld2D mp cam
-    let z := clampF MIN_ZOOM MAX_ZOOM (Float.exp (Float.log cam.zoom + 0.2 * wheel))
-    cam := { cam with offset := mp, target := mw, zoom := z }
+    o := { o with distance := clampF MIN_DIST MAX_DIST (o.distance * Float.exp (-0.2 * wheel)) }
 
   if enabled && (← isMouseButtonDown MOUSE_BUTTON_MIDDLE) then
     let d ← getMouseDelta
-    let g := -1.0 / cam.zoom
-    cam := { cam with target := ⟨cam.target.x + d.x * g, cam.target.y + d.y * g⟩ }
+    let shift ← isKeyDownEither KEY_LEFT_SHIFT KEY_RIGHT_SHIFT
+    if shift then
+      -- pan: slide the target along the camera's screen-right and screen-up axes,
+      -- scaled by distance so the grab tracks the cursor at any zoom.
+      let fwd := scale3 (-1.0) o.dir
+      let right := norm3 (cross3 fwd ⟨0.0, 0.0, 1.0⟩)
+      let camUp := norm3 (cross3 right fwd)
+      let k := o.distance * 0.001
+      o := { o with target := add3 o.target (add3 (scale3 (-d.x * k) right) (scale3 (d.y * k) camUp)) }
+    else
+      -- orbit: yaw with horizontal motion, pitch with vertical, clamped off the poles
+      -- so world-up never aligns with the view direction.
+      o := { o with yaw := o.yaw - d.x * 0.005,
+                    pitch := clampF (-1.4) 1.4 (o.pitch + d.y * 0.005) }
 
-  return cam
+  return o
 
 /-- Rebuild or incrementally update cached curve samples after edits. -/
 def updateCurveCache (lines : Array Line) (curves : Array (Array CurveSample))
@@ -640,12 +839,9 @@ def updateCurveCache (lines : Array Line) (curves : Array (Array CurveSample))
 
   return (curves, pending)
 
-/-- Slowest sampled speed currently visible; used as the red end of speed view. -/
-def minCurveSpeed (curves : Array (Array CurveSample)) : Float :=
-  curves.foldl (fun m c => c.foldl (fun m s => min m s.speed) m) designSpeedF
-
-/-- Speed-view legend: a vertical red→yellow→green bar (slowest…design speed). -/
-def drawSpeedLegend (minSpeed : Float) : IO Unit := do
+/-- Speed-view legend: a vertical red→yellow→green bar on the absolute speed ramp
+    (`SPEED_RAMP_MIN`…`SPEED_RAMP_MAX`). -/
+def drawSpeedLegend : IO Unit := do
   let green  := Color.mk 40 200 40 255
   let yellow := Color.mk 230 200 40 255
   let red    := Color.mk 220 40 40 255
@@ -654,270 +850,373 @@ def drawSpeedLegend (minSpeed : Float) : IO Unit := do
   drawRectangleGradientV (f2u lx) (f2u (ly + half)) (f2u lw) (f2u half) yellow red
   let tx := f2u (lx + lw + 4.0)
   drawText "speed" (f2u lx) (f2u (ly - 12.0)) FONT SECONDARY
-  drawText s!"{fmtFixed (designSpeedF * MPS_TO_KMH) 0} km/h" tx (f2u ly) FONT FG
-  drawText s!"{fmtFixed (minSpeed * MPS_TO_KMH) 0} km/h" tx (f2u (ly + lh - 7.0)) FONT FG
+  drawText s!"{fmtFixed (SPEED_RAMP_MAX * MPS_TO_KMH) 0} km/h" tx (f2u ly) FONT FG
+  drawText s!"{fmtFixed (SPEED_RAMP_MIN * MPS_TO_KMH) 0} km/h" tx (f2u (ly + lh - 7.0)) FONT FG
 
-/-- Draw world-space route geometry and active edit feedback. Returns the current
-    minimum speed so the screen-space legend can use the same range. -/
-def drawWorldScene (cam : Camera2D) (lines : Array Line) (curves : Array (Array CurveSample))
-    (view : Nat) (mode : Mode) : IO Float := do
-  beginMode2D cam
-  -- world-space line widths, kept constant in screen pixels via `/ zoom`
-  let tangentW := 1.5 / cam.zoom
-  let curveW   := 3.0 / cam.zoom
-  for line in lines do
-    if line.size ≥ 2 then
-      drawSplineLinear (line.map (·.pos)) tangentW SECONDARY
-
-  let minSpeed := minCurveSpeed curves
+/-- Speed-view section labels: the operating-speed restriction (e.g. `"100 km/h"`) drawn
+    at each straight's and arc's midpoint sample. A 2D overlay, so it runs after the 3D
+    pass; midpoints behind the camera are skipped, and text is centred over its point. -/
+def drawSpeedLabels (cam : Camera3D) (curves : Array (Array CurveSample)) : IO Unit := do
+  let fwd := sub3 cam.target cam.position
   for curve in curves do
-    for i in [1:curve.size] do
-      let s := curve[i]!
-      let prev := curve[i-1]!
-      let col := if view == 1 then s.segmentColor else speedColor minSpeed designSpeedF s.speed
-      drawLineEx prev.pos s.pos curveW col
+    for cs in curve do
+      if let some spd := cs.label then
+        if dot3 (sub3 cs.pos cam.position) fwd > 0.0 then
+          let sp ← getWorldToScreen cs.pos cam
+          let txt := s!"{fmtFixed (spd * MPS_TO_KMH) 0} km/h"
+          let w := (← measureText txt FONT).toNat.toFloat
+          let x := sp.x - w / 2.0
+          let y := sp.y - 4.0
+          -- a 1px dark shadow keeps the number legible over any track colour
+          drawText txt (f2u (x + 1.0)) (f2u (y + 1.0)) FONT BG
+          drawText txt (f2u x) (f2u y) FONT FG
 
-  for line in lines do
+/-- Everything one frame needs to draw: the orbit camera and its distance (for screen-
+    constant sizing), the lines and their cached curves, the active render `view` and FSM
+    `mode`, the cursor, the two HUD toggles, and the history for the undo-tree overlay. -/
+structure Scene where
+  cam              : Camera3D
+  dist             : Float
+  lines            : Array Line
+  curves           : Array (Array CurveSample)
+  view             : Nat
+  mode             : Mode
+  mouse            : Vector2
+  showInstructions : Bool
+  showFPS          : Bool
+  hist             : History.History (Array Line)
+
+/-- Draw world-space route geometry and active edit feedback inside a 3D pass. `s.dist` is
+    the camera distance, used to keep point/marker sizes roughly constant on screen. -/
+def drawWorldScene (s : Scene) : IO Unit := do
+  beginMode3D s.cam
+  drawGroundGrid s.cam.target s.dist (Color.mk 45 45 45 255)
+  let ptR := s.dist * 0.005
+  -- tangent polylines (the raw PIs)
+  for line in s.lines do
+    if line.size ≥ 2 then
+      for i in [1:line.size] do
+        drawLine3D line[i-1]!.pos line[i]!.pos SECONDARY
+
+  for curve in s.curves do
+    for i in [1:curve.size] do
+      let cs := curve[i]!
+      let prev := curve[i-1]!
+      let col := if s.view == 1 then cs.segmentColor else speedColor SPEED_RAMP_MIN SPEED_RAMP_MAX cs.speed
+      drawLine3D prev.pos cs.pos col
+
+  for line in s.lines do
     for q in line do
       if q.winding != 0 then
         let col := if q.winding > 0 then ARC_COLOR else TRANSITION_COLOR
-        drawCircleLinesV q.pos (9.0 / cam.zoom) col
-      drawCircleV q.pos (4.0 / cam.zoom) POINT_COLOR
+        drawRing3D q.pos (ptR * 2.5) col
+      drawSphere q.pos ptR POINT_COLOR
 
-  -- feedback: snap highlight (PI dot or curve-end brackets) when idle, rubber-band to
-  -- the cursor when building, brackets on the active corner while resizing.
-  let mw ← getScreenToWorld2D (← getMousePosition) cam
-  match mode with
+  -- feedback: snap highlight (PI sphere or curve-end markers) when idle, rubber-band to
+  -- the ground point when building, markers on the active corner while resizing.
+  match s.mode with
   | .idle =>
-      match hitTargetAt lines mw (SNAP_PX / cam.zoom) with
+      let hit ← hitTargetAt s.lines s.cam s.mouse SNAP_PX
+      -- gizmo on the PI under the cursor (broad radius). Don't arm an axis while the cursor
+      -- is snapped to a hub (a PI ball or curve-end) — that grab takes precedence.
+      match ← armedAxis s.lines s.cam s.mouse s.dist with
+      | some (pr, ax) => drawGizmo pr.pos s.dist (if hit.isSome then none else ax)
+      | none          => pure ()
+      match hit with
       | some (.curveEnd l p _) =>
-          match curveEndAt lines l p with
-          | some ce => drawCurveBrackets ce cam.zoom
+          match curveEndAt s.lines l p with
+          | some ce => drawCurveBrackets ce s.dist
           | none    => pure ()
-      | some (.point pr) => drawCircleV pr.pos (7.0 / cam.zoom) REDO_COLOR
+      | some (.point pr) => drawSphere pr.pos (ptR * 1.6) REDO_COLOR
       | none => pure ()
   | .building idx atEnd _ _ =>
-      let line := lines[idx]!
+      let line := s.lines[idx]!
       if line.size ≥ 1 then
-        drawLineEx (if atEnd then line[line.size - 1]!.pos else line[0]!.pos) mw (1.5 / cam.zoom) SECONDARY
-  | .pressed lineIdx ptIdx _ | .dragging lineIdx ptIdx =>
-      if lineIdx < lines.size then
-        let line := lines[lineIdx]!
-        if ptIdx < line.size then
-          drawCircleV line[ptIdx]!.pos (7.0 / cam.zoom) REDO_COLOR
+        match ← screenToGround s.mouse s.cam with
+        | some g => drawLine3D (if atEnd then line[line.size - 1]!.pos else line[0]!.pos) g SECONDARY
+        | none   => pure ()
+  | .pressed lineIdx ptIdx _ | .dragging lineIdx ptIdx _ =>
+      if let some q := getPI? s.lines lineIdx ptIdx then
+        drawSphere q.pos (ptR * 1.6) REDO_COLOR
   | .bracketPressed lineIdx piIdx _ _ | .resizing lineIdx piIdx _ =>
-      match curveEndAt lines lineIdx piIdx with
-      | some ce => drawCurveBrackets ce cam.zoom
+      match curveEndAt s.lines lineIdx piIdx with
+      | some ce => drawCurveBrackets ce s.dist
       | none    => pure ()
-  endMode2D
-  return minSpeed
+  | .axisPressed lineIdx ptIdx axis _ | .axisDragging lineIdx ptIdx axis _ =>
+      if let some q := getPI? s.lines lineIdx ptIdx then
+        drawGizmo q.pos s.dist (some axis)
+        drawSphere q.pos (ptR * 1.6) REDO_COLOR
+  endMode3D
 
-/-! ## Per-frame step -/
+/-! ## Per-frame input handling -/
 
-def step (st : UI) : IO UI := do
-  let dpi ← getWindowScaleDPI
-  setMouseScale dpi.x dpi.y
+/-- Read-only per-frame context shared by the input handlers: the camera, the cursor
+    position, the orbit distance (for screen-constant sizing), and whether Escape fired. -/
+structure InputCtx where
+  cam    : Camera3D
+  mouse  : Vector2
+  dist   : Float
+  escape : Bool
 
-  let mut cam := st.camera
-  let mut hist := st.hist
-  let lines := History.current hist
-  let mut curves := st.curves
-  let mut view := st.view
-  let mut mode := st.mode
-  let mut pending := st.pending
-  let mut showInstructions := st.showInstructions
-  let mut showFPS := st.showFPS
-  let mut dirty := false
-  -- a single line whose geometry changed this frame (a drag): its curve is resampled
-  -- off-thread so the drag never blocks. `dirty` (structural change) rebuilds all
-  -- lines synchronously. `finalizeIdx` forces one accurate sync resample on release.
-  let mut dragIdx : Option Nat := none
-  let mut finalizeIdx : Option Nat := none
+/-- The editable state threaded through one frame's input handlers: the undo history, the
+    line-building FSM, the render view, and the resample hints the curve cache consumes
+    (`dirty` for structural changes, `dragIdx`/`finalizeIdx` for single-line drags). -/
+structure Edit where
+  hist        : History.History (Array Line)
+  mode        : Mode
+  view        : Nat
+  dirty       : Bool := false
+  dragIdx     : Option Nat := none
+  finalizeIdx : Option Nat := none
 
-  let f1Pressed ← isKeyPressed KEY_F1
-  let f3Pressed ← isKeyPressed KEY_F3
-  let escapePressed ← isKeyPressed KEY_ESCAPE
-  if f1Pressed then showInstructions := !showInstructions
-  if f3Pressed then showFPS := !showFPS
-  if showInstructions && escapePressed then showInstructions := false
-
-  cam ← updateCameraFromInput cam (!showInstructions)
-
-  -- All map-editing input below is dead while the instructions overlay is up; only the
-  -- F1/F3/Esc toggles handled above stay live. Guard the whole block once instead of
-  -- repeating `!showInstructions` on every action. `let mut` reassignments inside an
-  -- `unless` still thread back out, so `mode`/`hist`/`dirty`/… update as before.
-  unless showInstructions do
-    -- left-click press: when building, extend the active line; when idle, either grab
-    -- the point we snapped onto (deferring click-vs-drag to release/move) or start a
-    -- fresh separate line on empty space.
-    let totalPts := lines.foldl (fun a l => a + l.size) 0
-    if (← isMouseButtonPressed MOUSE_BUTTON_LEFT) then
-      let m ← getScreenToWorld2D (← getMousePosition) cam
-      match mode with
-      | .building idx atEnd _ recorded =>
-          if totalPts < MAX_PI then
-            let liveLines := History.current hist
-            hist := commitLines hist (addPIAtEnd! liveLines idx atEnd m) recorded
-            mode := .building idx atEnd false true
-            dirty := true
-      | .idle =>
-          -- snap onto whichever is closer: an existing PI (grab to drag) or a curve-end
-          -- bracket (grab to resize). Empty space starts a fresh line.
-          match hitTargetAt lines m (SNAP_PX / cam.zoom) with
-          | some (.point pr) => mode := .pressed pr.lineIdx pr.ptIdx m  -- grabbed a point; wait
-          | some (.curveEnd l p isEntry) => mode := .bracketPressed l p isEntry m
-          | none =>
+/-- Left-button press: extend the active line, grab a snapped PI (defer click-vs-drag),
+    grab a curve-end bracket or a gizmo axis, or start a fresh line on empty ground. -/
+def handleLeftPress (fr : InputCtx) (lines : Array Line) (e : Edit) : IO Edit := do
+  unless (← isMouseButtonPressed MOUSE_BUTTON_LEFT) do return e
+  let mut e := e
+  let totalPts := lines.foldl (fun a l => a + l.size) 0
+  let ground? ← screenToGround fr.mouse fr.cam     -- where the cursor meets z = 0
+  match e.mode with
+  | .building idx atEnd _ recorded =>
+      match ground? with
+      | some m =>
+        if totalPts < MAX_PI then
+          let liveLines := History.current e.hist
+          e := { e with hist := commitLines e.hist (addPIAtEnd! liveLines idx atEnd m) recorded,
+                        mode := .building idx atEnd false true, dirty := true }
+      | none => pure ()
+  | .idle =>
+      -- snap onto whichever is closer: an existing PI (grab to drag) or a curve-end marker
+      -- (grab to resize). The press position is stored in *screen* space for click-vs-drag.
+      match ← hitTargetAt lines fr.cam fr.mouse SNAP_PX with
+      | some (.point pr)             => e := { e with mode := .pressed pr.lineIdx pr.ptIdx fr.mouse }
+      | some (.curveEnd l p isEntry) => e := { e with mode := .bracketPressed l p isEntry fr.mouse }
+      | none =>
+          -- not on a PI hub or curve-end: try grabbing one of the hovered PI's gizmo axis
+          -- shafts (the only way to change elevation); otherwise start a new line.
+          match ← armedAxis lines fr.cam fr.mouse fr.dist with
+          | some (pr, some a) => e := { e with mode := .axisPressed pr.lineIdx pr.ptIdx a fr.mouse }
+          | _ =>
+            match ground? with
+            | some m =>
               if totalPts < MAX_PI then
-                hist := History.record hist (lines.push #[{ pos := m }])
-                mode := .building lines.size true true true     -- new line is now last
-                dirty := true
-      | _ => pure ()  -- pressed/dragging/resizing: edge already consumed below
+                e := { e with hist := History.record e.hist (lines.push #[{ pos := m }]),
+                              mode := .building lines.size true true true }  -- new line is now last
+                e := { e with dirty := true }
+            | none => pure ()
+  | _ => pure ()  -- pressed/dragging/resizing: edge already consumed below
+  return e
 
-    -- resolve a grabbed point: a release without movement is a click (resume the line
-    -- if the point is an endpoint); moving past `DRAG_PX` begins a drag. While dragging,
-    -- the point follows the cursor, updated in place so the whole drag is one undo step.
-    match mode with
-    | .pressed lineIdx ptIdx press =>
-        let mw ← getScreenToWorld2D (← getMousePosition) cam
-        if !(← isMouseButtonDown MOUSE_BUTTON_LEFT) then
-          let line := lines[lineIdx]!
-          mode := if ptIdx = 0 || ptIdx = line.size - 1
-                  then .building lineIdx (ptIdx = line.size - 1) false false  -- resume from this end
-                  else .idle
-        else
-          let t := DRAG_PX / cam.zoom
-          if dist2 mw press > t * t then
-            hist := History.record hist lines                   -- snapshot original once
-            hist := History.setCurrent hist (setPIPos! lines lineIdx ptIdx mw)
-            mode := .dragging lineIdx ptIdx
-            dragIdx := some lineIdx
-    | .dragging lineIdx ptIdx =>
-        if !(← isMouseButtonDown MOUSE_BUTTON_LEFT) then
-          mode := .idle                                         -- drop; state already recorded
-          finalizeIdx := some lineIdx                           -- one exact resample on release
-        else
-          let mw ← getScreenToWorld2D (← getMousePosition) cam
-          hist := History.setCurrent hist (setPIPos! lines lineIdx ptIdx mw)
-          dragIdx := some lineIdx
-    | .bracketPressed lineIdx piIdx isEntry press =>
-        -- like a point press: release without moving is a no-op; past `DRAG_PX`, begin a
-        -- resize (snapshot the original geometry once for a single undo step).
-        let mw ← getScreenToWorld2D (← getMousePosition) cam
-        if !(← isMouseButtonDown MOUSE_BUTTON_LEFT) then
-          mode := .idle
-        else
-          let t := DRAG_PX / cam.zoom
-          if dist2 mw press > t * t then
-            hist := History.record hist lines
-            mode := .resizing lineIdx piIdx isEntry
-    | .resizing lineIdx piIdx isEntry =>
-        if !(← isMouseButtonDown MOUSE_BUTTON_LEFT) then
-          mode := .idle                                         -- drop; state already recorded
-          finalizeIdx := some lineIdx                           -- one exact resample on release
-        else
-          let mw ← getScreenToWorld2D (← getMousePosition) cam
+/-- Shared press→click/drag skeleton for `.pressed`/`.bracketPressed`/`.axisPressed`: a
+    release without movement yields `released`; moving past `DRAG_PX` runs `beginDrag` (which
+    snapshots history and enters the drag mode); holding still leaves `e` unchanged. -/
+@[inline] def onPressResolve (fr : InputCtx) (e : Edit) (press : Vector2)
+    (released : Edit) (beginDrag : IO Edit) : IO Edit := do
+  if !(← isMouseButtonDown MOUSE_BUTTON_LEFT) then return released
+  else if dist2 fr.mouse press > DRAG_PX * DRAG_PX then beginDrag
+  else return e
+
+/-- Shared drag→release skeleton for `.dragging`/`.resizing`/`.axisDragging`: releasing the
+    button drops to `idle` and flags one exact resample of `lineIdx`; otherwise runs `held`
+    (the live per-frame update, which leaves the drag mode in place). -/
+@[inline] def onDragResolve (e : Edit) (lineIdx : Nat) (held : IO Edit) : IO Edit := do
+  if !(← isMouseButtonDown MOUSE_BUTTON_LEFT) then
+    return { e with mode := .idle, finalizeIdx := some lineIdx }       -- one exact resample
+  else held
+
+/-- Resolve an in-progress grab: turn a press into a click (resume a line from an endpoint)
+    or a drag once it moves past `DRAG_PX`, and apply live drags (point move, corner resize,
+    axis-constrained move). Each drag updates the current history node in place so the whole
+    gesture is a single undo step; releasing flags one exact resample. -/
+def handleActiveMode (fr : InputCtx) (lines : Array Line) (e : Edit) : IO Edit :=
+  match e.mode with
+  | .pressed lineIdx ptIdx press =>
+      let line := lines[lineIdx]!
+      let released := { e with mode := if ptIdx = 0 || ptIdx = line.size - 1
+                                       then .building lineIdx (ptIdx = line.size - 1) false false  -- resume
+                                       else .idle }
+      onPressResolve fr e press released do
+        let pos0 := (lines[lineIdx]!)[ptIdx]!.pos
+        match ← screenToGround fr.mouse fr.cam pos0.z with
+        | some mw =>
+            -- capture the grab offset and begin dragging *without* moving the point yet, so it
+            -- tracks cursor motion from here rather than snapping under the cursor.
+            return { e with hist := History.record e.hist lines,         -- snapshot original once
+                            mode := .dragging lineIdx ptIdx (sub3 pos0 mw) }
+        | none => return e
+  | .dragging lineIdx ptIdx grab =>
+      onDragResolve e lineIdx do
+        match ← screenToGround fr.mouse fr.cam (lines[lineIdx]!)[ptIdx]!.pos.z with
+        | some mw => return { e with hist := History.setCurrent e.hist (setPIPos! lines lineIdx ptIdx (add3 mw grab)),
+                                     dragIdx := some lineIdx }
+        | none    => return e
+  | .bracketPressed lineIdx piIdx isEntry press =>
+      onPressResolve fr e press { e with mode := .idle } do
+        return { e with hist := History.record e.hist lines, mode := .resizing lineIdx piIdx isEntry }
+  | .resizing lineIdx piIdx isEntry =>
+      onDragResolve e lineIdx do
+        match ← screenToGround fr.mouse fr.cam with
+        | none => return e
+        | some mw =>
           if h : lineIdx < lines.size then
             let line := lines[lineIdx]
             if 1 ≤ piIdx ∧ piIdx + 1 < line.size then
               let a := line[piIdx-1]!.pos
               let b := line[piIdx]!.pos
               let c := line[piIdx+1]!.pos
-              match cornerGeometry (v2ToV3 a) (v2ToV3 b) (v2ToV3 c) designParams line[piIdx]!.winding with
-              | none => pure ()
+              match cornerGeometry (toGeo a) (toGeo b) (toGeo c) designParams line[piIdx]!.winding with
+              | none => return e
               | some geom =>
                 -- new budget = distance from the PI to the cursor projected onto the grabbed
-                -- leg, clamped to [min-radius floor, ½·shorter leg] so it can't cross the PI
-                -- nor make the arc tighter than `minRadius`. The budget is the unsigned
-                -- distance along the leg line, so we take the magnitude of the projection:
-                -- a reverse-winding loop's handles sit on the *extension* rays (ahead of the
-                -- PI on the entry leg, behind it on the exit leg), flipping the raw sign.
-                let uIn := v3ToV2 geom.uIn
-                let uOut := v3ToV2 geom.uOut
+                -- leg, clamped to [min-radius floor, ½·shorter leg] so it can't cross the PI nor
+                -- make the arc tighter than `minRadius`. The budget is the unsigned distance
+                -- along the leg line, so we take the magnitude of the projection: a reverse-
+                -- winding loop's handles sit on the *extension* rays, flipping the raw sign.
+                let uIn := ofGeo geom.uIn
+                let uOut := ofGeo geom.uOut
                 let hi := geom.maxBudget.val
                 let lo := max 0.001 geom.minBudget.val
-                let dRaw := if isEntry then dot2 (sub2 mw b) uIn else dot2 (sub2 mw b) uOut
+                let dRaw := if isEntry then dot3 (sub3 mw b) uIn else dot3 (sub3 mw b) uOut
                 let d := if dRaw < 0.0 then -dRaw else dRaw
                 let d' := max lo (min hi d)
-                hist := History.setCurrent hist (setPIBudget! lines lineIdx piIdx d')
-                dragIdx := some lineIdx
+                return { e with hist := History.setCurrent e.hist (setPIBudget! lines lineIdx piIdx d'),
+                                dragIdx := some lineIdx }
+            else return e
+          else return e
+  | .axisPressed lineIdx ptIdx axis press =>
+      onPressResolve fr e press { e with mode := .idle } do
+        -- capture the grab offset along the axis so the point tracks cursor motion from here,
+        -- rather than jumping to the cursor's projection onto the axis line.
+        let pos0 := (lines[lineIdx]!)[ptIdx]!.pos
+        let grab := match ← axisDragPos pos0 axis fr.cam fr.mouse with
+                    | some q0 => sub3 pos0 q0
+                    | none    => (⟨0.0, 0.0, 0.0⟩ : Vector3)
+        return { e with hist := History.record e.hist lines,
+                        mode := .axisDragging lineIdx ptIdx axis grab }
+  | .axisDragging lineIdx ptIdx axis grab =>
+      onDragResolve e lineIdx do
+        match ← axisDragPos (lines[lineIdx]!)[ptIdx]!.pos axis fr.cam fr.mouse with
+        | some q => return { e with hist := History.setCurrent e.hist (setPIPos! lines lineIdx ptIdx (add3 q grab)),
+                                    dragIdx := some lineIdx }
+        | none   => return e
+  | _ => return e
+
+/-- Keyboard & right-click edits: finish/cancel the active line (a one-point draft is
+    discarded), undo/redo, switch redo branch, cycle a corner's winding, switch render view. -/
+def handleKeys (fr : InputCtx) (lines : Array Line) (e : Edit) : IO Edit := do
+  let mut e := e
+  -- Escape / right-click finishes the current line; a brand-new one-point draft is discarded
+  -- so cancel behaves as if the alignment was never started.
+  if (← isMouseButtonPressed MOUSE_BUTTON_RIGHT) || fr.escape then
+    match e.mode with
+    | .building idx _ true _ =>
+        let liveLines := History.current e.hist
+        if h : idx < liveLines.size then
+          if liveLines[idx].size = 1 then
+            e := { e with hist := History.discardCurrentLeaf e.hist, dirty := true }
+    | _ => pure ()
+    e := { e with mode := .idle }
+
+  -- Ctrl+Z undo / Ctrl+Shift+Z redo
+  let ctrl  ← isKeyDownEither KEY_LEFT_CONTROL KEY_RIGHT_CONTROL
+  let shift ← isKeyDownEither KEY_LEFT_SHIFT KEY_RIGHT_SHIFT
+  if ctrl && (← isKeyPressed KEY_Z) then
+    e := { e with hist := if shift then History.redo e.hist else History.undo e.hist,
+                  mode := .idle, dirty := true }
+
+  -- [ / ] cycle which branch redo will follow at a fork (no state change)
+  if (← isKeyPressed KEY_LEFT_BRACKET)  then e := { e with hist := History.cycleBranch e.hist (-1) }
+  if (← isKeyPressed KEY_RIGHT_BRACKET) then e := { e with hist := History.cycleBranch e.hist 1 }
+
+  -- L cycles an interior corner through short, left-loop, and right-loop winding.
+  if (← isKeyPressed KEY_L) then
+    match e.mode with
+    | .idle =>
+        match ← hitTargetAt lines fr.cam fr.mouse SNAP_PX with
+        | some (.curveEnd l p _) =>
+            e := { e with hist := History.record e.hist (cyclePIWinding! lines l p), dirty := true }
+        | some (.point pr) =>
+            if h : pr.lineIdx < lines.size then
+              let line := lines[pr.lineIdx]
+              if 1 ≤ pr.ptIdx ∧ pr.ptIdx + 1 < line.size then
+                e := { e with hist := History.record e.hist (cyclePIWinding! lines pr.lineIdx pr.ptIdx),
+                              dirty := true }
+        | none => pure ()
     | _ => pure ()
 
-    -- Escape / right-click finishes the current line. A brand-new one-point draft is
-    -- discarded so cancel behaves as if the alignment was never started.
-    if (← isMouseButtonPressed MOUSE_BUTTON_RIGHT) || escapePressed then
-      match mode with
-      | .building idx _ true _ =>
-          let liveLines := History.current hist
-          if h : idx < liveLines.size then
-            if liveLines[idx].size = 1 then
-              hist := History.discardCurrentLeaf hist
-              dirty := true
-      | _ => pure ()
-      mode := .idle
+  -- 1 / 2 switch render view (segment type / speed). Recolour only — no resample.
+  if (← isKeyPressed KEY_ONE) then e := { e with view := 1 }
+  if (← isKeyPressed KEY_TWO) then e := { e with view := 2 }
+  return e
 
-    -- Ctrl+Z undo / Ctrl+Shift+Z redo
-    let ctrl  ← (· || ·) <$> isKeyDown KEY_LEFT_CONTROL <*> isKeyDown KEY_RIGHT_CONTROL
-    let shift ← (· || ·) <$> isKeyDown KEY_LEFT_SHIFT   <*> isKeyDown KEY_RIGHT_SHIFT
-    if ctrl && (← isKeyPressed KEY_Z) then
-      hist := if shift then History.redo hist else History.undo hist
-      mode := .idle
-      dirty := true
-
-    -- [ / ] cycle which branch redo will follow at a fork (no state change)
-    if (← isKeyPressed KEY_LEFT_BRACKET)  then hist := History.cycleBranch hist (-1)
-    if (← isKeyPressed KEY_RIGHT_BRACKET) then hist := History.cycleBranch hist 1
-
-    -- L cycles an interior corner through short, left-loop, and right-loop winding.
-    if (← isKeyPressed KEY_L) then
-      match mode with
-      | .idle =>
-          let mw ← getScreenToWorld2D (← getMousePosition) cam
-          match hitTargetAt lines mw (SNAP_PX / cam.zoom) with
-          | some (.curveEnd l p _) =>
-              hist := History.record hist (cyclePIWinding! lines l p)
-              dirty := true
-          | some (.point pr) =>
-              if h : pr.lineIdx < lines.size then
-                let line := lines[pr.lineIdx]
-                if 1 ≤ pr.ptIdx ∧ pr.ptIdx + 1 < line.size then
-                  hist := History.record hist (cyclePIWinding! lines pr.lineIdx pr.ptIdx)
-                  dirty := true
-          | none => pure ()
-      | _ => pure ()
-
-    -- 1 / 2 switch render view (segment type / speed). Recolour only — no resample.
-    if (← isKeyPressed KEY_ONE) then view := 1
-    if (← isKeyPressed KEY_TWO) then view := 2
-
-  -- the current lines after any edits above; drop a stale active-line index
-  let lines := History.current hist
-  mode := mode.revalidate lines
-
-  let cache ← updateCurveCache lines curves pending dirty dragIdx finalizeIdx
-  curves := cache.1
-  pending := cache.2
-
-  -- draw
+/-- The full-screen draw for one frame: the 3D scene, HUD overlays, and either the
+    instructions modal or the cursor crosshair (hidden behind a position readout while a
+    marker is being dragged). -/
+def render (s : Scene) : IO Unit := do
   beginDrawing
   clearBackground BG
-  let minSpeed ← drawWorldScene cam lines curves view mode
-
-  if showFPS then drawFPS 0 0
-  if view == 2 then drawSpeedLegend minSpeed
-  drawScaleBar cam dpi
-  drawHistory hist
-  -- hide the crosshair while dragging a bracket so it doesn't fight the green handles
-  if showInstructions then
-    drawInstructions showFPS view
+  drawWorldScene s
+  if s.showFPS then drawFPS 0 0
+  if s.view == 2 then
+    drawSpeedLegend
+    drawSpeedLabels s.cam s.curves
+  drawHistory s.hist
+  -- hide the crosshair while dragging a marker so it doesn't fight the green handles
+  if s.showInstructions then
+    drawInstructions s.showFPS s.view
   else
-    match mode with
+    match s.mode with
     | .resizing .. => pure ()
-    | _            => drawMouse cam
+    | .dragging lineIdx ptIdx _ | .axisDragging lineIdx ptIdx _ _ =>
+        if let some q := getPI? s.lines lineIdx ptIdx then
+          drawText s!"({fmtFixed q.pos.x 1}, {fmtFixed q.pos.y 1}, {fmtFixed q.pos.z 1})"
+            (f2u (s.mouse.x + 8.0)) (f2u (s.mouse.y - 14.0)) FONT FG
+        drawMouse s.cam s.mouse (showCoords := false)
+    | _            => drawMouse s.cam s.mouse
   endDrawing
 
+/-! ## Per-frame step -/
+
+def step (st : UI) : IO UI := do
+  -- F1/F3/Esc toggles stay live even while the instructions overlay is up.
+  let mut showInstructions := st.showInstructions
+  let mut showFPS := st.showFPS
+  let escapePressed ← isKeyPressed KEY_ESCAPE
+  if (← isKeyPressed KEY_F1) then showInstructions := !showInstructions
+  if (← isKeyPressed KEY_F3) then showFPS := !showFPS
+  if showInstructions && escapePressed then showInstructions := false
+
+  let orbit ← updateCameraFromInput st.camera (!showInstructions)
+  let cam := orbit.toCamera3D                 /- the raylib Camera3D for this frame
+  -- raylib keeps the cursor, `getScreenToWorldRay`, `getWorldToScreen`, and 2D drawing all
+  -- in *logical* screen space (HighDPI upscaling is handled by raylib's `screenScale`), so
+  -- the cursor feeds the ray directly and snap thresholds are plain logical pixels.
+  -/
+  let mouse ← getMousePosition
+  let lines := History.current st.hist        -- frame-start snapshot, shared by all handlers
+  let fr : InputCtx := { cam, mouse, dist := orbit.distance, escape := escapePressed }
+
+  -- All map-editing input is dead while the instructions overlay is up. The handlers thread
+  -- one `Edit` accumulator: each may update the history, the FSM mode, and the resample hints.
+  let mut e : Edit := { hist := st.hist, mode := st.mode, view := st.view }
+  unless showInstructions do
+    e ← handleLeftPress fr lines e
+    e ← handleActiveMode fr lines e
+    e ← handleKeys fr lines e
+
+  -- the current lines after any edits above; drop a stale active-line index
+  let lines := History.current e.hist
+  let mode := e.mode.revalidate lines
+
+  let (curves, pending) ←
+    updateCurveCache lines st.curves st.pending e.dirty e.dragIdx e.finalizeIdx
+
+  render {
+    cam, dist := orbit.distance, lines, curves, view := e.view, mode, mouse,
+    showInstructions, showFPS, hist := e.hist }
+
   return {
-    camera := cam, hist := hist, curves := curves, view := view, mode := mode,
+    camera := orbit, hist := e.hist, curves := curves, view := e.view, mode := mode,
     showInstructions := showInstructions, showFPS := showFPS, pending := pending }
 
 partial def loop (st : UI) : IO Unit := do
@@ -928,11 +1227,11 @@ partial def loop (st : UI) : IO Unit := do
 
 def main : IO Unit := do
   setConfigFlags (FLAG_VSYNC_HINT ||| FLAG_WINDOW_HIGHDPI ||| FLAG_MSAA_4X_HINT)
-  initWindow 640 480 "Track Geometry"
+  initWindow 1280 720 "Track Geometry"
   setExitKey 0  -- KEY_NULL: don't let Escape close the window
   hideCursor
   setTraceLogLevel LOG_DEBUG
-  let cam : Camera2D := { offset := ⟨0.0, 0.0⟩, target := ⟨0.0, 0.0⟩, rotation := 0.0, zoom := 1.0 }
+  let cam : OrbitCam := { target := ⟨0.0, 0.0, 0.0⟩, distance := 4000.0, yaw := -1.0, pitch := 0.9 }
   loop {
     camera := cam, hist := History.init #[], curves := #[], view := 1, mode := .idle,
     showInstructions := false, showFPS := false, pending := none }

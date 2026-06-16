@@ -35,7 +35,10 @@ extern_lib libRaylib pkg := Job.async do
   proc (quiet := true) {
     cmd := "make"
     args := #["-C", libDir.toString, "USE_EXTERNAL_GLFW=TRUE",
-              "GLFW_LINUX_ENABLE_X11=FALSE", "GLFW_LINUX_ENABLE_WAYLAND=TRUE"]
+              "GLFW_LINUX_ENABLE_X11=FALSE", "GLFW_LINUX_ENABLE_WAYLAND=TRUE",
+              -- raylib bakes RL_CULL_DISTANCE_FAR into rcore.c's RLGL_IMPLEMENTATION, so the
+              -- far plane must be defined when raylib itself compiles (not in the FFI shim).
+              "CUSTOM_CFLAGS=-DRL_CULL_DISTANCE_FAR=10000.0"]
   }
   -- The artifact's content trace drives whether dependents relink.
   setTrace (← computeTrace libFile)

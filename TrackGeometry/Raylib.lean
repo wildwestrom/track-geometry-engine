@@ -7,27 +7,27 @@ namespace Raylib
 structure Vector2 where
   x : Float
   y : Float
-  deriving Inhabited
+deriving Inhabited
 
 structure Vector3 where
   x : Float
   y : Float
   z : Float
-  deriving Inhabited
+deriving Inhabited
 
 structure Color where
   r : UInt8
   g : UInt8
   b : UInt8
   a : UInt8
-  deriving Inhabited
+deriving Inhabited
 
 structure Rectangle where
   x : Float
   y : Float
   width : Float
   height : Float
-  deriving Inhabited
+deriving Inhabited
 
 structure Camera3D where
   position : Vector3
@@ -35,19 +35,19 @@ structure Camera3D where
   up : Vector3
   fovy : Float
   projection : UInt32
-  deriving Inhabited
+deriving Inhabited
 
 structure Camera2D where
   offset : Vector2
   target : Vector2
   rotation : Float
   zoom : Float
-  deriving Inhabited
+deriving Inhabited
 
 structure Ray where
   position : Vector3
   direction : Vector3
-  deriving Inhabited
+deriving Inhabited
 
 def RAYLIB_VERSION_MAJOR : UInt32 := 6
 def RAYLIB_VERSION_MINOR : UInt32 := 0

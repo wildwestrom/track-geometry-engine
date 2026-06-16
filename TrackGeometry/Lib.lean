@@ -475,6 +475,42 @@ def Segment.pointAt [TrackScalar α] {cA cB : Curvature α}
   | .transitionOut r _ p v B len cType =>
     transitionPoint p v (1 / r) 0 len t cType B
 
+/-- Sample the moving **frame** `(T, N, B)` at local arc-length `t` along a segment —
+    the orthonormal frame the position sampler `pointAt` implicitly rides — together with
+    the point itself.
+
+    `T` is the unit tangent: the start tangent turned through the segment's heading
+    `θ(t)` about the segment's binormal, using the *same* curvature profile each
+    constructor hands to `clothoidPoint`/`transitionPoint`, so the frame stays exactly
+    consistent with `pointAt`. The heading is `0` (straight), `t/r` (arc), `½κ′t²`
+    (transitionIn, `κ′ = (1/r)/L`) and `t/r − ½κ′t²` (transitionOut).
+
+    `N` is the unit **lateral normal** `B̂ × T` — the in-plane normal `clothoidPoint`
+    offsets along — pointing to the inside of the turn (its sense carried by the
+    binormal's orientation). `B` is the orthonormalised up-vector `T × N`. Rails (or any
+    constant lateral offset `w`) sit at `pointAt t ± w • N`.
+
+    Curved segments carry their plane's binormal, which is `⊥ T` by construction, so the
+    frame reproduces the stored binormal exactly (canted planes included). A `straight`
+    stores none, so we reference `ẑ`: `N` then comes out horizontal even on a grade
+    (level rails, no cant), and `B = T × N` tilts to stay orthonormal. -/
+def Segment.frameAt [TrackScalar α] {cA cB : Curvature α}
+    (seg : Segment α cA cB) (t : α) : Vec3 α × Frame α :=
+  -- `Bref` is the rotation axis / up-reference, `v` the start tangent, `θ` the heading.
+  let mkFrame := fun (Bref v : Vec3 α) (θ : α) =>
+    let Bn := Vec3.normalize Bref
+    let T := Vec3.rotateAxis Bn θ (Vec3.normalize v)
+    let N := Vec3.normalize (Vec3.cross Bn T)
+    Frame.mk T N (Vec3.cross T N)
+  let fr := match seg with
+    | .straight p q => mkFrame (Vec3.mk 0 0 1) (q - p) 0
+    | .arc r _ _ v B _ => mkFrame B v (t / r)
+    | .transitionIn r _ _ v B len _ =>
+        mkFrame B v ((1 / r) / len * t * t / natToScalar 2)
+    | .transitionOut r _ _ v B len _ =>
+        mkFrame B v (t / r - (1 / r) / len * t * t / natToScalar 2)
+  (seg.pointAt t, fr)
+
 /-- Sample a point at arc-length `s` along a `RailwayAlignment`.
 
     Returns `none` if `s` is out of range (s < 0 or s > totalLength).
@@ -494,6 +530,26 @@ where
       else
         let localT := t - prevLen
         if localT ≤ seg.length then some (seg.pointAt localT) else none
+
+/-- Sample the point and moving frame at arc-length `s` along a `RailwayAlignment`.
+    `none` if `s` is out of range. The frame counterpart of `pointAt` (see
+    `Segment.frameAt`); rails run at `p ± w • fr.N` for the returned `(p, fr)`. -/
+def RailwayAlignment.frameAt [TrackScalar α] {cA cB : Curvature α}
+    (align : RailwayAlignment α cA cB) (s : α) : Option (Vec3 α × Frame α) :=
+  if s < 0 then none else go align s
+where
+  go {cA cB : Curvature α} (al : RailwayAlignment α cA cB) (t : α) :
+      Option (Vec3 α × Frame α) :=
+    match al with
+    | .single seg =>
+      if t ≤ seg.length then some (seg.frameAt t) else none
+    | .append al' seg =>
+      let prevLen := al'.length
+      if t ≤ prevLen then
+        go al' t
+      else
+        let localT := t - prevLen
+        if localT ≤ seg.length then some (seg.frameAt localT) else none
 
 /-! ## PI-based (Point of Intersection) construction
 
@@ -527,6 +583,11 @@ def AnySegment.length [TrackScalar α] (e : AnySegment α) : α := e.seg.length
 
 /-- Sample the underlying segment at local arc-length `t`. -/
 def AnySegment.pointAt [TrackScalar α] (e : AnySegment α) (t : α) : Vec3 α := e.seg.pointAt t
+
+/-- Sample the underlying segment's point and moving frame at local arc-length `t`
+    (see `Segment.frameAt`). -/
+def AnySegment.frameAt [TrackScalar α] (e : AnySegment α) (t : α) : Vec3 α × Frame α :=
+  e.seg.frameAt t
 
 /-- A flat sequence of geometry pieces (straights and arcs), join continuity erased. -/
 structure AlignmentPath (α : Type) where
