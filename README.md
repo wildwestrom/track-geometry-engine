@@ -11,29 +11,46 @@ It all started in the summer of 2025. I was playing Transport Fever 2, but I was
 
 - **One scalar interface, two instances.** `TrackScalar α` (in `TrackGeometry/Lib.lean`) captures the arithmetic/trig/sqrt a track engine needs. `RFloat` (Float newtype) is the computable instance; `ℝ` is the exact, `noncomputable` proof instance (`TrackGeometry/Real.lean`). The core carries **no Mathlib dependency** so it stays compilable to C.
 - **PI-based building.** You place *points of intersection* (PIs) — corners of a tangent polyline. `buildPath` runs straights along the legs and rounds each interior corner with a circular fillet. No radius is supplied: each corner gets a tangent *budget* (fraction of the shorter leg) and the radius is whatever fits (`R = T / tan(Δ/2)`). Near-straight corners pass through.
-- **Type-indexed segments.** `Segment α cA cB` is indexed by start/end `Curvature`, so only valid curvature transitions can be expressed; `RailwayAlignment` chains them with matching joins.
+- **Type-indexed segments.** `Segment α cA cB` is indexed by start/end `Curvature`, so only valid curvature transitions can be expressed. The UI samples a flat `AlignmentPath` of `AnySegment` pieces (join continuity erased for heterogeneous arrays).
+- **Design cant.** Rails bank from curvature and operating speed: applied cant `h = G · V² · κ / g` (balanced), rolling a gravity-aligned level frame about the tangent. RMF remains available for continuous frame sampling; it is not the rail bank.
 
 ## Layout
 
 ```
-TrackGeometry.lean        Top-level module (imports everything below)
+TrackGeometry.lean          Top-level module (imports core + UI deps)
 TrackGeometry/
-  Lib.lean        ← START HERE. Core: TrackScalar, Vec3, Segment, clothoid, PI builder (buildPath), RFloat instance.
-  Real.lean         The exact ℝ instance of TrackScalar (Mathlib).
-  History.lean      Generic undo/redo *tree* (used by the UI).
-  Raylib.lean       Generated Raylib FFI bindings (do not edit; see `lake build raylibBindings`).
-Main.lean           Interactive raylib UI (exe `track`), written in Lean.
-ffi/raylib_shims.c      Generated C FFI shim (the only C in the project).
-vendor/raylib/          Vendored raylib.
-	tools/rlparser/rlparser.c    FFI shim generator. Edit this file if you need new bindings from raylib not yet present. **Do not** hand-edit the auto generated `raylib_shims.c` or `Raylib.lean`
-lakefile.lean, flake.nix   Build config.
+  Lib.lean                  Barrel re-export of the geometry core modules below
+  Vec.lean                  TrackScalar, Vec3, scalar helpers
+  Segment.lean              Segment, clothoid, Frame/RMF, closed-form sampling
+  Cant.lean                 Design cant from curvature and speed
+  Path.lean                 AnySegment, AlignmentPath, corner solve, buildPath
+  RFloat.lean               Computable Float scalar instance
+  Real.lean                 Exact ℝ instance of TrackScalar (Mathlib)
+  Continuity.lean           G¹/G² proofs for the spiral corner
+  History.lean              Generic undo/redo *tree* (used by the UI)
+  Raylib.lean               Generated Raylib FFI bindings (do not edit)
+  UI/
+    Util.lean               Float helpers, Vector3 math, ray/screen geometry
+    Config.lean             Theme, design params, speed/cant Float facades
+    Camera.lean             Orbit camera
+    State.lean              Editor state, curve sampling, resample tasks
+    Pick.lean               Hit-testing (PIs, curve ends, gizmo)
+    Input.lean              Mouse/keyboard edit handlers
+    Draw.lean               3D scene + HUD
+Main.lean                   Frame loop (exe `track`)
+ffi/raylib_shims.c          Generated C FFI shim (the only C in the project)
+vendor/raylib/              Vendored raylib
+  tools/rlparser/rlparser.c FFI generator. Edit this to add bindings; regenerate with
+                            `lake build raylibBindings`. **Do not** hand-edit Raylib.lean
+                            or raylib_shims.c
+lakefile.lean, flake.nix    Build config
 ```
 
 ## Commands
 
 Enter the dev shell first (Nix + direnv): `direnv allow`, or `nix develop`.
 
-Most likely this project is using Jujutsu (`jj`) for version control. Instead of git, use `jj` whenever possible.
+This project uses Jujutsu (`jj`) for version control. Prefer `jj` over git.
 
 ```shell
 lake exe track             # build vendored raylib + Lean exe `track`, then launch the window
@@ -52,24 +69,50 @@ resolves the Lean module graph before custom targets run); regenerate the
 bindings by hand only after bumping the vendored raylib.
 
 UI controls:
-- **F1** instruction mode with all keybindings
+- **F1** instructions overlay (all keybindings)
 - **F3** toggle FPS
-- **left-click** place / continue line
+- **F4** toggle design-cant frame ticks
+- **F5** toggle always-on PI coordinate labels
+- **left-click** place / continue line, or grab a PI / curve end / gizmo axis
 - **endpoint click** resume building from that end
-- **drag point** move a PI
+- **drag point** move a PI on the ground plane
+- **drag X/Y/Z handle** move a PI along one world axis (Z = elevation)
 - **drag curve end** resize that corner
 - **L** cycle an interior PI through short / left-loop / right-loop winding
 - **right-click / Esc** finish or cancel active line
-- **scroll** zoom
-- **middle-drag** pan
+- **scroll** dolly (zoom)
+- **middle-drag** orbit the camera
+- **Shift + middle-drag** pan the camera
 - **Ctrl+Z** undo
 - **Ctrl+Shift+Z** redo
-- **1 / 2** switch segment-type / speed view
-- **[ ]** switch redo branch. The history tree is drawn top-right.
+- **[ ]** switch redo branch (history tree, top-right)
+- **1 / 2** segment-type / speed view
+- Cant HUD (bottom-left): peak design / equilibrium / deficiency in mm
+
+## Troubleshooting
+
+**`EGL: Failed to get EGL display: Success` / window won't open.** This is a
+glibc version skew, not a raylib or Wayland bug. Each Lean toolchain bakes a
+specific glibc in as the ELF interpreter for everything `leanc` links. If that
+glibc is *older* than the one the system Mesa driver was built against, Mesa's
+EGL vendor (`libgallium`) fails to load at runtime — it needs the symbol version
+`GLIBC_ABI_GNU2_TLS`, added in **glibc 2.41** — so EGL finds no driver and
+window creation dies with the misleading "Failed to get EGL display".
+
+Concretely: Lean `v4.30.0` bakes in glibc 2.40 (too old for Mesa ≥ 26), while
+`v4.31.0`+ bake in glibc 2.42. **The fix is to keep `lean-toolchain` at
+`v4.31.0` or newer** (this project is on `v4.32.0-rc1`); the binary then links
+against a glibc new enough for the system driver and a plain `lake exe track`
+just works. If you ever must stay on an older toolchain, the escape hatch is to
+`patchelf --set-interpreter`/`--set-rpath` the built binary at a system glibc
+≥ 2.41 (and `/run/opengl-driver/lib`), but bumping the toolchain is far cleaner.
 
 ## Where to look
 
-- New to the project → `TrackGeometry/Lib.lean` (the whole engine).
+- New to the project → `TrackGeometry/Lib.lean` (barrel) then `Path.lean` / `Segment.lean`.
 - How a curve is sampled → `clothoidPoint`, `Segment.pointAt`, `AlignmentPath.pointAt`.
-- How corners become arcs → `solveCorner`, `buildPath`.
-- How the UI uses it → `Main.lean` (`step` calls `buildPath` + `pointAt`).
+- How corners become arcs → `solveCorner`, `buildPath` in `Path.lean`.
+- Design cant → `Cant.lean`; UI sampling in `UI/State.lean` (`sampleCurve`).
+- How the UI uses it → `Main.lean` frame loop + `TrackGeometry/UI/*`.
+- Need new Raylib functions? Edit `vendor/raylib/tools/rlparser/rlparser.c`, then
+  `lake build raylibBindings`.

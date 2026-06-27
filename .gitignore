@@ -5,3 +5,5 @@ changes.zip
 .changes/
 .cache
 build
+events.json
+compile_commands.json

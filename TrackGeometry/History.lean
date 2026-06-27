@@ -103,15 +103,6 @@ def cycleBranch (h : History σ) (dir : Int) : History σ :=
 
 /-! ### Read helpers for the HUD -/
 
-/-- Total number of recorded states. -/
-@[inline] def size (h : History σ) : Nat := h.nodes.size
-
-/-- Whether `undo` would move (the current node has a parent). -/
-@[inline] def canUndo (h : History σ) : Bool := ((curNode h).parent).isSome
-
-/-- Whether `redo` would move (the current node has children). -/
-@[inline] def canRedo (h : History σ) : Bool := (curNode h).children.size > 0
-
 /-- How many redo branches leave the current node. -/
 @[inline] def branchCount (h : History σ) : Nat := (curNode h).children.size
 

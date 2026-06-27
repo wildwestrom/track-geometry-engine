@@ -661,6 +661,12 @@ opaque drawLine3D (startPos : @& Vector3) (endPos : @& Vector3) (color : @& Colo
 @[extern "lean_raylib__DrawPoint3D"]
 opaque drawPoint3D (position : @& Vector3) (color : @& Color) : IO Unit
 
+@[extern "lean_raylib__DrawTriangle3D"]
+opaque drawTriangle3D (v1 : @& Vector3) (v2 : @& Vector3) (v3 : @& Vector3) (color : @& Color) : IO Unit
+
+@[extern "lean_raylib__DrawTriangleStrip3D"]
+opaque drawTriangleStrip3D (points : @& Array Vector3) (color : @& Color) : IO Unit
+
 @[extern "lean_raylib__DrawSphere"]
 opaque drawSphere (centerPos : @& Vector3) (radius : Float) (color : @& Color) : IO Unit
 
@@ -672,5 +678,14 @@ opaque drawCylinderEx (startPos : @& Vector3) (endPos : @& Vector3) (startRadius
 
 @[extern "lean_raylib__DrawGrid"]
 opaque drawGrid (slices : UInt32) (spacing : Float) : IO Unit
+
+@[extern "lean_raylib__rlDisableDepthMask"]
+opaque rlDisableDepthMask : IO Unit
+
+@[extern "lean_raylib__rlEnableDepthMask"]
+opaque rlEnableDepthMask : IO Unit
+
+@[extern "lean_raylib__rlDrawRenderBatchActive"]
+opaque rlDrawRenderBatchActive : IO Unit
 
 end Raylib

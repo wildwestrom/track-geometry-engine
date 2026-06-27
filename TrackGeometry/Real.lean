@@ -21,7 +21,6 @@ noncomputable instance : TrackScalar ℝ where
   arccos := Real.arccos
   sqrt := Real.sqrt
   pi := Real.pi
-  beq a b := a == b
   decEq a b := inferInstanceAs (Decidable (a = b))
   decLe a b := inferInstanceAs (Decidable (a ≤ b))
   decLt a b := inferInstanceAs (Decidable (a < b))

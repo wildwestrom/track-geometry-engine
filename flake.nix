@@ -26,6 +26,7 @@
             pkgs.stdenv.cc
 
             # Lean
+            pkgs.openssl
             pkgs.elan
 
             # Graphics
