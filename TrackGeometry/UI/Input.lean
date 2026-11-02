@@ -100,15 +100,14 @@ def handleActiveMode (fr : InputCtx) (lines : Array Line) (e : Edit) : IO Edit :
           if h : lineIdx < lines.size then
             let line := lines[lineIdx]
             if 1 ≤ piIdx ∧ piIdx + 1 < line.size then
-              let a := line[piIdx-1]!.pos
               let b := line[piIdx]!.pos
-              let c := line[piIdx+1]!.pos
-              match cornerGeometry (toGeo a) (toGeo b) (toGeo c) designParams line[piIdx]!.winding with
+              match ((lineLayouts line)[piIdx]?).bind id with
               | none => return e
               | some geom =>
                 -- new budget = distance from the PI to the cursor projected onto the grabbed
-                -- leg, clamped to [min-radius floor, ½·shorter leg] so it can't cross the PI nor
-                -- make the arc tighter than `minRadius`. The budget is the unsigned distance
+                -- leg, clamped to [min-radius floor, room the neighbouring curves leave] so it
+                -- can't cross the PI, overlap a neighbour, nor make the arc tighter than
+                -- `minRadius`. The budget is the unsigned distance
                 -- along the leg line, so we take the magnitude of the projection: a reverse-
                 -- winding loop's handles sit on the *extension* rays, flipping the raw sign.
                 let uIn := ofGeo geom.uIn

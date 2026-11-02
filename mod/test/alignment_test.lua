@@ -31,7 +31,7 @@ local function pointAtS(path, s)
 	end
 end
 
--- The engine's smoke-test path: 350 m legs, 40° left turn at the middle PI.
+-- A test path: 350 m legs, 40° left turn at the middle PI.
 local TURN = math.rad(40)
 local pis = { G.vec(0, 0, 0), G.vec(350, 0, 0), G.vec(350 + 350 * math.cos(TURN), 350 * math.sin(TURN), 0) }
 local path = G.buildPath(pis, G.DEFAULT_PARAMS, nil)
@@ -44,8 +44,12 @@ do
 	for i, s in ipairs(path) do kinds[i] = s.kind end
 	check(table.concat(kinds, " ") == "straight in arc out straight", "smoke path is " .. table.concat(kinds, " "))
 	local worstP, worstT = 0, 0
-	for i = 1, #path - 1 do
-		local a, b = path[i], path[i + 1]
+	-- (zero-length segments, like the straights where the curve fills a leg, have no direction:
+	-- skip them, as the sampler does)
+	local segs = {}
+	for _, seg in ipairs(path) do if G.length(seg) > 1e-6 then segs[#segs + 1] = seg end end
+	for i = 1, #segs - 1 do
+		local a, b = segs[i], segs[i + 1]
 		local L = G.length(a)
 		local pa, pb, ta, tb = G.pointAt(a, L), G.pointAt(b, 0), G.tangentAt(a, L), G.tangentAt(b, 0)
 		worstP = math.max(worstP, d2(pa, pb))
@@ -127,6 +131,77 @@ do
 	for i = 2, #ns do shortest = math.min(shortest, d2(ns[i], ns[i - 1])) end
 	check(zero and shortest >= A.MIN_PIECE,
 		string.format("zero-length straight between corners dropped (shortest piece %.3f m)", shortest))
+end
+
+-- How far point h is from the path, against a polyline through it every 5 cm (its chords are off
+-- the curve by under a micrometre).
+local function offPath(path)
+	local pts = {}
+	for _, seg in ipairs(path) do
+		local L = G.length(seg)
+		local n = math.max(1, math.ceil(L / 0.05))
+		for j = 0, n do pts[#pts + 1] = G.pointAt(seg, L * j / n) end
+	end
+	return function(h)
+		local best = math.huge
+		for j = 1, #pts - 1 do
+			local p, q = pts[j], pts[j + 1]
+			if math.abs(p.x - h.x) < 5 and math.abs(p.y - h.y) < 5 then
+				local lx, ly = q.x - p.x, q.y - p.y
+				local l2 = lx * lx + ly * ly
+				local u = l2 > 0 and math.max(0, math.min(1, ((h.x - p.x) * lx + (h.y - p.y) * ly) / l2)) or 0
+				best = math.min(best, (p.x + u * lx - h.x) ^ 2 + (p.y + u * ly - h.y) ^ 2)
+			end
+		end
+		return math.sqrt(best)
+	end
+end
+
+-- 6. Long pieces (as the ghost builds): a tight 90° corner between 400 m legs, no length limit and
+--    at most 15° a piece, with a node at each break. The straights are one piece from break to
+--    break, and the Hermite pieces still follow the curve within a millimetre.
+do
+	local p = G.buildPath({ G.vec(0, 0, 0), G.vec(400, 0, 0), G.vec(400, 400, 0) }, G.DEFAULT_PARAMS, nil)
+	local maxTurn, breaks = math.rad(15), { 123.4, 7.5 }
+	local ns = A.sample(p, math.huge, maxTurn, breaks)
+	local sharpest = 0
+	for i = 2, #ns do
+		local dh = math.abs(ns[i].heading - ns[i - 1].heading)
+		sharpest = math.max(sharpest, math.min(dh, 2 * math.pi - dh))
+	end
+	check(sharpest <= maxTurn + 1e-9, string.format("pieces turn at most 15° (sharpest %.1f°)", math.deg(sharpest)))
+	-- (nodes inside the straights: only the breaks)
+	local inside, s0 = 0, 0
+	for _, seg in ipairs(p) do
+		local L = G.length(seg)
+		if seg.kind == "straight" then
+			for _, nd in ipairs(ns) do
+				if nd.s > s0 + 1e-6 and nd.s < s0 + L - 1e-6 and not (near(nd.s, 7.5, 1e-9) or near(nd.s, 123.4, 1e-9)) then
+					inside = inside + 1
+				end
+			end
+		end
+		s0 = s0 + L
+	end
+	check(inside == 0, string.format("straights not cut but at breaks (%d pieces instead of %d)", #ns - 1, #A.sample(p, step) - 1))
+	local missing = 0
+	for _, b in ipairs(breaks) do
+		local found = false
+		for _, nd in ipairs(ns) do if near(nd.s, b, 1e-9) then found = true end end
+		if not found then missing = missing + 1 end
+	end
+	check(missing == 0, "a node at every break")
+	check(near(ns[#ns].s, G.pathLength(p), 1e-9) and near(ns[#ns].heading, math.pi / 2, 1e-12), "the end node and heading are kept")
+	local off, worst, at = offPath(p), 0, 0
+	for i = 1, #ns - 1 do
+		local a, b = ns[i], ns[i + 1]
+		local T = A.tangentLength(a, b)
+		for k = 1, 9 do
+			local d = off(hermite(a, b, T, k / 10))
+			if d > worst then worst, at = d, a.s end
+		end
+	end
+	check(worst < 0.001, string.format("long Hermite pieces within 1 mm of the curve (worst %.3f mm at s = %.0f m)", worst * 1000, at))
 end
 
 print(failures == 0 and "all passed" or (failures .. " failed"))

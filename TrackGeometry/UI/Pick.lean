@@ -51,17 +51,19 @@ structure CurveEnd where
   uIn     : Vector3
   uOut    : Vector3
 
-/-- Curve-end data for interior PI `i` of `line` (index `li`), or `none` when that
-    corner is degenerate or near-straight — the same condition under which `solveCorner`
-    returns `none`, so a bracket shows iff the curve rounds there. The anchors sit
-    `budget` back from the PI along each leg (clamped like `buildPath`). -/
-def cornerEnd (li : Nat) (line : Line) (i : Nat) : Option CurveEnd := Id.run do
-  if ¬ (1 ≤ i ∧ i + 1 < line.size) then return none
-  let a := line[i-1]!.pos
-  let b := line[i]!.pos
-  let c := line[i+1]!.pos
-  match cornerLayout (toGeo a) (toGeo b) (toGeo c) designParams
-      (line[i]!.budget.map rf) line[i]!.winding with
+/-- The resolved corners of `line`, indexed like its PIs — exactly the ones `buildPath`
+    rounds (see `cornerLayouts`). -/
+def lineLayouts (line : Line) : Array (Option (CornerLayout RFloat)) :=
+  cornerLayouts (line.map fun q => toGeo q.pos) designParams
+    (line.map fun q => q.budget.map rf) (line.map (·.winding))
+
+/-- Curve-end data for interior PI `i` (index `li`), from the line's resolved corners
+    `layouts`, or `none` when that corner is degenerate or near-straight — the same
+    condition under which `buildPath` skips it, so a bracket shows iff the curve rounds
+    there. The anchors sit `budget` back from the PI along each leg. -/
+def cornerEnd (li : Nat) (layouts : Array (Option (CornerLayout RFloat))) (i : Nat) :
+    Option CurveEnd := Id.run do
+  match (layouts[i]?).bind id with
   | none => return none
   | some layout =>
       return some {
@@ -75,13 +77,14 @@ def curveEnds (lines : Array Line) : Array CurveEnd := Id.run do
   let mut out := #[]
   for li in [0:lines.size] do
     let line := lines[li]!
+    let layouts := lineLayouts line
     for i in [1 : line.size - 1] do
-      if let some ce := cornerEnd li line i then out := out.push ce
+      if let some ce := cornerEnd li layouts i then out := out.push ce
   return out
 
 /-- The curve-end data for a specific corner, if it rounds. -/
 def curveEndAt (lines : Array Line) (li pi : Nat) : Option CurveEnd :=
-  if h : li < lines.size then cornerEnd li lines[li] pi else none
+  if h : li < lines.size then cornerEnd li (lineLayouts lines[li]) pi else none
 
 /-- The curve endpoint nearest the cursor within `thresh` *screen pixels*: `(lineIdx,
     piIdx, isEntry)` paired with its squared pixel distance. Used to highlight markers

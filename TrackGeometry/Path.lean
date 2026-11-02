@@ -134,7 +134,8 @@ def AlignmentPath.frameAt [TrackScalar α] (path : AlignmentPath α) (s : α)
     `j_max` m/s³, `α_max` rad/s²). Setting `maxLateralAccel ≤ 0` switches the speed
     model off and recovers the pure circular fillet (no transitions). -/
 structure DesignParams (α : Type) where
-  /-- Fraction (≤ 0.5) of the shorter adjacent leg a single corner may consume. -/
+  /-- Fraction (≤ 0.5) of the shorter adjacent leg a corner's auto budget takes. The corners
+      next to the path's ends take all the room they have instead (see `cornerLayouts`). -/
   legBudget : α
   /-- Minimum permitted arc radius (world units; 1 unit = 1 m). No corner is rounded —
       or resized — tighter than this: the tangent budget is floored at `minRadius ·
@@ -186,7 +187,9 @@ structure CornerGeometry (α : Type) where
   delta : α
   /-- Shorter adjacent leg length. -/
   shorterLeg : α
-  /-- Maximum tangent budget: half the shorter adjacent leg. -/
+  /-- Maximum tangent budget. From `cornerGeometry`, the corner alone: the shorter
+      adjacent leg. From `cornerLayouts`, the room its neighbours leave: on each leg, the
+      leg less the budget of the curve at its far end (if any). -/
   maxBudget : α
   /-- Minimum tangent budget implied by `DesignParams.minRadius`, capped to `maxBudget`. -/
   minBudget : α
@@ -224,7 +227,7 @@ def cornerGeometry [TrackScalar α] (a b c : Vec3 α) (dp : DesignParams α)
     if delta ≤ dp.straightThreshold then none
     else
       let shorter := min nIn nOut
-      let hi := (1 / two) * shorter
+      let hi := shorter
       -- `tan(Δ/2)` of the *selected* (possibly wound) turn. For a reflex turn
       -- (Δ ∈ (π, 2π), i.e. a reverse-winding loop) this is negative; that sign is
       -- exactly what flips the `K` term of the clothoid shift in the radius fit, so we
@@ -280,7 +283,8 @@ structure CornerLayout (α : Type) extends CornerGeometry α where
 
 /-- Select and clamp the tangent budget for an interior PI, returning the tangent
     endpoints that consume that budget. An override is an absolute world-unit budget;
-    `none` uses `dp.legBudget * shorter adjacent leg`. -/
+    `none` uses `dp.legBudget * shorter adjacent leg`. This sees the corner alone; on a
+    path, `cornerLayouts` also keeps it clear of its neighbours. -/
 def cornerLayout [TrackScalar α] (a b c : Vec3 α) (dp : DesignParams α)
     (override : Option α := none) (winding : Int := 0) : Option (CornerLayout α) :=
   match cornerGeometry a b c dp winding with
@@ -292,6 +296,82 @@ def cornerLayout [TrackScalar α] (a b c : Vec3 α) (dp : DesignParams α)
       let budget := max g.minBudget (min g.maxBudget cand)
       some { toCornerGeometry := g, budget := budget,
              entryPoint := g.entryPoint b budget, exitPoint := g.exitTangentPoint b budget }
+
+/-- The corners of a whole PI polyline, indexed like `pts` (`none` at the two ends and at
+    interior PIs that do not curve). Each corner asks for a budget (its override, else the
+    auto budget, clamped to its own legs) and gets it, leaving room for its neighbours ("leg
+    minus neighbour"). The auto budget is `dp.legBudget * shorter leg`, except at an *end
+    corner* (one with a path end as a neighbour), which asks for all the room it has: the
+    whole leg to the path end, and on its other leg the leg less the neighbour's own ask
+    (override or `dp.legBudget` share) when the neighbour curves. So by default the first and
+    last curves start at the path's ends unless a neighbour or the other leg stops them.
+
+
+    * a leg whose far end does not curve (a path end or a straight PI) is the corner's alone;
+    * a leg shared with another curve holds both asks when they fit, else it is split in
+      proportion to them (order-independent; only when moving PIs shortens a leg);
+    * the corner's budget is the lesser of its two legs' shares.
+
+    So curves never overlap: on every shared leg the two budgets sum to at most the leg.
+    `maxBudget` becomes the room the neighbours leave (the leg less the neighbour's budget,
+    the lesser over both legs), the bound for dragging a bracket, and `minBudget` the
+    `minRadius` floor capped to it. An end corner with no override only fills the room left,
+    so it leaves room down to its own `minBudget`: widening its neighbour shrinks it. -/
+def cornerLayouts [TrackScalar α] (pts : Array (Vec3 α)) (dp : DesignParams α)
+    (overrides : Array (Option α) := #[]) (windings : Array Int := #[]) :
+    Array (Option (CornerLayout α)) :=
+  let n := pts.size
+  let z : Vec3 α := Vec3.mk 0 0 0
+  let get := fun i => (pts[i]?).getD z
+  let geoms : Array (Option (CornerGeometry α)) := (Array.range n).map fun i =>
+    if 1 ≤ i ∧ i + 1 < n then
+      cornerGeometry (get (i - 1)) (get i) (get (i + 1)) dp ((windings[i]?).getD 0)
+    else none
+  let geomAt := fun i => (geoms[i]?).bind id
+  let isCorner := fun i => (geomAt i).isSome
+  -- leg `k` runs from PI `k` to PI `k + 1`
+  let legLen := fun (k : Nat) => Vec3.norm (get (k + 1) - get k)
+  let clampAsk := fun (g : CornerGeometry α) (cand : α) => max g.minBudget (min g.maxBudget cand)
+  -- what each corner asks before the end corners take their room
+  let base : Array α := (Array.range n).map fun i =>
+    match geomAt i with
+    | none => 0
+    | some g => clampAsk g (((overrides[i]?).bind id).getD (dp.legBudget * g.shorterLeg))
+  -- the room on leg `k`, whose far end is PI `j`, left by the neighbour's base ask
+  let free := fun (j k : Nat) => if isCorner j then legLen k - base.getD j 0 else legLen k
+  -- an end corner with no override: it takes the room left, so it gives way to a neighbour
+  let autoEnd := fun i => (i = 1 ∨ i + 2 = n) ∧ ((overrides[i]?).bind id).isNone
+  let ask : Array α := (Array.range n).map fun i =>
+    match geomAt i with
+    | some g =>
+        if autoEnd i then clampAsk g (min (free (i - 1) (i - 1)) (free (i + 1) i))
+        else base.getD i 0
+    | none => 0
+  -- what corner `i` may take of leg `k`, whose far end is PI `j`
+  let share := fun (i j k : Nat) =>
+    let len := legLen k
+    let ai := ask.getD i 0
+    if isCorner j then
+      let aj := ask.getD j 0
+      if ai + aj ≤ len then ai else len * ai / (ai + aj)
+    else min ai len
+  let budget : Array α := (Array.range n).map fun i =>
+    if isCorner i then min (share i (i - 1) (i - 1)) (share i (i + 1) i) else 0
+  -- an auto end corner can shrink to its floor, so it leaves room down to that
+  let room := fun (j k : Nat) =>
+    match geomAt j with
+    | none => legLen k
+    | some g => legLen k - (if autoEnd j then g.minBudget else budget.getD j 0)
+  (Array.range n).map fun i =>
+    match geomAt i with
+    | none => none
+    | some g =>
+        let hi := min (room (i - 1) (i - 1)) (room (i + 1) i)
+        let lo := min (dp.minRadius * absScalar g.tanHalf) hi
+        let bud := budget.getD i 0
+        let b := get i
+        some { toCornerGeometry := { g with maxBudget := hi, minBudget := lo }, budget := bud,
+               entryPoint := g.entryPoint b bud, exitPoint := g.exitTangentPoint b bud }
 
 /-- A solved corner at one interior PI: where the incoming straight ends
     (`entryPoint`), where the outgoing straight resumes (`exitPoint`), and the curved
@@ -435,13 +515,15 @@ def solveCorner [TrackScalar α] (a b c : Vec3 α) (budget : α) (dp : DesignPar
 /-- Build an `AlignmentPath` from a polyline of PIs.
 
     The first and last PIs are endpoints. Each interior PI is rounded with a circular
-    arc whose radius fits a tangent budget = `legBudget × (shorter adjacent leg)`.
-    Near-collinear corners pass straight through.
+    arc whose radius fits a tangent budget: `legBudget × (shorter adjacent leg)`, or all the
+    room it has at the first and last corners (see `cornerLayouts`). Near-collinear corners
+    pass straight through.
 
     `overrides` optionally supplies a per-PI tangent budget (absolute world units) that
-    replaces the auto `legBudget` value at that corner. Each override is clamped to
-    `(0, ½ · shorter adjacent leg]` so a dragged control point can never cross the PI or
-    overrun a leg. An out-of-range index or a `none` falls back to the auto budget. -/
+    replaces the auto value at that corner. The budgets are resolved by
+    `cornerLayouts`, so a dragged control point can never cross the PI, overrun a leg or
+    overlap the neighbouring curve. An out-of-range index or a `none` falls back to the
+    auto budget. -/
 def buildPath [TrackScalar α] (pts : Array (Vec3 α)) (dp : DesignParams α)
     (overrides : Array (Option α) := #[]) (windings : Array Int := #[]) :
     AlignmentPath α :=
@@ -453,14 +535,13 @@ def buildPath [TrackScalar α] (pts : Array (Vec3 α)) (dp : DesignParams α)
     -- Straights run at the design-speed ceiling when set; otherwise leave `opSpeed = 0`
     -- (UI treats 0 as "unrestricted" and falls back to the same ceiling).
     let straightSpeed := if dp.maxDesignSpeed > 0 then dp.maxDesignSpeed else 0
+    let layouts := cornerLayouts pts dp overrides windings
     let out : Array (AnySegment α) := Id.run do
       let mut acc : Array (AnySegment α) := #[]
       let mut cursor : Vec3 α := get 0
       for i in [1 : n - 1] do
-        let a := get (i - 1)
         let b := get i
-        let c := get (i + 1)
-        match cornerLayout a b c dp ((overrides[i]?).bind id) ((windings[i]?).getD 0) with
+        match (layouts[i]?).bind id with
         | none => pure ()
         | some layout =>
           let sol := solveCornerWithGeometry b layout.budget dp layout.toCornerGeometry

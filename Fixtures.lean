@@ -47,7 +47,15 @@ def fixtures : Array Fixture := #[
     overrides := #[none, some 20, some 500, none, none] },
   { name := "two points", pis := #[(10, 20), (310, 420)] },
   { name := "duplicate PI", pis := #[(0, 0), (200, 0), (200, 0), (400, 100)] },
-  { name := "corners meet", dp := dpHalf, pis := #[(0, 0), (300, 0), (300, 300), (600, 300)] }
+  { name := "corners meet", dp := dpHalf, pis := #[(0, 0), (300, 0), (300, 300), (600, 300)] },
+  { name := "wide corner between the ends", pis := #[(0, 0), (400, 0), (700, 300)],
+    overrides := #[none, some 380, none] },
+  { name := "neighbour leaves room", pis := #[(0, 0), (300, 0), (300, 300), (600, 300)],
+    overrides := #[none, some 250, some 40, none] },
+  { name := "curves squeezed on a shared leg", pis := #[(0, 0), (300, 0), (300, 300), (600, 300)],
+    overrides := #[none, some 250, some 100, none] },
+  { name := "first curve starts at the path's start",
+    pis := #[(0, 0), (150, 0), (450, 200), (750, 100), (1050, 250)] }
 ]
 
 def kindAndRadius (e : AnySegment RFloat) : String × RFloat :=

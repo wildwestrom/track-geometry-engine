@@ -88,6 +88,7 @@ local record Geometry
 	curvatureAt : function(Segment, t : number) : number
 	cornerGeometry : function(a : Vec, b : Vec, c : Vec, dp : DesignParams) : CornerGeometry
 	cornerLayout : function(a : Vec, b : Vec, c : Vec, dp : DesignParams, override : number) : CornerLayout
+	cornerLayouts : function(pts : {Vec}, dp : DesignParams, overrides : {integer : number}) : {integer : CornerLayout}
 	solveCorner : function(b : Vec, budget : number, dp : DesignParams, g : CornerGeometry) : CornerSolution
 	buildPath : function(pts : {Vec}, dp : DesignParams, overrides : {integer : number}) : {Segment}
 	pathLength : function({Segment}) : number
@@ -245,7 +246,7 @@ function M.cornerGeometry(a : Vec, b : Vec, c : Vec, dp : DesignParams) : Corner
 	local delta = abs(selected)
 	if delta <= dp.straightThreshold then return nil end
 	local shorter = math.min(nIn, nOut)
-	local hi = (1 / 2) * shorter
+	local hi = shorter
 	local tanHalf = math.sin(delta) / (1 + math.cos(delta))
 	local lo = math.min(dp.minRadius * abs(tanHalf), hi)
 	-- Without windings the turn is never reversed and sinAbs > straightThreshold here, so the
@@ -258,7 +259,8 @@ function M.cornerGeometry(a : Vec, b : Vec, c : Vec, dp : DesignParams) : Corner
 end
 
 -- The corner's geometry plus its tangent budget: `override` (m) if given, else
--- legBudget × the shorter leg, clamped to the geometry's bounds.
+-- legBudget × the shorter leg, clamped to the geometry's bounds. The corner alone; on a path,
+-- cornerLayouts also keeps it clear of its neighbours.
 function M.cornerLayout(a : Vec, b : Vec, c : Vec, dp : DesignParams, override : number) : CornerLayout
 	local g = M.cornerGeometry(a, b, c, dp)
 	if g == nil then return nil end
@@ -268,6 +270,78 @@ function M.cornerLayout(a : Vec, b : Vec, c : Vec, dp : DesignParams, override :
 		geometry = g, budget = budget,
 		entryPoint = sub(b, scale(budget, g.uIn)), exitPoint = add(b, scale(budget, g.uOut)),
 	}
+end
+
+-- The corners of a PI polyline, by PI index (nil at the ends and at PIs that do not curve).
+-- Each corner asks for its budget (override, else auto, within its own legs) and gets it,
+-- leaving room for its neighbours. The auto budget is legBudget × the shorter leg, except at a
+-- corner next to a path end, which asks for all its room: the whole leg to the end, and on its
+-- other leg the leg less the neighbour's own ask when the neighbour curves. Then: a leg whose far end does not curve is the corner's alone; a
+-- leg shared with another curve holds both asks when they fit, else is split in proportion;
+-- the budget is the lesser of the two legs' shares. maxBudget becomes the room the neighbours
+-- leave (an auto end corner leaves room down to its floor, since it gives way) and minBudget the
+-- minRadius floor capped to it. See Lean `cornerLayouts`.
+function M.cornerLayouts(pts : {Vec}, dp : DesignParams, overrides : {integer : number}) : {integer : CornerLayout}
+	local n = #pts
+	overrides = overrides or {}
+	local geoms : {integer : CornerGeometry} = {}
+	-- what each corner asks before the end corners take their room
+	local base : {integer : number} = {}
+	for i = 2, n - 1 do
+		local g = M.cornerGeometry(pts[i - 1], pts[i], pts[i + 1], dp)
+		if g ~= nil then
+			geoms[i] = g
+			local cand = overrides[i] or dp.legBudget * g.shorterLeg
+			base[i] = math.max(g.minBudget, math.min(g.maxBudget, cand))
+		end
+	end
+	-- leg k runs from PI k to PI k + 1
+	local function legLen(k : integer) : number return dist(pts[k + 1], pts[k]) end
+	-- the room on leg k, whose far end is PI j, left by the neighbour's base ask
+	local function free(j : integer, k : integer) : number
+		if geoms[j] ~= nil then return legLen(k) - base[j] end
+		return legLen(k)
+	end
+	-- an end corner with no override: it takes the room left, so it gives way to a neighbour
+	local function autoEnd(i : integer) : boolean return (i == 2 or i == n - 1) and overrides[i] == nil end
+	local ask : {integer : number} = {}
+	for i, g in pairs(geoms) do
+		if autoEnd(i) then
+			local cand = math.min(free(i - 1, i - 1), free(i + 1, i))
+			ask[i] = math.max(g.minBudget, math.min(g.maxBudget, cand))
+		else
+			ask[i] = base[i]
+		end
+	end
+	-- what corner i may take of leg k, whose far end is PI j
+	local function share(i : integer, j : integer, k : integer) : number
+		local len, ai = legLen(k), ask[i]
+		if geoms[j] ~= nil then
+			local aj = ask[j]
+			if ai + aj <= len then return ai end
+			return len * ai / (ai + aj)
+		end
+		return math.min(ai, len)
+	end
+	local budget : {integer : number} = {}
+	for i in pairs(geoms) do budget[i] = math.min(share(i, i - 1, i - 1), share(i, i + 1, i)) end
+	-- an auto end corner can shrink to its floor, so it leaves room down to that
+	local function room(j : integer, k : integer) : number
+		local gj = geoms[j]
+		if gj == nil then return legLen(k) end
+		return legLen(k) - (autoEnd(j) and gj.minBudget or budget[j])
+	end
+	local out : {integer : CornerLayout} = {}
+	for i, g in pairs(geoms) do
+		local hi = math.min(room(i - 1, i - 1), room(i + 1, i))
+		local lo = math.min(dp.minRadius * abs(g.tanHalf), hi)
+		local g2 : CornerGeometry = {}
+		for k, v in pairs(g as {string : any}) do (g2 as {string : any})[k] = v end
+		g2.maxBudget, g2.minBudget = hi, lo
+		local bud, b = budget[i], pts[i]
+		out[i] = { geometry = g2, budget = bud, entryPoint = sub(b, scale(bud, g.uIn)), exitPoint = add(b, scale(bud, g.uOut)) }
+	end
+	return out
 end
 
 -- The curved pieces through the corner at PI `b`: entry clothoid, arc, exit clothoid, or a plain
@@ -347,7 +421,8 @@ function M.solveCorner(b : Vec, budget : number, dp : DesignParams, g : CornerGe
 end
 
 -- The alignment through PIs `pts`: straights along the legs and a solved corner at each interior
--- PI. `overrides[i]` replaces the auto tangent budget (m) at PI i.
+-- PI. `overrides[i]` replaces the auto tangent budget (m) at PI i (legBudget × the shorter leg, or
+-- all the room at the first and last corners); cornerLayouts resolves them.
 function M.buildPath(pts : {Vec}, dp : DesignParams, overrides : {integer : number}) : {Segment}
 	local n = #pts
 	if n < 2 then return {} end
@@ -355,9 +430,10 @@ function M.buildPath(pts : {Vec}, dp : DesignParams, overrides : {integer : numb
 	local straightSpeed = dp.maxDesignSpeed > 0 and dp.maxDesignSpeed or 0
 	local out : {Segment} = {}
 	local cursor = pts[1]
+	local layouts = M.cornerLayouts(pts, dp, overrides)
 	for i = 2, n - 1 do
 		local b = pts[i]
-		local layout = M.cornerLayout(pts[i - 1], b, pts[i + 1], dp, overrides[i])
+		local layout = layouts[i]
 		if layout ~= nil then
 			local sol = M.solveCorner(b, layout.budget, dp, layout.geometry)
 			out[#out + 1] = { kind = "straight", p = cursor, q = sol.entryPoint, opSpeed = straightSpeed }
