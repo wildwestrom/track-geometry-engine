@@ -69,6 +69,10 @@ target raylibBindings pkg : System.FilePath := Job.async do
   setTrace (← computeTrace (TextFilePath.mk bindings))
   return bindings
 
+/-- Dump `buildPath` fixtures for the TF3 mod's Teal port: `lake exe fixtures`. -/
+lean_exe fixtures where
+  root := `Fixtures
+
 @[default_target]
 lean_exe track where
   root := `Main

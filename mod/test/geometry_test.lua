@@ -1,0 +1,73 @@
+-- Checks the Teal port (tg_geometry.script.tl) against the Lean core, using the fixtures that
+-- `lake exe fixtures` writes to test/fixtures.lua. Run from mod/ after check.sh builds .tlpath/:
+--   lua test/geometry_test.lua
+local tl = require("tl")
+tl.loader()
+package.path = ".tlpath/?.tl;" .. package.path
+local G = require("westrom_track_geometry::/track_geometry/tg_geometry.script.tl")
+local fixtures = dofile("test/fixtures.lua")
+
+local TOL = 1e-9 -- m, rad, 1/m, m/s
+
+local failures = 0
+local function check(ok, what)
+	print((ok and "ok   " or "FAIL ") .. what)
+	if not ok then failures = failures + 1 end
+end
+
+-- IEEE-754 double from its 16-digit hex bit pattern (Lua 5.2 has no string.unpack).
+local function f64(h)
+	local hi, lo = tonumber(h:sub(1, 8), 16), tonumber(h:sub(9, 16), 16)
+	local sign = 1
+	if hi >= 0x80000000 then sign, hi = -1, hi - 0x80000000 end
+	local e, m = math.floor(hi / 0x100000), (hi % 0x100000) * 2 ^ 32 + lo
+	if e == 0x7ff then return m == 0 and sign * math.huge or 0 / 0 end
+	if e == 0 then return sign * math.ldexp(m, -1074) end
+	return sign * math.ldexp(m + 2 ^ 52, e - 1075)
+end
+
+for _, fx in ipairs(fixtures) do
+	local dp = {}
+	for k, v in pairs(fx.params) do dp[k] = f64(v) end
+	local pts = {}
+	for i, p in ipairs(fx.pis) do pts[i] = G.vec(f64(p[1]), f64(p[2]), 0) end
+	local overrides = {}
+	for i, v in pairs(fx.overrides) do overrides[i] = f64(v) end
+	local path = G.buildPath(pts, dp, overrides)
+
+	local worst, worstWhat, values, exact = 0, "", 0, 0
+	local function cmp(got, want, what)
+		values = values + 1
+		local d = math.abs(got - want)
+		if got == want then exact = exact + 1 end
+		if not (d <= worst) then worst, worstWhat = d, what end -- `not <=` catches NaN
+	end
+
+	local kindsOk = #path == #fx.segments
+	for i, want in ipairs(fx.segments) do
+		local seg = path[i]
+		if seg == nil or seg.kind ~= want.kind then kindsOk = false; break end
+		local name = string.format("segment %d (%s)", i, want.kind)
+		cmp(G.length(seg), f64(want.length), name .. " length")
+		cmp(seg.radius or 0, f64(want.radius), name .. " radius")
+		cmp(seg.opSpeed, f64(want.opSpeed), name .. " opSpeed")
+		for _, s in ipairs(want.samples) do
+			local t = f64(s.t)
+			local p, tan = G.pointAt(seg, t), G.tangentAt(seg, t)
+			local at = string.format("%s at t = %.3f", name, t)
+			cmp(p.x, f64(s.x), at .. " x"); cmp(p.y, f64(s.y), at .. " y"); cmp(p.z, f64(s.z), at .. " z")
+			cmp(tan.x, f64(s.tx), at .. " tx"); cmp(tan.y, f64(s.ty), at .. " ty"); cmp(tan.z, f64(s.tz), at .. " tz")
+			cmp(G.curvatureAt(seg, t), f64(s.k), at .. " curvature")
+		end
+	end
+	if kindsOk then cmp(G.pathLength(path), f64(fx.length), "path length") end
+
+	local kinds = {}
+	for i, s in ipairs(path) do kinds[i] = s.kind end
+	check(kindsOk, string.format("%s: segments %s", fx.name, table.concat(kinds, " ")))
+	check(kindsOk and worst <= TOL, string.format("%s: %d values, %d bit-exact, worst diff %.3g%s",
+		fx.name, values, exact, worst, worst > 0 and (" (" .. worstWhat .. ")") or ""))
+end
+
+print(failures == 0 and "all passed" or (failures .. " failed"))
+os.exit(failures == 0 and 0 or 1)

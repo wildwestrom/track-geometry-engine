@@ -1,0 +1,20 @@
+{
+    "modId": "westrom_track_geometry",
+    "revision": 1,
+    "severityAdd": "None",
+    "severityRemove": "Warning",
+    "visible": true,
+    "cosmetic": false,
+    "dependencies": null,
+    "incompatibilities": null,
+    "params": null,
+    "preRunScript": {
+        "fileName": "westrom_track_geometry::/mod.script@preRunFn"
+    },
+    "runScript": {
+        "fileName": ""
+    },
+    "postRunScript": {
+        "fileName": ""
+    }
+}

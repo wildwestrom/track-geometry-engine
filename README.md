@@ -38,6 +38,7 @@ TrackGeometry/
     Input.lean              Mouse/keyboard edit handlers
     Draw.lean               3D scene + HUD
 Main.lean                   Frame loop (exe `track`)
+Fixtures.lean               buildPath fixtures for the TF3 mod port (exe `fixtures`)
 ffi/raylib_shims.c          Generated C FFI shim (the only C in the project)
 vendor/raylib/              Vendored raylib
   tools/rlparser/rlparser.c FFI generator. Edit this to add bindings; regenerate with
@@ -59,6 +60,7 @@ lake build TrackGeometry   # build the Lean library only
 lake build raylibBindings  # regenerate Raylib.lean + raylib_shims.c from raylib.h (rlparser)
 lake build libRaylib       # build the vendored raylib static lib (via its Makefile)
 lake build libRaylibShims  # build the FFI shim static lib
+lake exe fixtures          # write buildPath fixtures for the TF3 mod's Teal port (mod/test/fixtures.lua)
 lake clean                 # remove Lean build outputs
 ```
 

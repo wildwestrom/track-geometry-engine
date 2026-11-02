@@ -19,32 +19,35 @@
       {
         legacyPackages = pkgs;
         devShell = pkgs.mkShell {
-          packages = [
+          packages = with pkgs; [
             # C
-            pkgs.clang-tools
-            pkgs.pkg-config
-            pkgs.stdenv.cc
+            clang-tools
+            pkg-config
+            stdenv.cc
 
             # Lean
-            pkgs.openssl
-            pkgs.elan
+            openssl
+            elan
 
             # Graphics
-            pkgs.libGL
-            pkgs.glfw
+            libGL
+            glfw
 
             # X11 dependencies
-            pkgs.libx11
-            pkgs.libx11.dev
-            pkgs.libxcursor
-            pkgs.libxi
-            pkgs.libxinerama
-            pkgs.libxrandr
+            libx11
+            libx11.dev
+            libxcursor
+            libxi
+            libxinerama
+            libxrandr
 
             # Wayland dependencies
-            pkgs.wayland
-            pkgs.wayland-scanner
-            pkgs.libxkbcommon
+            wayland
+            wayland-scanner
+            libxkbcommon
+
+            # Lua and Teal
+            (lua.withPackages (ps: [ ps.tl ps.teal-language-server ]))
           ];
 
           # Audio dependencies

@@ -1,0 +1,15 @@
+{
+    "authors": [
+        {
+            "name": "Christian Westrom",
+            "role": "CREATOR"
+        }
+    ],
+    "description": "Track geometry engine: rail ribbons and cant calculated from curvature.",
+    "name": "Track Geometry",
+    "summary": "Track geometry engine with curvature-based cant.",
+    "tags": [
+        "Script Mod"
+    ],
+    "url": ""
+}
