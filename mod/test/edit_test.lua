@@ -584,5 +584,51 @@ local dips = false
 for s = 0, 100, 1 do if P.heightAt(gpf, s) < -1e-9 or P.heightAt(gpf, s) > 1 + 1e-9 then dips = true end end
 check(not dips, "ground end: no overshoot in its span")
 
+-- brackets that show their curve: each opens towards its own curve, and is picked by its shape
+-- (bk: a straight bent at turn 3, a turn added on the leg after it, curve 3 as wide as it goes:
+-- curves 2 and 3 meet on their leg, and curve 3 ends on turn 4, where curve 5 starts)
+local bk = E.new(endAt(0, 0, 0), endAt(600, 0, 180))
+E.insertOnLeg(bk, 1, 300, 0)
+E.movePi(bk, 3, 300, 120)
+E.insertOnLeg(bk, 3, 375, 60)
+local bl, bp = E.corners(bk)[3], E.polyline(bk)
+E.dragBracket(bk, 3, false, bp[3].x + 1e5 * bl.geometry.uOut.x, bp[3].y + 1e5 * bl.geometry.uOut.y)
+local function handle(e, kind, i)
+	for _, h in ipairs(E.handles(e)) do if h.kind == kind and h.i == i then return h end end
+end
+local function is(h, kind, i) return h ~= nil and h.kind == kind and h.i == i end
+local exit2, entry3, exit3, entry5 = handle(bk, "exit", 2), handle(bk, "entry", 3), handle(bk, "exit", 3), handle(bk, "entry", 5)
+check(dist(exit2, entry3) < 1e-9 and dist(exit3, bp[4]) < 1e-9 and dist(entry5, bp[4]) < 1e-9,
+	"brackets: two curves meet on their leg, and two more on the turn between them")
+-- (the leg from turn 2 (150, 0) to turn 3 (300, 120) runs along (150, 120))
+local function unit(dx, dy) return dx / math.sqrt(dx * dx + dy * dy), dy / math.sqrt(dx * dx + dy * dy) end
+local lx, ly = unit(150, 120)
+check(exit2.ux ~= nil and math.abs(exit2.ux + lx) + math.abs(exit2.uy + ly) < 1e-9
+	and math.abs(entry3.ux - lx) + math.abs(entry3.uy - ly) < 1e-9,
+	"brackets: each opens along its leg, towards its own turn")
+local R = 5
+check(is(hitAt(bk, exit2.x - lx * 3, exit2.y - ly * 3, R), "exit", 2), "brackets that meet: the mouse on the first curve's side picks its end")
+check(is(hitAt(bk, exit2.x + lx * 3, exit2.y + ly * 3, R), "entry", 3), "brackets that meet: the mouse on the next curve's side picks its start")
+-- (the leg from turn 3 (300, 120) to turn 4 (375, 60) runs along (75, -60): across it is (60, 75))
+local ax, ay = unit(60, 75)
+check(is(hitAt(bk, bp[4].x + ax * 2, bp[4].y + ay * 2, R), "pi", 4), "a bracket on a turn: the circle in the middle picks the turn")
+-- (at a tip: 1.4 R across the leg, 0.3 R along it (ay, -ax) towards that bracket's curve)
+local function tip(side, towards)
+	return hitAt(bk, bp[4].x + (side * 1.4 * ax + towards * 0.3 * ay) * R, bp[4].y + (side * 1.4 * ay - towards * 0.3 * ax) * R, R)
+end
+check(is(tip(1, -1), "exit", 3) and is(tip(-1, -1), "exit", 3) and is(tip(1, 1), "entry", 5) and is(tip(-1, 1), "entry", 5),
+	"brackets on a turn: past the circle, each one's tips pick it")
+check(hitAt(bk, bp[4].x + ax * 3 * R, bp[4].y + ay * 3 * R, R) == nil, "a bracket on a turn: nothing past its tips")
+-- (bg: track to ground, the end curve fills the leg up to the ground end at (300, 200); the leg
+-- from turn 2 (216.67, 0) runs along (250 / 3, 200): across it is (-200, 250 / 3))
+local bg = assert(E.new(endAt(0, 0, 0), gnd(300, 200)))
+local gexit = handle(bg, "exit", 2)
+check(dist(gexit, gnd(300, 200)) < 1e-9, "a bracket on a ground end: the end curve ends on the end")
+local gx, gy = unit(-200, 250 / 3)
+check(is(hitAt(bg, 300 + gx * 2, 200 + gy * 2, R), "end", 3), "a bracket on a ground end: the circle in the middle picks the end")
+check(is(hitAt(bg, 300 + gx * 1.4 * R, 200 + gy * 1.4 * R, R), "exit", 2)
+	and is(hitAt(bg, 300 - gx * 1.4 * R, 200 - gy * 1.4 * R, R), "exit", 2),
+	"a bracket on a ground end: past the circle, either tip picks the bracket")
+
 print(failures == 0 and "all passed" or (failures .. " failed"))
 os.exit(failures == 0 and 0 or 1)

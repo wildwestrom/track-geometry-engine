@@ -138,8 +138,7 @@ local record Session
 	confirmOpen : boolean
 	closedTick : integer -- tick the confirm window closed (the click that closed it must not open it again)
 	ticks : integer -- ticks so far (the game's os.clock is CPU time over all threads: no use as a timer)
-	rightTick : integer -- tick of the last right-button event
-	backTick : integer -- tick of the last "back" acted on (one input's "back" arrives more than once)
+	rightTick : integer -- tick of a right-button click whose "back" has not come yet
 	log : function(string)
 	live : function() : boolean -- is the tool open and ticking (events are ignored when not)
 end
@@ -156,7 +155,6 @@ local record SessionMod
 	MatchSource : MatchSource
 	World : World
 	Session : Session
-	RIGHT_TICKS : integer
 	CLOSED_TICKS : integer
 	HEIGHT_PER_PX : number
 	new : function(log : function(string), live : function() : boolean) : Session
@@ -186,7 +184,6 @@ end
 
 local M : SessionMod = {}
 
-M.RIGHT_TICKS = 8 -- a "back" input this many ticks (50 ms) after a right-click is that click
 M.CLOSED_TICKS = 2 -- a click this many ticks after the confirm window closed is the one that closed it
 M.HEIGHT_PER_PX = 0.001 -- a Shift-drag raises an elevation point this share of the camera's distance per pixel
 
@@ -648,31 +645,33 @@ end
 
 ------------------------------------------------------------------ back
 
--- Right-click and Esc are the same "back" input. The right button shows up as a mouse event just
--- before it, so a "back" within RIGHT_TICKS of a right-click is that click. The game sends "back"
--- only for a click, not after a right-drag of the camera (and the tool never sees the right press),
--- so that "back" is the click. While editing, it removes the turn under the mouse and only Esc
--- steps back. After the first click, either drops the start; before it, Esc closes the tool. One
--- input acts once, however many times its "back" arrives (selector, input action, onBack).
-local function rightRecent(s : Session) : boolean
-	return s.rightTick ~= nil and s.ticks - s.rightTick <= M.RIGHT_TICKS
-end
-local function backRecent(s : Session) : boolean
-	return s.backTick ~= nil and s.ticks - s.backTick <= M.RIGHT_TICKS
+-- Right-click and Esc are the same "back" input, and each press brings exactly one (seen in game:
+-- by the action's onBack only). A right-click's "back" comes in the frame of its right-button
+-- "clicked" event, so a "back" then is that click; the game sends neither after a right-drag of
+-- the camera (and the tool never sees the right press). While editing, a right-click removes the
+-- turn under the mouse and only Esc steps back. After the first click, either drops the start;
+-- before it, Esc closes the tool.
+
+-- Is this "back" a right-click's? (Its mark is taken: a later Esc is Esc. The mark lasts a tick
+-- at most, in case the click's "back" never comes.)
+local function takeRight(s : Session) : boolean
+	local right = s.rightTick ~= nil and s.ticks - s.rightTick <= 1
+	s.rightTick = nil
+	return right
 end
 
 -- Is a "back" now the tool's own (else it closes the tool, or the confirm window takes it)?
 function M.backIsOurs(s : Session) : boolean
 	if s.confirmOpen then return false end -- (the window takes it)
-	return backRecent(s) or M.canGoBack(s)
+	return M.canGoBack(s)
 end
 
 -- The "back" input: Esc steps back; a right-click removes the turn under it while editing, and
 -- else steps back.
 function M.back(s : Session, w : World) : {Request}
-	if backRecent(s) or not M.canGoBack(s) then return {} end
-	s.backTick = s.ticks
-	if s.phase == "done" and rightRecent(s) then
+	local right = takeRight(s)
+	if not M.canGoBack(s) then return {} end
+	if s.phase == "done" and right then
 		s.grab = w.grab or s.grab or 10.0
 		remove(s, w)
 		return {}
@@ -687,8 +686,8 @@ end
 function M.mouse(s : Session, w : World, button : integer, kind : MouseKind, y : number) : boolean, {Request}
 	if y ~= nil then s.mouseSY = y end -- (for a Shift-drag's height)
 	if button == 2 then
-		-- (only marks the "back" that follows as a right-click; the camera keeps the button)
-		if kind ~= "moved" then s.rightTick = s.ticks end
+		-- (only marks the "back" that follows a click as a right-click; the camera keeps the button)
+		if kind == "clicked" then s.rightTick = s.ticks end
 		return false, {}
 	end
 	if button ~= 0 or not s.live() then return false, {} end

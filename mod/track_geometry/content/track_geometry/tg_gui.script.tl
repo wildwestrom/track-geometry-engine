@@ -1,15 +1,20 @@
--- GUI. Two parts:
---   TgTool : "Track Geometry" in the construction menu, Tracks -> Tools (tg_tool.res.lua). Click a
---            free track end, then another one. The new track leaves the first end along its
---            heading and arrives at the second along its heading (tg_ends); the game's
+-- GUI. Three parts:
+--   TgTool : the Track Geometry tool, in the drag builder's place on the game's track entries
+--            while their Geometry row says Yes (TgMenuPlugin). Click a free track end, then
+--            another one. The new track leaves the first end along its heading and arrives at
+--            the second along its heading (tg_ends); the game's
 --            see-through ghost shows it and its cost. Then edit it (tg_edit): drag a turn (circle)
---            or a curve's bracket (tick), press on the track to add a turn and drag it, right-click
+--            or a curve's bracket (open towards its curve), press on the track to add a turn and
+--            drag it, right-click
 --            a turn to remove it (right-click does nothing elsewhere). Click anywhere else to build it:
 --            a window shows what will be built and its cost, and asks first. Esc steps back. A badge at each curve shows the game's curve speed limit and the grade
 --            there, and the tooltip sums them up (tg_readout).
 --   TgProbe : an invisible-ish plugin in the bottom game bar (tg_probe.res.lua). It reads the
 --            ground under the mouse and places the curve badges on the screen every frame for the
 --            tool (both only allowed there).
+--   TgMenuPlugin : gives every track entry of the game's own builder a "Geometry" row
+--            (tg_menu.res.lua). With Yes, TgTool takes the drag builder's place there and builds
+--            the picked entry's track. It is the only way to the tool.
 
 local react = ug_require "::/gui/main/react.lua" as React
 local builtin = ug_require "::/gui/main/builtin.lua" as Builtin
@@ -17,7 +22,7 @@ local styleutil = ug_require "::/gui/main/styleutil.tl" as StyleUtil
 local engine_react_util = ug_require "::/gui/main/engine_react_util.tl" as EngineReactUtil
 local construction_react_util = ug_require "::/gui/construction/construction_react_util.tl" as ConstructionReactUtil
 local dialog_react_util = ug_require "::/gui/menu/dialog_react_util.tl" as DialogReactUtil
-local menu_category_util = ug_require "::/gui/main/menu_category_util.tl" as MenuCategoryUtil
+local mod_entry_point = ug_require "::/gui/main/mod_entry_point.tl" as ModEntryPoint
 local alignment = require("westrom_track_geometry::/track_geometry/tg_alignment.script.tl")
 local ends = require("westrom_track_geometry::/track_geometry/tg_ends.script.tl")
 local edits = require("westrom_track_geometry::/track_geometry/tg_edit.script.tl")
@@ -99,8 +104,8 @@ local record ToolState
 	dataKey : string -- ghost key whose data (cost, errors) came last
 	buildMsg : string -- how the last build went (kept when the tool starts over)
 	gameCtx : GameContext -- for the confirm window
-	getParams : function() : {string : number} -- the menu entry's settings (track type, electric)
-	template : string -- the track template to build, from the settings (read every tick)
+	template : string -- the track template to build: the entry's (read every tick)
+	entry : string -- the track entry picked in the game's builder (nil until the tool first runs)
 	errorsLogged : string -- ghost key whose problems were last logged
 	pending : Pending -- the ghost's plan, until the game's data for it comes
 	line : PlanLine -- the plan as last read out: badges at its curves, summed up in the tooltip
@@ -131,17 +136,18 @@ local sess = sessions.new(say, toolLive)
 -- Drop the ghost and what was read out (the session starts over by itself).
 local function resetTool()
 	tool = { active = tool.active, terrX = tool.terrX, terrY = tool.terrY, terrZ = tool.terrZ, eye = tool.eye, buildMsg = tool.buildMsg,
-		gameCtx = tool.gameCtx, getParams = tool.getParams, template = tool.template, modeOpen = tool.modeOpen,
+		gameCtx = tool.gameCtx, template = tool.template, entry = tool.entry, modeOpen = tool.modeOpen,
 		grabNow = tool.grabNow, camDist = tool.camDist, frame = tool.frame, tickFrame = tool.tickFrame, ticked = tool.ticked,
 		opens = tool.opens }
 end
 
 ------------------------------------------------------------------ track type
 
--- The track template to build: the menu settings' track type, with overhead wires if Electric is
--- on (the type's wired version, its catenaryAdd). Read every tick: the settings can change while
--- the tool is open, and the ghost (its key holds the template) is then made again.
+-- The track template to build: the track entry picked in the game's builder. Read every tick:
+-- the entry can change while the tool is open, and the ghost (its key holds the template) is
+-- then made again.
 local function trackTemplate() : string
+	-- (standard track before the first entry is read: the ghost key needs a name)
 	return tool.template or world.BASE_TEMPLATE
 end
 
@@ -155,21 +161,58 @@ local function gradeLimit() : number
 	return trackType().maxGrade
 end
 
+------------------------------------------------------------------ geometry mode
+
+-- The game's own track builder has a "Geometry" row on every track entry (added by
+-- hookTrackMenu). With Yes the tool takes the builder's place (TgTrackAction) and builds the
+-- picked entry's track, with the panel's bridge and tunnel types. One value for every track
+-- entry; it lasts until the game is closed.
+local GEO_KEY = "tg_geometry"
+
+local record Geo
+	on : boolean -- the row says Yes
+	panel : {string : number} -- the track panel's values, as its last look at the row gave them
+	hosted : boolean -- the tool ran since its alignment was last dropped (by No or the wand tab)
+end
+
+local geo : Geo = { on = false, hosted = false }
+
+-- Is the panel on its Replace Track (wand) tab? (Its `mode` row counts tabs from 1.)
+local function onWandTab(ps : {string : number}) : boolean
+	return ps ~= nil and ps["mode"] == 2
+end
+
+-- Does the tool take the builder's place now? Never on the Replace Track tab.
+local function geoWanted() : boolean
+	return geo.on and not onWandTab(geo.panel)
+end
+
+-- A value of the track panel (nil: not known yet).
+local function panelValue(key : string) : number
+	if geo.panel == nil then return nil end
+	return geo.panel[key]
+end
+
+-- A bridge or tunnel type: the one picked in the panel, else `auto`, the one the game's menu
+-- would pick itself. The panel's value is the type's id, as the game's builder takes it
+-- (bridgeTypeId), and "None" is -1 (menu_category_util.createNoObject): nil, on the ground.
+local function structureType(key : string, auto : integer) : integer
+	local v = panelValue(key)
+	if v == nil then return auto end
+	if v < 0 then return nil end
+	return math.floor(v + 0.5)
+end
+
 local function readTemplate()
-	if tool.getParams == nil then return end
-	local ok, raw = pcall(tool.getParams)
-	if not ok or raw == nil then return end
-	local el = raw["tg_electric"]
-	-- (the Electric switch's values count from 1: 1 Off, 2 On)
-	local name = world.templateFor(raw["tg_trackType"], el ~= nil and math.floor(el + 0.5) == 2)
-	if name ~= tool.template then
+	local name = tool.entry
+	if name ~= nil and name ~= tool.template then
 		say("track type: " .. name)
 		tool.template = name
 	end
 end
 
--- What the ghost shows now: the path from the start to the end (picked, or under the mouse), or
--- a stub at the start or the end under the mouse. Remade only when its ends change.
+-- What the ghost shows now: the path from the start to the end (picked, or under the mouse);
+-- nothing before there are both. Remade only when its ends change.
 local function updateGhost()
 	local a, b : ends.End, ends.End = nil, nil
 	if sess.phase == "from" then a = sess.hover
@@ -179,6 +222,8 @@ local function updateGhost()
 	local key = sess.phase .. ":" .. (a ~= nil and ends.key(a) or "-") .. ":" .. (b ~= nil and ends.key(b) or "-")
 	if sess.phase == "done" and sess.edit ~= nil then key = key .. ":" .. tostring(sess.edit.rev) end
 	key = key .. ":" .. trackTemplate()
+	-- (the panel's bridge and tunnel types: another pick makes the ghost again)
+	key = key .. ":" .. tostring(panelValue("bridgeType")) .. ":" .. tostring(panelValue("tunnelType"))
 	if key == tool.ghostKey then return end
 	-- while dragging (or moving the mouse to the end, after the first click), the ghost lags behind:
 	-- the game's check of each ghost (cost, collisions) is what makes a drag stutter, so a new one
@@ -192,17 +237,15 @@ local function updateGhost()
 	tool.ghostKey, tool.ghost, tool.ghostInfo, tool.ghostWhy, tool.cost, tool.errors = key, nil, nil, nil, nil, nil
 	tool.critical, tool.hasErrors, tool.dataKey = nil, nil, nil
 	tool.pending = nil
-	if a == nil or b == nil then tool.line = nil end -- (a path's line stays until the next one is read out)
-	if a == nil or (b == nil and not ends.hasHeading(a)) then return end -- (no stub on the ground)
+	-- (a path's line stays until the next one is read out)
+	if a == nil or b == nil then tool.line = nil; return end
 	-- bridges and tunnels where the track is far off the ground: their types first (without them,
 	-- or when the ground cannot be read, the plan has none)
 	local tt = trackType()
 	local ground, water = world.ground, world.water
-	local bridgeType, tunnelType = tt.bridgeType, tt.tunnelType
+	local bridgeType, tunnelType = structureType("bridgeType", tt.bridgeType), structureType("tunnelType", tt.tunnelType)
 	if tt.structuresWhy ~= nil then ground, water = nil, nil end -- (tg_world logged why)
-	local plan, pwhy : plans.Plan, string
-	if b == nil then plan = plans.stub(a, ground, water)
-	else plan, pwhy = plans.path(a, b, sess.phase == "done" and sess.edit or nil, ground, water) end
+	local plan, pwhy = plans.path(a, b, sess.phase == "done" and sess.edit or nil, ground, water)
 	if plan == nil then tool.ghostWhy = pwhy; tool.line = nil; return end
 	if plan.note ~= nil then say("ghost: no structures: " .. plan.note) end
 	local nodes, grades = plan.built.nodes, plan.grades
@@ -223,7 +266,7 @@ local function updateGhost()
 	for _, en in ipairs({ a, b }) do
 		if en ~= nil and en.kind == "split" then used[en.piece.edge] = true end
 	end
-	if b ~= nil and #nodes >= 2 then
+	if #nodes >= 2 then
 		for i, en in ipairs({ a, b }) do
 			local other = i == 1 and b or a
 			local n0, n1 = nodes[i == 1 and 1 or #nodes - 1], nodes[i == 1 and 2 or #nodes]
@@ -244,20 +287,18 @@ local function updateGhost()
 	if not ok then tool.ghostWhy = "error: " .. tostring(p); say("ghost: " .. tool.ghostWhy); return end
 	if p == nil then tool.ghostWhy = why; return end
 	tool.ghost = p as SimpleProposal
-	if b ~= nil then
-		tool.pending = { key = key, plan = plan }
-		tool.ghostInfo = plan.structures ~= nil and (plan.info .. "; " .. plan.structures) or plan.info
-		if sess.phase == "done" and sess.drag == nil then
-			say(string.format("tool: path %s: from %s (%.1f, %.1f) leaving %.2f deg, to %s (%.1f, %.1f) arriving %.2f deg, %d pieces, grade %+.1f ‰ to %+.1f ‰",
-				plan.info, ends.name(a), a.x, a.y, math.deg(nodes[1].heading), ends.name(b), b.x, b.y, math.deg(nodes[#nodes].heading), #nodes - 1, grades[1] * 1000, grades[#grades] * 1000))
-			for _, r in ipairs(runs) do
-				say(string.format("tool: existing piece %d runs on through %d joints to node %d", r.first.edge, #r.nodes, r.node))
-			end
-			local function own(e : ends.End, sign : number) : string
-				return ends.hasHeading(e) and string.format("%.2f deg", math.deg(atan2(sign * e.dy, sign * e.dx))) or "none (ground)"
-			end
-			say("tool: end headings: start " .. own(a, 1) .. ", end " .. own(b, -1) .. " (the ends' own directions)")
+	tool.pending = { key = key, plan = plan }
+	tool.ghostInfo = plan.structures ~= nil and (plan.info .. "; " .. plan.structures) or plan.info
+	if sess.phase == "done" and sess.drag == nil then
+		say(string.format("tool: path %s: from %s (%.1f, %.1f) leaving %.2f deg, to %s (%.1f, %.1f) arriving %.2f deg, %d pieces, grade %+.1f ‰ to %+.1f ‰",
+			plan.info, ends.name(a), a.x, a.y, math.deg(nodes[1].heading), ends.name(b), b.x, b.y, math.deg(nodes[#nodes].heading), #nodes - 1, grades[1] * 1000, grades[#grades] * 1000))
+		for _, r in ipairs(runs) do
+			say(string.format("tool: existing piece %d runs on through %d joints to node %d", r.first.edge, #r.nodes, r.node))
 		end
+		local function own(e : ends.End, sign : number) : string
+			return ends.hasHeading(e) and string.format("%.2f deg", math.deg(atan2(sign * e.dy, sign * e.dx))) or "none (ground)"
+		end
+		say("tool: end headings: start " .. own(a, 1) .. ", end " .. own(b, -1) .. " (the ends' own directions)")
 	end
 end
 
@@ -605,15 +646,25 @@ end
 
 ------------------------------------------------------------------ the session's adapter
 
-local function snapEnd(x : number, y : number, z : number, hovered : integer, exclude : ends.End) : ends.End, string
-	-- (near the start's piece, not under the mouse: the ground, not a refusal)
-	local near, piece = world.endsNear(x, y, hovered, exclude ~= nil and exclude.piece ~= nil and exclude.piece.edge or nil)
-	return ends.snap(near, piece, x, y, z, exclude)
-end
 local function shiftHeld() : boolean
 	return api.gui.inputAction.modifierOnlyActionIsActive("IA_PRECISION_MODE")
 end
 
+-- Does Geometry mode join existing track now? Not with the panel's Snapping on No (its value is
+-- the row's index: 1 Yes, 2 No), nor while Shift is held, as in the game's builder (which greys
+-- the row then).
+local function geoSnaps() : boolean
+	return panelValue("disableSnapping") ~= 2 and not shiftHeld()
+end
+
+-- The end the mouse picks: what it snaps to (tg_ends.snap) on the track and nodes near it, or
+-- the ground there when Geometry mode does not snap now. Ends already picked stay.
+local function snapEnd(x : number, y : number, z : number, hovered : integer, exclude : ends.End) : ends.End, string
+	if not geoSnaps() then return ends.snap({}, nil, x, y, z, exclude) end
+	-- (near the start's piece, not under the mouse: the ground, not a refusal)
+	local near, piece = world.endsNear(x, y, hovered, exclude ~= nil and exclude.piece ~= nil and exclude.piece.edge or nil)
+	return ends.snap(near, piece, x, y, z, exclude)
+end
 -- What the session needs from the game, as of now. fresh (the tool's tick): read the camera
 -- again; else (a mouse or "back" event) as it was at the last tick.
 local function worldNow(fresh : boolean) : sessions.World
@@ -735,6 +786,8 @@ local function tooltip() : Builtin.ActionTooltipParam<any>
 			lines[1] = "Dragging the " .. sessions.handleName(h) .. "."
 		elseif h == nil then
 			lines[1] = "Drag a turn, a curve's bracket or a ground end. Press on the track to add a turn."
+			lines[2] = "The small window switches to the vertical profile."
+			lines[3] = "Click off the track to build (you are asked first)."
 		end
 		if sess.editMsg ~= nil then lines[#lines + 1] = sess.editMsg; bad = true end
 		path()
@@ -966,7 +1019,7 @@ local function straightEdge(x0 : number, y0 : number, z0 : number, x1 : number, 
 end
 
 -- The gizmos of the edit: the PI polyline, a circle at each turn (coloured by how it can move)
--- and a tick across the leg at each curve's start and end (its brackets).
+-- and a bracket at each curve's start and end, open towards its curve.
 local function editEdges() : {Builtin.Type.EdgeRenderable.Edge}
 	local e, r = sess.edit, sess.grab or 10.0
 	local w = math.max(0.5, r / 8)
@@ -996,14 +1049,20 @@ local function editEdges() : {Builtin.Type.EdgeRenderable.Edge}
 		elseif h.kind == "end" then
 			edges[#edges + 1] = circleEdge(h.x, h.y, z, r, isHot(h) and COLORS.hot or COLORS.groundEnd, w)
 		else
-			-- across the leg the bracket sits on
-			local p, q = pis[h.i], h.kind == "entry" and pis[h.i - 1] or pis[h.i + 1]
-			local lx, ly = q.x - p.x, q.y - p.y
-			local len = math.sqrt(lx * lx + ly * ly)
-			if len > 0 then
-				local nx, ny = -ly / len * r, lx / len * r
-				edges[#edges + 1] = straightEdge(h.x - nx, h.y - ny, z, h.x + nx, h.y + ny, z,
-					isHot(h) and COLORS.hot or COLORS.bracket, 2 * w)
+			-- a thin 〔: a bar across the leg, past the circles; at each end a slanted corner and
+			-- then a tip along the leg, towards the curve
+			local c = isHot(h) and COLORS.hot or COLORS.bracket
+			local bar, tip = edits.BRACKET_BAR * r, edits.BRACKET_TIP * r
+			local corner = tip / 2
+			-- (a point `along` the leg towards the curve and `across` it)
+			local function at(along : number, across : number) : number, number
+				return h.x + h.ux * along - h.uy * across, h.y + h.uy * along + h.ux * across
+			end
+			local shape = { { tip, bar }, { corner, bar }, { 0, bar - corner }, { 0, corner - bar }, { corner, -bar }, { tip, -bar } }
+			for k = 1, #shape - 1 do
+				local x0, y0 = at(shape[k][1], shape[k][2])
+				local x1, y1 = at(shape[k + 1][1], shape[k + 1][2])
+				edges[#edges + 1] = straightEdge(x0, y0, z, x1, y1, z, c, w / 2)
 			end
 		end
 	end
@@ -1076,6 +1135,22 @@ local function cursorEdges(c : sessions.Cursor) : {Builtin.Type.EdgeRenderable.E
 	return edges
 end
 
+-- Esc that is not the tool's own: close the construction menu, as Esc does for the game's builder.
+-- The menu's abort alone does not: in mouse mode it only picks the same entry again, which opens
+-- the tool again, and leaves Esc to the menu's own IA_MENU_BACK, which sees it only while the
+-- keyboard focus is in the menu (not after a click in the world). So also raise the event the
+-- menu's quit raises (construction.tl), which pops the construction tool.
+local fireReactEvent = ((api.gui as {string : any}).fireReactEvent) as function(string, any)
+local function closeMenu(abort : function())
+	abort()
+	if fireReactEvent == nil then
+		say("esc: no api.gui.fireReactEvent: the menu stays open")
+		return
+	end
+	local ok, err = pcall(function() : boolean fireReactEvent("constructionMenuQuit", nil); return true end)
+	if not ok then say("esc: closing the menu: " .. tostring(err)) end
+end
+
 -- The tool in the world: the selector (clicks), the ghost, the gizmos, the cursor and the tooltip.
 local function toolAction(abort : function()) : TreeNodeId
 	tool.active = true
@@ -1099,10 +1174,9 @@ local function toolAction(abort : function()) : TreeNodeId
 				return true
 			end,
 			onSelectSecondary = function(_e : Engine.Entity, _i : {integer}, _d : Gui.SelectionDetails) : boolean
-				if sess.phase == "done" and toolLive() then return true end -- (its "back" removes the turn)
-				if not sessions.canGoBack(sess) then return false end
-				backAction()
-				return true
+				-- (claims the click but never acts: the click's one "back" does, by onBack; acting here
+				-- too would take that "back" for an Esc)
+				return sessions.canGoBack(sess)
 			end,
 			filter = world.isTrackEdge,
 			-- a left click anywhere counts (the selector alone only reports clicks on a track piece)
@@ -1205,7 +1279,7 @@ local function toolAction(abort : function()) : TreeNodeId
 		tool = "construction",
 		onBack = function()
 			if sess.confirmOpen then return end -- (the window takes Esc itself: Cancel)
-			if backIsOurs() then backAction() else abort() end
+			if backIsOurs() then backAction() else closeMenu(abort) end
 		end,
 		terrainCirclePolicy = "Never",
 		children = children,
@@ -1223,81 +1297,196 @@ local function iaState(fn : function() : boolean) : function() : Gui.InputAction
 	end
 end
 
--- The menu entry's recipe: while the tool is the active menu item, put the tool into the world.
-local TgToolAction = react.RegisterRecipe("TgToolAction", function(params : ConstructionCustomActionParams<any>) : TreeNodeId
-	react.setRestrictMouseFocus(true)
-	if not params.isActive then return nil end
-	-- (right-click: the construction menu would close itself on the "back" input; while there is
-	-- a step to go back, take it first)
-	react.useInputAction("IA_CLOSE_TOPMOST_WINDOW", react.iaHandler(backAction, iaState(backIsOurs)))
+-- The tool as a track entry's action. The menu calls this only for the picked entry, so here is
+-- where the tool learns which track to build.
+local function hostedAction(params : ConstructionCustomActionParams<any>, entry : string) : TreeNodeId
 	tool.gameCtx = params.gameCtx
-	tool.getParams = params.getCurrentParams
-	params.setActionFn(function() : TreeNodeId return toolAction(params.abort) end, "TgToolAction")
+	tool.entry = entry
+	geo.hosted = true
+	return toolAction(params.abort)
+end
+
+------------------------------------------------------------------ the game's track builder
+
+local function geoKey() : string
+	return geoWanted() and "on" or "off"
+end
+
+-- A track entry's recipe (hookTrackMenu gives it to every track entry of the game's builder).
+-- The menu runs it for every entry it shows, each with `isActive` (construction.tl), and keeps
+-- an action per entry; only the picked entry's is used. With Geometry on, the tool is bound as
+-- the entry's action; with it off, or on the Replace Track tab, the binding is taken away and
+-- the menu falls back to the game's own action (construction.tl, propagateActionFn).
+local TgTrackAction = react.RegisterRecipe("TgTrackAction", function(params : ConstructionCustomActionParams<any>) : TreeNodeId
+	-- (the row is read every 100 ms: flipping it binds or unbinds without another click)
+	local key = engine_react_util.useStepStateTimer(geoKey, 0.1)
+	local _ = key:old()
+	local bound = react.useRef(false) as ReactRefT<boolean>
+	local function unbind()
+		if not bound:get() then return end
+		bound:set(false)
+		-- (the menu's list may be gone already when this entry unmounts)
+		local ok, err = pcall(function() : boolean params.setActionFn(nil); return true end)
+		if not ok then say("geometry mode: unbind: " .. tostring(err)) end
+	end
+	react.onUnmount(function(_ : any) unbind() end)
+	if not (params.isActive and geoWanted()) then
+		-- (Geometry flipped to No, or the Replace Track tab: an alignment being edited is
+		-- dropped, unasked, once for all the entries. Not on unmount: picking another entry
+		-- keeps it.)
+		if bound:get() and geo.hosted and not geoWanted() then
+			geo.hosted = false
+			closeConfirm()
+			closeModeWindow()
+			sessions.reset(sess)
+			resetTool()
+		end
+		unbind()
+		return nil
+	end
+	react.setRestrictMouseFocus(true)
+	local entry = params.definition.resName as string
+	react.useInputAction("IA_CLOSE_TOPMOST_WINDOW", react.iaHandler(backAction, iaState(backIsOurs)))
+	bound:set(true)
+	-- (a key per entry, as the game's own custom actions have: whether the menu would call a new
+	-- entry's fn under an unchanged key is not known)
+	params.setActionFn(function() : TreeNodeId return hostedAction(params, entry) end, "TgTrackAction:" .. entry)
 	return nil
 end)
 
--- The track types on offer this year, without overhead wires (Electric picks each one's wired
--- version); default: standard. The picker's value is the picked template's id.
-local function trackObjects() : {MenuCategoryUtil.FilterObject}, integer
-	local out : {MenuCategoryUtil.FilterObject} = {}
-	local best : integer = nil
-	for _, o in ipairs(menu_category_util.getAvailableObjectsSorted(api.res.streetTemplateRep as ResTypeRep<integer, table>, api.engine.util.getYear())) do
-		local ok, t = pcall(api.res.streetTemplateRep.get, o.id)
-		local wired = ok and t ~= nil and (t as table).catenaryRemove ~= nil and (t as table).catenaryRemove ~= ""
-		if ok and t ~= nil and (t as StreetTemplate).roadType == api.type["enum"].RoadType.TRACK and not wired then
-			out[#out + 1] = o
-			if api.res.streetTemplateRep.getName(o.id) == world.BASE_TEMPLATE then best = #out end
+local ENABLED : ConstructionMenuParam.CheckEnabledResult = "Enabled"
+local DISABLED : ConstructionMenuParam.CheckEnabledResult = "Disabled"
+
+-- The "Geometry" row, placed and kept as Real Track Cant's Cant row: one value in every category,
+-- not reset by the menu, saved nowhere. The panel asks the row whether it is enabled with all
+-- its values, on every look: that is where the tool reads them (the Replace Track tab is mode 2;
+-- a custom action is given only the Settings window's values).
+local function geoParam() : ConstructionMenuParam
+	local p : ConstructionMenuParam = {
+		key = GEO_KEY,
+		group = "settings",
+		name = "Geometry",
+		-- (the game does not break a tooltip's lines itself)
+		tooltip = "Lay the track with the Track Geometry tool instead of the built-in track builder tool.",
+		values = { "No", "Yes" },
+		numbers = { 0, 1 },
+		defaultIndex = geo.on and 2 or 1,
+		yearFrom = 0,
+		yearTo = 0,
+		uiType = api.type["enum"].ScriptParamType.Button,
+		location = api.type["enum"].ScriptParamLocation.Toolbar,
+		preserveValueInAllCategories = true,
+		resetOnCategoryChange = false,
+		resetOnMenuClose = false,
+		resetOnDefinitionChange = false,
+		checkEnabledFn = function(ps : {string : number}) : ConstructionMenuParam.CheckEnabledResult
+			geo.panel = ps
+			if ps[GEO_KEY] ~= nil then geo.on = ps[GEO_KEY] == 1 end
+			return onWandTab(ps) and DISABLED or ENABLED
+		end,
+		onChangeFn = function(v : number, _a : ConstructionMenuParamsAPI, _o : number)
+			geo.on = v == 1
+		end,
+	}
+	-- (`id` is missing from the game's ConstructionMenuParam def; its own rows pass it)
+	;(p as {string : any}).id = GEO_KEY
+	return p
+end
+
+local function hasGeoRow(def : ConstructionDefinition) : boolean
+	for _, p in ipairs(def.params or {}) do
+		if p.key == GEO_KEY then return true end
+	end
+	return false
+end
+
+-- Give every track entry of the game's builder the Geometry row and the recipe (an entry with
+-- another mod's custom action is left alone).
+local function decorate(defs : {ConstructionDefinition})
+	for _, def in ipairs(defs) do
+		local ours = hasGeoRow(def)
+		if def.action == "ACTION_TRACK_BUILDER_UPGRADER" and (ours or def.customAction == nil) then
+			if not ours then
+				def.params = def.params or {}
+				table.insert(def.params, geoParam())
+			end
+			def.customAction = { recipe = TgTrackAction as Recipe<ConstructionCustomActionParams<any>>, customParam = nil }
 		end
 	end
-	return out, best or 1
 end
 
--- The menu entry's settings (in its Settings window: a custom tool's getCurrentParams only
--- returns those, as Track Connector found).
-local function toolParams() : {ConstructionMenuParam}
-	return {
-		{
-			key = "tg_trackType",
-			name = "Track",
-			tooltip = "Track type to build",
-			defaultIndex = 1,
-			yearFrom = 0,
-			yearTo = 0,
-			location = api.type["enum"].ScriptParamLocation.Default,
-			getFilterObjectsFn = trackObjects,
-			resetOnDefinitionChange = false,
-			resetOnCategoryChange = false,
-			resetOnMenuClose = false,
-		},
-		{
-			key = "tg_electric",
-			name = "Electric",
-			tooltip = "Build with overhead wires (the track type's electric version)",
-			values = { "Off", "On" },
-			defaultIndex = 1,
-			uiType = api.type["enum"].ScriptParamType.Button,
-			location = api.type["enum"].ScriptParamLocation.Default,
-			yearFrom = 0,
-			yearTo = 0,
-		},
-	}
+-- Wrap the game's list of track entries, once (as Real Track Cant adds its Cant row). The wrapper
+-- calls whichever decorate was stored last, so a reloaded copy of this file takes over.
+local function hookTrackMenu()
+	local cru = construction_react_util as {string : any}
+	local orig = construction_react_util.getTrackDefinitions
+	if orig == nil then say("geometry mode: no getTrackDefinitions to hook"); return end
+	local first = cru.__tgDecorate == nil
+	cru.__tgDecorate = decorate
+	if not first then return end
+	construction_react_util.getTrackDefinitions = function() : {ConstructionDefinition}
+		local defs = orig()
+		local ok, err = pcall(function() : boolean (cru.__tgDecorate as function({ConstructionDefinition}))(defs); return true end)
+		if not ok then say("geometry mode: " .. tostring(err)) end
+		return defs
+	end
+	say("geometry mode: row added to the track entries")
 end
 
--- The menu entry (the construction menu calls this through tg_tool.res.lua).
-local function TgToolDefinition(resName : ResName, _repository : ConstructionActionRepository, _params : table) : ConstructionDefinition
-	return {
-		resName = resName,
-		icon = { icon = "::/gui/construction/tools/track_switch.tga" },
-		previewIcon = { icon = "::/gui/construction/tools/electrify_preview.tga" },
-		name = "Track Geometry",
-		description = "Lay new track between two track ends with clothoid transitions. Click a track end, then another one, then edit the path and click off it to build (you are asked first). A small window switches to the vertical alignment: press on the track to add an elevation point, drag it along the track, Shift-drag it up or down. Right-click a turn or point removes it; Esc goes back. The track type and Electric are in the Settings.",
-		action = "ACTION_CUSTOM",
-		availability = { yearFrom = 0, yearTo = 0 },
-		params = toolParams(),
-		menuCategory = { categories = { { category = "rail_tools", order = 6100 } } },
-		customAction = { recipe = TgToolAction as Recipe<ConstructionCustomActionParams<any>>, customParam = nil },
-	}
+-- The track panel's rows that stay usable in Geometry mode: the builder / wand tabs, the bridge
+-- and tunnel types, Snapping and Geometry. Every other row, the game's or another mod's, belongs
+-- to the drag builder.
+local GEO_ROWS : {string : boolean} = { mode = true, bridgeType = true, tunnelType = true, disableSnapping = true, [GEO_KEY] = true }
+
+-- The rows already greyed (weak: the menu makes new definitions on each opening).
+local greyed : {ConstructionMenuParam : boolean} = setmetatable({}, { __mode = "k" })
+
+-- Grey a row out while Geometry is Yes on the builder tab. A row the game or its mod hides or
+-- greys stays so; with Geometry on No, or on the wand tab, the row says what it said before.
+local function greyInGeometry(p : ConstructionMenuParam)
+	if greyed[p] then return end
+	greyed[p] = true
+	local orig = p.checkEnabledFn
+	p.checkEnabledFn = function(ps : {string : number}) : ConstructionMenuParam.CheckEnabledResult
+		local r = ENABLED
+		if orig ~= nil then r = orig(ps) end
+		if r == ENABLED and ps[GEO_KEY] == 1 and not onWandTab(ps) then return DISABLED end
+		return r
+	end
 end
+
+local function greyDragRows(def : ConstructionDefinition)
+	if not hasGeoRow(def) then return end
+	for _, p in ipairs(def.params) do
+		if not GEO_ROWS[p.key] then greyInGeometry(p) end
+	end
+end
+
+-- Grey the drag builder's rows on the entries with the Geometry row. Done as the menu gathers its
+-- entries (forEachDefinition), after every mod's getTrackDefinitions wrapper has run, so the rows
+-- other mods add are reached whatever the load order. Wrapped once; a reloaded copy takes over.
+local function hookMenuEntries()
+	local cru = construction_react_util as {string : any}
+	local orig = construction_react_util.forEachDefinition
+	if orig == nil then say("geometry mode: no forEachDefinition to hook"); return end
+	local first = cru.__tgGrey == nil
+	cru.__tgGrey = greyDragRows
+	if not first then return end
+	construction_react_util.forEachDefinition = function(fn : function(ConstructionDefinition), repository : ConstructionActionRepository)
+		orig(function(def : ConstructionDefinition)
+			local ok, err = pcall(function() : boolean (cru.__tgGrey as function(ConstructionDefinition))(def); return true end)
+			if not ok then say("geometry mode: grey rows: " .. tostring(err)) end
+			fn(def)
+		end, repository)
+	end
+end
+
+-- Loaded with the game's GUI (tg_menu.res.lua); draws nothing.
+local TgMenuPlugin = react.RegisterPluginRecipe(mod_entry_point.ModEntryPointExtension, "TgMenuPlugin", function() : TreeNodeId
+	hookTrackMenu()
+	hookMenuEntries()
+	return builtin.FloatingLayout{ children = {} }
+end)
 
 ------------------------------------------------------------------ bottom bar
 
@@ -1330,5 +1519,5 @@ end)
 
 return {
 	TgProbe = TgProbe,
-	TgToolDefinition = TgToolDefinition,
+	TgMenuPlugin = TgMenuPlugin,
 }

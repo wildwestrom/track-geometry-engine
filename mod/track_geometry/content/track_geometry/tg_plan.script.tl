@@ -28,11 +28,11 @@ local record Plan
 	built : Track
 	grades : {number} -- the grade at each built node
 	kinds : {string} -- each built piece "ground", "bridge" or "tunnel"; nil: all ground
-	info : string -- "412 m, 2 turns"; nil for a stub
+	info : string -- "412 m, 2 turns"
 	structures : string -- "1 bridge (300 m)"; nil when there are none
 	note : string -- why there are no structures, when placing them failed; else nil
-	minRadius : number -- the smallest arc radius (m), math.huge without arcs; nil for a stub
-	curves : {readout.Curve} -- nil for a stub
+	minRadius : number -- the smallest arc radius (m), math.huge without arcs
+	curves : {readout.Curve}
 end
 
 -- A plan read out with the game's speeds.
@@ -49,12 +49,10 @@ local record PlanMod
 	Track : Track
 	Plan : Plan
 	Readout : Readout
-	STUB : number
 	STEP : number
 	MAX_TURN : number
 	BADGE_EVERY : number
 	PARAMS : geometry.DesignParams
-	stub : function(a : ends.End, ground : Ground, water : Water) : Plan
 	path : function(a : ends.End, b : ends.End, e : edits.Edit, ground : Ground, water : Water) : Plan, string
 	readout : function(plan : Plan, speeds : {number}) : Readout, string
 	summary : function(r : Readout, trackSpeed : number) : {string}
@@ -62,15 +60,10 @@ end
 
 local M : PlanMod = {}
 
-M.STUB = 30.0 -- length of the stub that marks a hovered or picked end (m)
 M.STEP = edits.STEP -- the path is read this finely (m): for the ground under it, the readout, picking...
 M.MAX_TURN = math.rad(15) -- ...but built in pieces turning at most this much (straights: one piece)
 M.BADGE_EVERY = 50.0 -- a speed badge this often along the path (m)
 M.PARAMS = edits.PARAMS
-
--- the game runs Lua 5.2: two-argument atan is math.atan2 there
-local atan2 : function(number, number) : number = (math as {string : any}).atan2 as function(number, number) : number
-	or (math.atan as function(number, number) : number)
 
 -- The end nodes moved exactly onto the existing nodes, so the new track joins them.
 local function pinEnds(nodes : {alignment.Sample}, a : ends.End, b : ends.End)
@@ -95,18 +88,6 @@ local function classify(nodes : {alignment.Sample}, z : {number}, ground : Groun
 	end)
 	if not ok then return nil, nil, tostring(kinds) end
 	return kinds as {string}, summary as string, nil
-end
-
--- A short straight stub out of end a, at its track's grade, marking it. Built as it is read.
-function M.stub(a : ends.End, ground : Ground, water : Water) : Plan
-	local h = atan2(a.dy, a.dx)
-	local nodes : {alignment.Sample} = { { x = a.x, y = a.y, heading = h, s = 0, k = 0 },
-		{ x = a.x + M.STUB * a.dx, y = a.y + M.STUB * a.dy, heading = h, s = M.STUB, k = 0 } }
-	local z, grades : {number}, {number} = {}, {}
-	for i, nd in ipairs(nodes) do z[i], grades[i] = a.z + a.grade * nd.s, a.grade end
-	local kinds, _, note = classify(nodes, z, ground, water)
-	local track : Track = { nodes = nodes, z = z }
-	return { dense = track, built = track, grades = grades, kinds = kinds, note = note }
 end
 
 -- The built nodes with the pieces out of a switch end a (and into one at b) merged, so the piece

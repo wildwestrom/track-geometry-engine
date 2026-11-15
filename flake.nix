@@ -47,7 +47,11 @@
             libxkbcommon
 
             # Lua and Teal
-            (lua.withPackages (ps: [ ps.tl ps.teal-language-server ]))
+            (lua.withPackages (ps: [
+              ps.tl
+              ps.teal-language-server
+              ps.luacheck
+            ]))
           ];
 
           # Audio dependencies

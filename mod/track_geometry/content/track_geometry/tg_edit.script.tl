@@ -124,6 +124,8 @@ local record Hit
 	i : integer
 	x : number -- turns, ends and brackets: where they are
 	y : number
+	ux : number -- brackets only: the direction (unit) along its leg towards its own curve
+	uy : number
 	mobility : string -- turns only: "free", "ray" or "fixed"
 	s : number -- elevation points, ends (vertical) and the track: the chainage (m)
 end
@@ -156,6 +158,8 @@ local record EditMod
 	HitKind : HitKind
 	Point : Point
 	Ray : Ray
+	BRACKET_BAR : number
+	BRACKET_TIP : number
 	MIN_GAP : number
 	MIN_SPAN : number
 	STEP : number
@@ -201,6 +205,11 @@ local record EditMod
 end
 
 local M : EditMod = {}
+-- A bracket's shape, in grab radii (the radius of the turn and end circles): its bar across the
+-- leg reaches BRACKET_BAR either side, past a circle under it, and each end bends BRACKET_TIP
+-- along the leg towards its curve (a slanted corner, then the tip).
+M.BRACKET_BAR = 1.5
+M.BRACKET_TIP = 0.8
 
 -- Closest two neighbouring turns may get (m).
 M.MIN_GAP = 10.0
@@ -450,6 +459,15 @@ function M.dropEnd(e : Edit)
 	e.held = nil
 end
 
+-- The bracket of turn i's curve at (x, y) on the leg to turn j: it opens towards turn i (on a
+-- leg of no length, no way: never NaN).
+local function bracket(e : Edit, kind : HitKind, i : integer, j : integer, x : number, y : number) : Hit
+	local p, q = e.turns[i].pos, e.turns[j].pos
+	local len = math.sqrt(d2(p.x, p.y, q.x, q.y))
+	local k = len > 0 and 1 / len or 0
+	return { kind = kind, i = i, x = x, y = y, ux = (p.x - q.x) * k, uy = (p.y - q.y) * k }
+end
+
 -- The ends that can be dragged, the turns and the brackets of every curve.
 function M.handles(e : Edit) : {Hit}
 	local hs : {Hit} = {}
@@ -464,8 +482,8 @@ function M.handles(e : Edit) : {Hit}
 		hs[#hs + 1] = M.turn(e, i)
 		local l = ls[i]
 		if l ~= nil then
-			hs[#hs + 1] = { kind = "entry", i = i, x = l.entryPoint.x, y = l.entryPoint.y }
-			hs[#hs + 1] = { kind = "exit", i = i, x = l.exitPoint.x, y = l.exitPoint.y }
+			hs[#hs + 1] = bracket(e, "entry", i, i - 1, l.entryPoint.x, l.entryPoint.y)
+			hs[#hs + 1] = bracket(e, "exit", i, i + 1, l.exitPoint.x, l.exitPoint.y)
 		end
 	end
 	return hs
@@ -553,8 +571,18 @@ function M.chainageOnRay(e : Edit, ray : Ray) : number, number
 	return best, bestD
 end
 
--- What is at (x, y) within r. Horizontal: a ground end, else a turn or a bracket, else a leg (or
--- the track along it, which leaves the legs at the curves). Vertical: the nearest ground end or
+-- How far (x, y) is from the bar of the bracket h, squared, and how far along the leg on its
+-- curve's side (negative: on the other side). The bar reaches BRACKET_BAR * r either side.
+local function offBar(h : Hit, x : number, y : number, r : number) : number, number
+	local wx, wy = x - h.x, y - h.y
+	local along = wx * h.ux + wy * h.uy
+	local past = math.max(0, math.abs(wx * h.uy - wy * h.ux) - M.BRACKET_BAR * r)
+	return along * along + past * past, along
+end
+
+-- What is at (x, y) within r. Horizontal: the nearest ground end, turn (within r of it) or bracket
+-- (within r of its bar, so its tips reach past a circle under it), else a leg (or the track along
+-- it, which leaves the legs at the curves). Vertical: the nearest ground end or
 -- elevation point (the end a hair ahead), else the track, all also up at their heights along ray
 -- (the mouse's view ray), when it is given. nil: nothing.
 function M.hit(e : Edit, vertical : boolean, x : number, y : number, r : number, ray ?: Ray) : Hit
@@ -589,13 +617,21 @@ function M.hit(e : Edit, vertical : boolean, x : number, y : number, r : number,
 		return nil
 	end
 	local best : Hit = nil
-	local bestD = r * r
+	local bestD = math.huge
 	for _, h in ipairs(M.handles(e)) do
 		local d = d2(x, y, h.x, h.y)
-		-- (a ground end a hair ahead: an end curve that fills its leg has its bracket on the end,
-		-- and its other bracket still resizes it)
-		if h.kind == "end" then d = d - 1e-6 end
-		if d <= bestD then best, bestD = h, d end
+		local off = d
+		-- (where handles sit together, a hair ahead: an end or a turn, in its circle, then the
+		-- bracket whose curve is on the mouse's side; so a curve that fills its leg up to an end,
+		-- a turn or the next curve is resized at its bracket's tips, or from its own side)
+		if h.kind == "entry" or h.kind == "exit" then
+			local along : number
+			off, along = offBar(h, x, y, r)
+			if along > 0 then d = d - 1e-6 end
+		else
+			d = d - 2e-6
+		end
+		if off <= r * r and d <= bestD then best, bestD = h, d end
 	end
 	if best ~= nil then return best end
 	local leg, d = nearestLeg(e, x, y)

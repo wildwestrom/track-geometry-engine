@@ -14,11 +14,11 @@ local alignment = require("westrom_track_geometry::/track_geometry/tg_alignment.
 local ends = require("westrom_track_geometry::/track_geometry/tg_ends.script.tl")
 
 local record Options
-	template : string -- track template name (tg_world.templateFor)
+	template : string -- track template name (the picked track entry)
 	z : {number} -- height at each node
 	grades : {number} -- grade at each node, for the tangents' z (z must follow it)
 	from : ends.End -- the end at the first sample: the new track joins its node, if it has one
-	to : ends.End -- the end at the last sample, likewise; nil: none (a stub)
+	to : ends.End -- the end at the last sample, likewise
 	kinds : {string} -- each piece "ground", "bridge" or "tunnel" (tg_structures); nil: all ground
 	replace : {integer} -- existing pieces at a node end to replace with copies (tg_world.piecesAt)
 	runs : {ends.Run} -- existing track merged into the copies and parts at the switches; nil: none

@@ -69,18 +69,8 @@ local function oneKindEach(plan, ground, what)
 	check(not bad and #plan.kinds == #bn - 1, what .. ": each built piece is one kind")
 end
 
------------------------------------------------------------------- the stub
-local a = endAt(0, 0, 1, 0, 100, 0.01)
-local stub = P.stub(a, flat, dry)
-check(#stub.built.nodes == 2 and stub.built.nodes[2].s == P.STUB and near(stub.built.nodes[2].x, P.STUB)
-	and near(stub.built.z[1], 100) and near(stub.built.z[2], 100 + 0.01 * P.STUB)
-	and stub.grades[1] == 0.01 and stub.grades[2] == 0.01,
-	"stub: a straight STUB long out of the end, at its track's grade")
-check(stub.dense == stub.built and stub.info == nil and stub.curves == nil and stub.kinds[1] == "bridge",
-	"stub: read as it is built; 100 m above the ground it is a bridge")
-
 ------------------------------------------------------------------ a straight over a valley
-a = endAt(0, 0, 1, 0, 0, 0.005)
+local a = endAt(0, 0, 1, 0, 0, 0.005)
 local b = endAt(2000, 0, -1, 0, 0, 0.004)
 local plan, why = P.path(a, b, nil, valley, dry)
 check(plan ~= nil, "valley: a plan (" .. tostring(why) .. ")")

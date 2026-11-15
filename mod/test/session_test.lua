@@ -69,7 +69,8 @@ end
 local function press(t) return mouse(t, 0, "pressed") end
 local function letGo(t) mouse(t, 0, "released"); return mouse(t, 0, "clicked") end
 local function click(t) press(t); return letGo(t) end
-local function rightClick(t) mouse(t, 2, "released"); note(t, S.back(t.s, t.w)) end
+-- (as seen in game: a right-button event, its "clicked", then one "back", all in one frame)
+local function rightClick(t) mouse(t, 2, "other"); mouse(t, 2, "clicked"); note(t, S.back(t.s, t.w)) end
 local function esc(t) note(t, S.back(t.s, t.w)) end
 -- Both ends picked.
 local function editing(a, b)
@@ -172,7 +173,6 @@ click(t)
 check(S.backIsOurs(t.s), "ground: after the first click, Esc is the tool's")
 esc(t)
 check(t.s.phase == "from" and t.s.from == nil, "ground: Esc drops the start")
-tick(t, S.RIGHT_TICKS + 1)
 moveTo(t, 700, 700); click(t)
 rightClick(t)
 check(t.s.phase == "from" and t.s.from == nil, "ground: so does a right-click")
@@ -265,34 +265,33 @@ moveTo(t, FAR_X, FAR_Y)
 click(t)
 check(asked(t, "askBuild") == 1, "edit: the next click on nothing asks to build once")
 
--- right-click on the turn removes it; one input's "back" arriving again does nothing more
+-- right-click on the turn removes it
 moveTo(t, E.polyline(e)[grabbed].x, E.polyline(e)[grabbed].y)
 check(t.s.hit ~= nil and t.s.hit.kind == "pi" and t.s.hit.i == grabbed, "edit: over the turn")
-tick(t, S.RIGHT_TICKS + 1)
 rightClick(t)
 check(E.turnCount(e) == turns and t.s.phase == "done", "back: a right-click on a turn removes it and stays in the edit")
-esc(t); esc(t)
-check(t.s.phase == "done" and t.s.edit == e, "back: the same input's back arriving again does nothing")
--- right-click on nothing does nothing
-tick(t, S.RIGHT_TICKS + 1)
+-- right-click on nothing does nothing, however quick the clicks
 moveTo(t, FAR_X, FAR_Y)
-tick(t, S.RIGHT_TICKS + 1)
-rightClick(t)
+rightClick(t); rightClick(t); rightClick(t)
 check(E.turnCount(e) == turns and t.s.phase == "done", "back: a right-click on nothing does nothing")
 
--- Esc steps back, once per input, while editing and while picking the end
-tick(t, S.RIGHT_TICKS + 1)
+-- Esc steps back, once per press, however quick the presses: an Esc just after a right-click is Esc
 check(S.backIsOurs(t.s), "back: while editing, Esc is the tool's")
-esc(t); esc(t); esc(t)
+esc(t)
 check(t.s.phase == "to" and t.s.edit == nil and t.s.to == nil and t.s.from == endA and asked(t, "closeMode") == 1,
-	"back: Esc leaves the edit, once, however often it arrives, and closes the mode window")
-tick(t, S.RIGHT_TICKS + 1)
+	"back: an Esc just after a right-click leaves the edit and closes the mode window")
 check(S.backIsOurs(t.s), "back: while picking the end, Esc is the tool's")
 esc(t)
-check(t.s.phase == "from" and t.s.from == nil, "back: it steps back to picking the start")
-tick(t, S.RIGHT_TICKS + 1)
-mouse(t, 2, "released")
+check(t.s.phase == "from" and t.s.from == nil, "back: a second quick Esc steps back to picking the start")
 check(not S.backIsOurs(t.s), "back: nothing to go back to at the start")
+
+-- a right-button event that is not a click (a camera drag) brings no "back": the next Esc is Esc
+t = editing()
+tick(t)
+mouse(t, 2, "pressed"); mouse(t, 2, "released")
+tick(t)
+esc(t)
+check(t.s.phase == "to", "back: an Esc after a right-drag of the camera steps back")
 
 -- a mode switch in the middle of a drag drops the drag
 t = editing()
@@ -324,7 +323,6 @@ tick(t)
 check(math.abs(E.points(e)[1].z - 1) < 1e-6, string.format("vertical: a pixel up raises it 1 m at 1000 m (%.3f m)", E.points(e)[1].z))
 letGo(t)
 t.shift = false
-tick(t, S.RIGHT_TICKS + 1)
 rightClick(t)
 check(#E.points(e) == 0 and t.s.phase == "done", "vertical: a right-click on the point removes it")
 
@@ -354,14 +352,11 @@ letGo(t)
 moveTo(t, FAR_X, FAR_Y)
 check(click(t) == true and asked(t, "askBuild") == 1, "too close: once clear, a click asks to build")
 note(t, S.confirmOpened(t.s)); S.confirmClosed(t.s); tick(t, S.CLOSED_TICKS + 1)
-tick(t, S.RIGHT_TICKS + 1)
 moveTo(t, E.points(e)[1].x, E.points(e)[1].y); rightClick(t)
-tick(t, S.RIGHT_TICKS + 1)
 moveTo(t, E.points(e)[1].x, E.points(e)[1].y); rightClick(t)
 check(#E.points(e) == 0, "too close: both points removed again")
 
 -- too steep: a height set directly passes the limit, and the build waits until it is eased
-tick(t, S.RIGHT_TICKS + 1)
 moveTo(t, n1.x, n1.y); press(t); letGo(t)
 check(E.setHeight(e, 1, 200) and E.steepest(e) > LIMIT, "too steep: a height set directly passes the limit")
 moveTo(t, FAR_X, FAR_Y)
@@ -374,7 +369,6 @@ check(#E.points(e) == 2 and E.points(e)[2].tooClose, "too steep: and a point too
 moveTo(t, FAR_X, FAR_Y)
 check(click(t) == true and asked(t, "askBuild") == 0 and t.s.editMsg:find("too steep", 1, true) ~= nil
 	and t.s.editMsg:find("too close", 1, true) ~= nil, "too steep and too close: the refusal names both: " .. tostring(t.s.editMsg))
-tick(t, S.RIGHT_TICKS + 1)
 moveTo(t, E.points(e)[2].x, E.points(e)[2].y); rightClick(t)
 E.setHeight(e, 1, E.points(e)[1].z - 190)
 check(E.steepest(e) <= LIMIT, "too steep: eased")
@@ -461,10 +455,8 @@ check(E.points(e)[ci].z == 50, "select: a point too close can still have its hei
 -- removing a point before the selected one keeps the same point selected; removing it clears it
 local keep = E.points(e)[3]
 t.s.selected = 3
-tick(t, S.RIGHT_TICKS + 1)
 moveTo(t, E.points(e)[1].x, E.points(e)[1].y); rightClick(t)
 check(#E.points(e) == 2 and t.s.selected == 2 and E.points(e)[2].s == keep.s, "select: removing a point before it keeps it selected")
-tick(t, S.RIGHT_TICKS + 1)
 moveTo(t, E.points(e)[2].x, E.points(e)[2].y); rightClick(t)
 check(#E.points(e) == 1 and t.s.selected == nil and S.selection(t.s, LIMIT) == nil, "select: removing the selected point clears it")
 check(#S.setHeight(t.s, 10) == 0, "select: with nothing selected, a height does nothing")
@@ -475,7 +467,6 @@ S.setMode(t.s, "horizontal")
 check(t.s.selected == nil, "select: switching to horizontal clears it")
 S.setMode(t.s, "vertical")
 moveTo(t, E.points(e)[1].x, E.points(e)[1].y); press(t); letGo(t)
-tick(t, S.RIGHT_TICKS + 1)
 esc(t)
 check(t.s.phase == "to" and t.s.selected == nil, "select: leaving the edit clears it")
 
@@ -605,7 +596,6 @@ click(t)
 check(asked(t, "askBuild") == 0 and t.s.editMsg ~= nil and t.s.editMsg:find("too steep") ~= nil, "ground end: too high, the build is refused")
 note(t, S.setHeight(t.s, 0))
 -- a right-click on it removes nothing
-tick(t, S.RIGHT_TICKS + 1)
 moveTo(t, gx, gy); rightClick(t)
 check(t.s.phase == "done" and t.s.to.kind == "ground", "ground end: a right-click does not remove it")
 -- a track end is no vertical handle

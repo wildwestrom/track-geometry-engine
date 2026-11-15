@@ -32,7 +32,6 @@ local record WorldMod
 	DEFAULT_GRADE : number
 	-- track types
 	trackType : function(template : string) : TrackType
-	templateFor : function(trackId : number, electric : boolean) : string
 	-- the ground
 	ground : function(x : number, y : number) : number
 	water : function(x : number, y : number) : boolean
@@ -133,21 +132,6 @@ function M.trackType(template : string) : TrackType
 		say("track type " .. template .. ": " .. table.concat(whys, "; ") .. " (asked again next time)")
 	end
 	return t
-end
-
--- The template to build from the menu's settings: the track type picked (a template id; nil or
--- negative: standard), its wired version (its catenaryAdd) when electric.
-function M.templateFor(trackId : number, electric : boolean) : string
-	local name = M.BASE_TEMPLATE
-	if trackId ~= nil and trackId >= 0 then
-		local ok, n = pcall(api.res.streetTemplateRep.getName, math.floor(trackId + 0.5))
-		if ok and n ~= nil and n ~= "" then name = n as string end
-	end
-	if electric then
-		local ok, wired = pcall(function() : string return (templateOf(name) as table).catenaryAdd as string end)
-		if ok and wired ~= nil and wired ~= "" then name = wired end
-	end
-	return name
 end
 
 ------------------------------------------------------------------ the ground
