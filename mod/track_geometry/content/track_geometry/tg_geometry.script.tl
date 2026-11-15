@@ -98,7 +98,7 @@ local M : Geometry = {}
 
 -- The Lean UI's design parameters (TrackGeometry/UI/Config.lean `designParams`), 1 unit = 1 m.
 M.DEFAULT_PARAMS = {
-	legBudget = 0.3, minRadius = 100.0, straightThreshold = 0.001,
+	legBudget = 0.3, minRadius = 40.0, straightThreshold = 0.001,
 	maxLateralAccel = 1.2, maxLateralJerk = 0.5, maxYawAccel = 0.2,
 	maxDesignSpeed = 83.3333, -- 300 km/h
 }
@@ -230,6 +230,47 @@ end
 
 --------------------------------------------------------------------------- Path.lean
 
+-- Operating speed on an arc of radius R: sqrt(a_max·R), capped at the design speed.
+-- See Lean `DesignParams.speedAt`.
+local function speedAt(dp : DesignParams, R : number) : number
+	local v = math.sqrt(dp.maxLateralAccel * R)
+	if dp.maxDesignSpeed > 0 then return math.min(dp.maxDesignSpeed, v) end
+	return v
+end
+
+-- Transition length on an arc of radius R: the larger of the jerk- and yaw-limited lengths.
+-- See Lean `DesignParams.transitionLength`.
+local function transitionLength(dp : DesignParams, R : number) : number
+	local V = speedAt(dp, R)
+	local lsJerk = dp.maxLateralJerk > 0 and (V * V * V) / (R * dp.maxLateralJerk) or 0
+	local lsYaw = dp.maxYawAccel > 0 and (V * V) / (R * dp.maxYawAccel) or 0
+	return math.max(lsJerk, lsYaw)
+end
+
+-- Spiral angle Ls/(2R) of a corner of turn delta on an arc of radius R, clamped to delta/2.
+-- See Lean `DesignParams.spiralAngle`.
+local function spiralAngle(dp : DesignParams, R : number, delta : number) : number
+	return math.min(transitionLength(dp, R) / (2 * R), delta / 2)
+end
+
+-- Shift (P, K) of a unit clothoid of spiral angle theta > 0. See Lean `clothoidShift`.
+local function clothoidShift(theta : number) : number, number
+	local Ls1 = 2 * theta
+	local X1, Y1 = M.clothoidOffset(0, 1 / Ls1, Ls1)
+	return Y1 - (1 - math.cos(theta)), X1 - math.sin(theta)
+end
+
+-- The tangent budget whose corner has an arc of radius minRadius, transitions included; 0
+-- when the floor is off. See Lean `DesignParams.radiusFloorBudget`.
+local function radiusFloorBudget(dp : DesignParams, tanHalf : number, delta : number) : number
+	local R = dp.minRadius
+	if R <= 0 then return 0 end
+	local theta = dp.maxLateralAccel <= 0 and 0 or spiralAngle(dp, R, delta)
+	if theta <= 0 then return R * abs(tanHalf) end
+	local P, K = clothoidShift(theta)
+	return R * abs((1 + P) * tanHalf + K)
+end
+
 -- Directions, turn and budget bounds for the corner at PI `b`; nil when degenerate or straight.
 function M.cornerGeometry(a : Vec, b : Vec, c : Vec, dp : DesignParams) : CornerGeometry
 	local dIn, dOut = sub(b, a), sub(c, b)
@@ -248,7 +289,7 @@ function M.cornerGeometry(a : Vec, b : Vec, c : Vec, dp : DesignParams) : Corner
 	local shorter = math.min(nIn, nOut)
 	local hi = shorter
 	local tanHalf = math.sin(delta) / (1 + math.cos(delta))
-	local lo = math.min(dp.minRadius * abs(tanHalf), hi)
+	local lo = math.min(radiusFloorBudget(dp, tanHalf, delta), hi)
 	-- Without windings the turn is never reversed and sinAbs > straightThreshold here, so the
 	-- binormal is the leg plane's normal.
 	return {
@@ -334,7 +375,7 @@ function M.cornerLayouts(pts : {Vec}, dp : DesignParams, overrides : {integer : 
 	local out : {integer : CornerLayout} = {}
 	for i, g in pairs(geoms) do
 		local hi = math.min(room(i - 1, i - 1), room(i + 1, i))
-		local lo = math.min(dp.minRadius * abs(g.tanHalf), hi)
+		local lo = math.min(radiusFloorBudget(dp, g.tanHalf, g.delta), hi)
 		local g2 : CornerGeometry = {}
 		for k, v in pairs(g as {string : any}) do (g2 as {string : any})[k] = v end
 		g2.maxBudget, g2.minBudget = hi, lo
@@ -355,27 +396,13 @@ function M.solveCorner(b : Vec, budget : number, dp : DesignParams, g : CornerGe
 		if ax <= dp.straightThreshold then return dp.straightThreshold end
 		return ax
 	end
-	local aMax, cap = dp.maxLateralAccel, dp.maxDesignSpeed
-	local function speedAt(R : number) : number
-		local v = math.sqrt(aMax * R)
-		if cap > 0 then return math.min(cap, v) end
-		return v
-	end
-	local function lsOf(R : number) : number
-		local V = speedAt(R)
-		local lsJerk = dp.maxLateralJerk > 0 and (V * V * V) / (R * dp.maxLateralJerk) or 0
-		local lsYaw = dp.maxYawAccel > 0 and (V * V) / (R * dp.maxYawAccel) or 0
-		return math.max(lsJerk, lsYaw)
-	end
+	local aMax = dp.maxLateralAccel
 	local function radiusOf(th : number) : number
-		local Ls1 = 2 * th
-		local X1, Y1 = M.clothoidOffset(0, 1 / Ls1, Ls1)
-		local P = Y1 - (1 - math.cos(th))
-		local K = X1 - math.sin(th)
+		local P, K = clothoidShift(th)
 		return budget / safeDenom((1 + P) * tanHalf + K)
 	end
 	local function stepTheta(R : number) : number
-		return math.min(lsOf(R) / (2 * R), delta / 2)
+		return spiralAngle(dp, R, delta)
 	end
 	local ths = 0.0
 	if aMax > 0 then
@@ -391,7 +418,7 @@ function M.solveCorner(b : Vec, budget : number, dp : DesignParams, g : CornerGe
 
 	if ths <= 0 then
 		local absR = budget / safeDenom(tanHalf)
-		local opSpeed = aMax > 0 and speedAt(absR) or 0
+		local opSpeed = aMax > 0 and speedAt(dp, absR) or 0
 		return {
 			entryPoint = entryBase, exitPoint = exitBase, opSpeed = opSpeed, radius = absR,
 			pieces = { { kind = "arc", radius = absR, p = entryBase, q = exitBase, v = uIn, B = B, sweep = delta, opSpeed = opSpeed } },
@@ -399,7 +426,7 @@ function M.solveCorner(b : Vec, budget : number, dp : DesignParams, g : CornerGe
 	end
 
 	local absR = radiusOf(ths)
-	local opSpeed = speedAt(absR)
+	local opSpeed = speedAt(dp, absR)
 	local Ls = 2 * absR * ths
 	local bx, by, bz = B.x, B.y, B.z
 	local ts = entryBase

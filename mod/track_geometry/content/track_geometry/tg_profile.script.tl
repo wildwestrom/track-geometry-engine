@@ -1,11 +1,16 @@
--- The track's vertical profile: a clamped cubic spline in chainage through the elevation points.
--- The first and last points are the path's ends (the existing track nodes) and the grades there
--- are the existing tracks' grades, so the new track joins them without a kink. Between two points
--- the profile is the cubic Hermite with their heights and grades; the grades at interior points
--- are solved so the grade changes smoothly through them (continuous second derivative). With no
--- interior points it is one Hermite from end to end, like the game's own builder lays a drag
--- (which fixes only the start grade and lets the curve straighten out by the far end).
--- The cubic may overshoot a point a little; that is accepted.
+-- The track's vertical profile: a monotone cubic in chainage through the elevation points
+-- (Fritsch–Carlson, with Fritsch–Butland grades as in PCHIP). The first and last points are the
+-- path's ends (the existing track nodes) and the grades there are the existing tracks' grades, so
+-- the new track joins them without a kink. Between two points the profile is the cubic Hermite
+-- with their heights and grades. An interior point is level where the profile turns there or a
+-- span next to it is level; elsewhere its grade is a weighted harmonic mean of the two spans'
+-- grades. So the profile never overshoots between interior points: two points at one height are
+-- joined level, and a climb out of a level span does not dip first. The grade is continuous, its
+-- rate of change (the vertical curvature) may jump at a point. A span next to an end may still
+-- overshoot, when the existing track's grade points away from the next point; the end grades are
+-- kept so the joins have no kink. With no interior points it is one Hermite from end to end, like
+-- the game's own builder lays a drag (which fixes only the start grade and lets the curve
+-- straighten out by the far end).
 -- No game API here, so test/profile_test.lua runs it outside the game.
 
 local record Point
@@ -30,10 +35,10 @@ end
 local M : ProfileMod = {}
 
 -- The grades at the points, or nil and why not. Needs two points or more with strictly
--- increasing chainage. Each interior point i gives a row of the tridiagonal system
---   h[i] g[i-1] + 2 (h[i-1] + h[i]) g[i] + h[i-1] g[i+1] = 3 (h[i] d[i-1] + h[i-1] d[i])
--- (h the span lengths, d their chord grades), with the end grades moved to the right-hand side,
--- solved by the Thomas algorithm.
+-- increasing chainage. Interior point i, between spans of length h1, h2 with chord grades d1, d2:
+-- 0 if d1 and d2 differ in sign or either is 0, else the harmonic mean of d1 and d2 weighted
+--   w1 = 2 h2 + h1, w2 = h2 + 2 h1:  (w1 + w2) / g = w1 / d1 + w2 / d2
+-- which keeps |g| within 3 |d| on both sides, so each span between interior points is monotone.
 function M.solve(points : {Point}, g0 : number, gN : number) : Profile, string
 	local n = #points
 	if n < 2 then return nil, "a profile needs two points" end
@@ -44,27 +49,16 @@ function M.solve(points : {Point}, g0 : number, gN : number) : Profile, string
 		d[i] = (points[i + 1].z - points[i].z) / h[i]
 	end
 	local g : {number} = { g0 }
-	g[n] = gN
-	if n > 2 then
-		-- rows 2..n-1: sub a, diagonal b, super c, right-hand side r
-		local c, r : {number}, {number} = {}, {}
-		for i = 2, n - 1 do
-			local a, b = h[i], 2 * (h[i - 1] + h[i])
-			c[i] = h[i - 1]
-			r[i] = 3 * (h[i] * d[i - 1] + h[i - 1] * d[i])
-			if i == 2 then r[i] = r[i] - a * g0 end
-			if i == n - 1 then r[i] = r[i] - c[i] * gN; c[i] = 0 end
-			if i > 2 then
-				-- eliminate the sub-diagonal with the previous row (already divided through)
-				b = b - a * c[i - 1]
-				r[i] = r[i] - a * r[i - 1]
-			end
-			c[i] = c[i] / b
-			r[i] = r[i] / b
+	for i = 2, n - 1 do
+		local d1, d2 = d[i - 1], d[i]
+		if d1 * d2 <= 0 then
+			g[i] = 0
+		else
+			local w1, w2 = 2 * h[i] + h[i - 1], h[i] + 2 * h[i - 1]
+			g[i] = (w1 + w2) / (w1 / d1 + w2 / d2)
 		end
-		g[n - 1] = r[n - 1]
-		for i = n - 2, 2, -1 do g[i] = r[i] - c[i] * g[i + 1] end
 	end
+	g[n] = gN
 	return { points = points, grades = g }, nil
 end
 

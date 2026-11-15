@@ -18,7 +18,7 @@ def hex (x : RFloat) : String :=
 
 /-- The UI's design parameters (`TrackGeometry.UI.Config.designParams`). -/
 def dpDefault : DesignParams RFloat :=
-  { legBudget := rf 0.3, minRadius := rf 100.0, straightThreshold := rf 0.001,
+  { legBudget := rf 0.3, minRadius := rf 40.0, straightThreshold := rf 0.001,
     maxLateralAccel := rf 1.2, maxLateralJerk := rf 0.5, maxYawAccel := rf 0.2,
     maxDesignSpeed := rf 83.3333 }
 

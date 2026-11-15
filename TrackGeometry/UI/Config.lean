@@ -40,10 +40,9 @@ def segColor (e : AnySegment RFloat) : Color :=
   | ⟨_, _, .transitionOut .., _⟩ => TRANSITION_COLOR
 
 /-- Auto-radius design parameters for the PI builder. `minRadius` is a hard floor (1
-    scene unit = 1 m): ~100 m is roughly an AREMA-style absolute minimum for sharp
-    standard-gauge yard/industrial track (mainline minimums run far larger). -/
+    scene unit = 1 m): 40 m is the tightest radius the game builds (found experimentally). -/
 def designParams : DesignParams RFloat :=
-  { legBudget := rf 0.3, minRadius := rf 100.0, straightThreshold := rf 0.001,
+  { legBudget := rf 0.3, minRadius := rf 40.0, straightThreshold := rf 0.001,
     -- comfort limits (1 scene unit = 1 m): V = √(a_max·R) per corner, clothoid sized
     -- to the larger of the jerk- and yaw-acceleration-limited lengths.
     -- a_max sizes V as the full lateral budget under the zero-cant model.

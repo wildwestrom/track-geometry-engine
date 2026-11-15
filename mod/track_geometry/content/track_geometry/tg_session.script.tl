@@ -9,7 +9,7 @@
 --   "askBuild"               : check the ghost and open the confirm window (then confirmOpened,
 --                              or refuse with why not)
 --   "closeConfirm"           : close the confirm window (then confirmClosed)
---   "ghostNow"               : make the ghost again at once (a drag ended)
+--   "ghostNow"               : make the ghost again at once (a drag ended, a height was set)
 --   "restart"                : the session started over: drop the ghost and what was read out
 --
 -- What only the game knows comes in as a World with each event. No game API here, so
@@ -17,6 +17,7 @@
 
 local ends = require("westrom_track_geometry::/track_geometry/tg_ends.script.tl")
 local edits = require("westrom_track_geometry::/track_geometry/tg_edit.script.tl")
+local profiles = require("westrom_track_geometry::/track_geometry/tg_profile.script.tl")
 
 local enum Phase
 	"from" -- pick the start
@@ -48,6 +49,26 @@ end
 
 local type TrackEnd = ends.TrackEnd
 
+-- What the selected point's height can be matched to (the mode window's list): the start, another
+-- point or the end, labelled with its height (only: where along the track read as a second
+-- height), and its height (m).
+local record MatchSource
+	label : string
+	z : number
+end
+
+-- The selected elevation point, read out for the mode window: its index, chainage (m), height
+-- (m), and grade there (nil when it is too close: it is not in the profile); and why the profile
+-- is too steep, when it is (tg_edit.gradeProblem).
+local record Selection
+	i : integer
+	s : number
+	z : number
+	grade : number
+	tooClose : boolean
+	steep : string
+end
+
 -- An elevation point being dragged: along the path, or (Shift held at the press) up and down.
 local record ElevationDrag
 	i : integer
@@ -60,6 +81,7 @@ end
 local record World
 	terrX : number -- the ground under the mouse (nil when it is over none)
 	terrY : number
+	ray : edits.Ray -- the mouse's view ray, eye to that ground point (nil when unknown): picks the track up on its profile, over the ground
 	hovered : integer -- the entity under the mouse
 	grab : number -- grab radius for handles (m)
 	cameraDist : number -- the camera's distance (m), for a Shift-drag's height; nil when unknown
@@ -83,6 +105,7 @@ local record Session
 	hit : edits.Hit -- what is under the mouse while editing (tg_edit.hit)
 	drag : edits.Hit -- the turn or bracket being dragged
 	dragEl : ElevationDrag -- the elevation point being dragged
+	selected : integer -- the selected elevation point (the mode window sets its height)
 	mouseSY : number -- the mouse's screen y, from its last event (px)
 	editMsg : string -- why the last edit or build did not happen
 	pressGrabbed : boolean -- the last left press grabbed a handle or added a turn (its click must not build)
@@ -102,6 +125,8 @@ local record SessionMod
 	MouseKind : MouseKind
 	TrackEnd : TrackEnd
 	ElevationDrag : ElevationDrag
+	Selection : Selection
+	MatchSource : MatchSource
 	World : World
 	Session : Session
 	RIGHT_TICKS : integer
@@ -111,11 +136,15 @@ local record SessionMod
 	reset : function(s : Session)
 	tick : function(s : Session, w : World) : {Request}
 	mouse : function(s : Session, w : World, button : integer, kind : MouseKind, y : number) : boolean, {Request}
-	click : function(s : Session) : {Request}
+	click : function(s : Session, w : World) : {Request}
 	backIsOurs : function(s : Session) : boolean
 	back : function(s : Session, w : World) : {Request}
 	canGoBack : function(s : Session) : boolean
 	setMode : function(s : Session, m : Mode)
+	setHeight : function(s : Session, z : number) : {Request}
+	selection : function(s : Session, limit : number) : Selection
+	matchSources : function(s : Session) : {MatchSource}
+	match : function(s : Session, m : MatchSource) : {Request}
 	confirmOpened : function(s : Session)
 	confirmClosed : function(s : Session)
 	refuse : function(s : Session, msg : string)
@@ -123,6 +152,7 @@ local record SessionMod
 	vertical : function(s : Session) : boolean
 	dragging : function(s : Session) : boolean
 	handleName : function(h : edits.Hit) : string
+	hint : function(s : Session) : string
 end
 
 local M : SessionMod = {}
@@ -153,10 +183,15 @@ function M.handleName(h : edits.Hit) : string
 	return (h.kind == "entry" and "start" or "end") .. " of the curve at turn " .. tostring(h.i - 1)
 end
 
+-- Drop what the mouse is on, holds and has selected (the mode switched, or the edit is left).
+local function dropHandles(s : Session)
+	s.drag, s.hit, s.dragEl, s.selected = nil, nil, nil, nil
+end
+
 -- Out of editing, back to picking the end: the one place the edit and all that hangs on it goes.
 local function leaveEditing(s : Session)
 	s.phase, s.to, s.edit = "to", nil, nil
-	s.drag, s.hit, s.dragEl = nil, nil, nil
+	dropHandles(s)
 	s.pressGrabbed, s.editMsg = false, nil
 	s.hover, s.mouseX = nil, nil
 end
@@ -175,7 +210,7 @@ end
 function M.setMode(s : Session, m : Mode)
 	if s.mode == m then return end
 	s.mode = m
-	s.drag, s.hit, s.dragEl = nil, nil, nil
+	dropHandles(s)
 	s.editMsg = nil
 	s.log("edit: " .. m .. " alignment")
 end
@@ -200,16 +235,31 @@ local function justClosed(s : Session) : boolean
 end
 
 -- A click that is on nothing of the edit: ask to build, unless a press of this click grabbed
--- something, or the confirm window is open or was just closed by it.
-local function askBuild(s : Session) : {Request}
+-- something, or the confirm window is open or was just closed by it. Refused (why in the
+-- tooltip, which names the point and where it is too steep) while an elevation point is too
+-- close or the profile is too steep.
+local function askBuild(s : Session, w : World) : {Request}
 	if s.phase ~= "done" or M.dragging(s) or s.pressGrabbed or s.confirmOpen or justClosed(s) then return {} end
+	local e = s.edit
+	local whats, whys : {string}, {string} = {}, {}
+	if e ~= nil then
+		local close = edits.spacingProblem(e)
+		if close ~= nil then whats[#whats + 1], whys[#whys + 1] = "an elevation point is too close", close end
+		local steep = edits.gradeProblem(e, w.gradeLimit())
+		if steep ~= nil then whats[#whats + 1], whys[#whys + 1] = "the profile is too steep", steep end
+	end
+	if #whats > 0 then
+		M.refuse(s, "Cannot build while " .. table.concat(whats, " and ") .. ".")
+		s.log("build: not asked: " .. table.concat(whys, "; "))
+		return {}
+	end
 	return { "askBuild" }
 end
 
 -- A left click: pick the end the mouse snaps to; with both picked, ask to build.
-function M.click(s : Session) : {Request}
+function M.click(s : Session, w : World) : {Request}
 	if not s.live() or s.confirmOpen then return {} end
-	if s.phase == "done" then return askBuild(s) end
+	if s.phase == "done" then return askBuild(s, w) end
 	if s.hover == nil then
 		s.log(string.format("tool: nothing to pick at %s: %s",
 			s.mouseX ~= nil and string.format("%.0f, %.0f", s.mouseX, s.mouseY) or "?", s.hoverMsg or ""))
@@ -219,13 +269,17 @@ function M.click(s : Session) : {Request}
 	local reqs : {Request} = {}
 	if s.phase == "from" then
 		s.from, s.phase = e, "to"
-		s.log(string.format("tool: start at node %d (%.1f, %.1f, %.1f) heading %.2f deg", e.node, e.x, e.y, e.z, math.deg(atan2(e.dy, e.dx))))
+		s.log(string.format("tool: start at node %d (%.4f, %.4f, %.2f) heading %.6f deg (%.9f, %.9f)", e.node, e.x, e.y, e.z,
+			math.deg(atan2(e.dy, e.dx)), e.dx, e.dy))
 	else
 		s.to, s.phase = e, "done"
-		s.edit = edits.new(s.from as ends.End, e as ends.End)
+		local how : string
+		s.edit, how = edits.new(s.from as ends.End, e as ends.End)
+		s.log("tool: laid as " .. tostring(how))
 		s.mode = s.mode or "horizontal"
 		reqs[1] = "openMode"
-		s.log(string.format("tool: end at node %d (%.1f, %.1f, %.1f) heading %.2f deg", e.node, e.x, e.y, e.z, math.deg(atan2(e.dy, e.dx))))
+		s.log(string.format("tool: end at node %d (%.4f, %.4f, %.2f) heading %.6f deg (%.9f, %.9f)", e.node, e.x, e.y, e.z,
+			math.deg(atan2(e.dy, e.dx)), e.dx, e.dy))
 	end
 	s.hover, s.mouseX = nil, nil
 	return reqs
@@ -256,7 +310,7 @@ end
 local function findHit(s : Session, w : World)
 	s.hit = nil
 	if s.edit == nil or w.terrX == nil then return end
-	s.hit = edits.hit(s.edit, M.vertical(s), w.terrX, w.terrY, s.grab)
+	s.hit = edits.hit(s.edit, M.vertical(s), w.terrX, w.terrY, s.grab, w.ray)
 end
 
 -- Vertical: grab the elevation point under the mouse, or add one on the track there and grab it.
@@ -269,11 +323,18 @@ local function pressV(s : Session, w : World) : boolean
 		local why : string
 		i, why = edits.insertElevation(e, h.s)
 		if i == nil then s.editMsg = "Cannot add an elevation point here: " .. why; return true end
-		s.log(string.format("edit: add elevation point %d at %.0f m (%d points)", i, h.s, #edits.points(e)))
+		local pts = edits.points(e)
+		s.log(string.format("edit: add elevation point %d at %.0f m (%d points)%s", i, h.s, #pts,
+			pts[i].tooClose and ", too close" or ""))
 	end
-	if i == nil then return false end
+	if i == nil then
+		s.log(string.format("edit: press on no elevation point or track (ground %s, view ray %s)",
+			w.terrX ~= nil and string.format("%.0f, %.0f", w.terrX, w.terrY) or "none", w.ray ~= nil and "known" or "unknown"))
+		return false
+	end
 	local height = w.shift ~= nil and w.shift() == true
 	s.dragEl = { i = i, height = height, pressY = s.mouseSY, pressZ = edits.points(e)[i].z }
+	s.selected = i -- (a click, a drag or adding one selects it)
 	s.log(string.format("edit: grab elevation point %d%s", i, height and " (height)" or ""))
 	return true
 end
@@ -316,8 +377,8 @@ local function release(s : Session) : {Request}
 		s.dragEl = nil
 		local pt = e ~= nil and edits.points(e)[d.i] or nil
 		if pt ~= nil then
-			s.log(string.format("edit: elevation point %d at %.0f m, height %.2f m; steepest %.1f permille", d.i,
-				pt.s, pt.z, edits.steepest(e) * 1000))
+			s.log(string.format("edit: elevation point %d at %.0f m, height %.2f m; steepest %.1f permille%s", d.i,
+				pt.s, pt.z, edits.steepest(e) * 1000, pt.tooClose and string.format("; too close (%.0f m)", pt.gap) or ""))
 		end
 		return { "ghostNow" }
 	end
@@ -347,6 +408,8 @@ local function remove(s : Session, w : World) : boolean
 			return false
 		end
 		edits.removeElevation(e, h.i)
+		local sel = s.selected
+		if sel == h.i then s.selected = nil elseif sel ~= nil and sel > h.i then s.selected = sel - 1 end
 		s.log(string.format("edit: remove elevation point %d (%d left)", h.i, #edits.points(e)))
 		s.hit = nil
 		return true
@@ -377,15 +440,72 @@ local function dragTick(s : Session, w : World)
 			z = d.pressZ + (d.pressY - s.mouseSY) * M.HEIGHT_PER_PX * (w.cameraDist or 500.0)
 		else
 			if w.terrX == nil then return end
-			at = edits.chainageAt(e, w.terrX, w.terrY)
+			-- (along the view ray when known: the track may be far above the ground under the mouse)
+			local rs = w.ray ~= nil and edits.chainageOnRay(e, w.ray) or nil
+			at = rs or edits.chainageAt(e, w.terrX, w.terrY)
 		end
-		edits.moveElevation(e, d.i, at, z, w.gradeLimit())
+		local _, j = edits.moveElevation(e, d.i, at, z, w.gradeLimit())
+		d.i, s.selected = j, j -- (passing a neighbour reorders the points)
 		return
 	end
 	local h, x, y = s.drag, w.terrX, w.terrY
 	if h == nil or x == nil then return end
 	if h.kind == "pi" then edits.movePi(e, h.i, x, y)
 	else edits.dragBracket(e, h.i, h.kind == "entry", x, y) end
+end
+
+-- Set the selected elevation point's height to z (the mode window's height box): as asked, past
+-- the grade limit too (the build is then refused until it is eased). Nothing when none is selected.
+function M.setHeight(s : Session, z : number) : {Request}
+	local e, i = s.edit, s.selected
+	local pt = e ~= nil and i ~= nil and edits.points(e)[i] or nil
+	if pt == nil or pt.z == z then return {} end -- (the box may echo the height it was given)
+	edits.setHeight(e, i, z)
+	s.log(string.format("edit: elevation point %d set to %.2f m; steepest %.1f permille", i, z, edits.steepest(e) * 1000))
+	return { "ghostNow" }
+end
+
+-- The selected elevation point, read out against the grade limit; nil when none is.
+function M.selection(s : Session, limit : number) : Selection
+	local e, i = s.edit, s.selected
+	if e == nil or i == nil then return nil end
+	local pt = edits.points(e)[i]
+	if pt == nil then return nil end
+	local grade : number = nil
+	if not pt.tooClose then
+		local p = edits.profile(e)
+		grade = p ~= nil and profiles.gradeAt(p, pt.s) or nil
+	end
+	return { i = i, s = pt.s, z = pt.z, grade = grade, tooClose = pt.tooClose, steep = (edits.gradeProblem(e, limit)) }
+end
+
+-- What the selected point's height can be matched to, in order along the track: the start, every
+-- other point (one too close too: its height is its own), the end. Empty when none is selected.
+function M.matchSources(s : Session) : {MatchSource}
+	local e, sel = s.edit, s.selected
+	local out : {MatchSource} = {}
+	if e == nil or sel == nil then return out end
+	local pts = edits.points(e)
+	if pts[sel] == nil then return out end
+	local function add(name : string, z : number)
+		local shown = math.abs(z) < 0.05 and 0.0 or z -- (never "-0.0 m")
+		out[#out + 1] = { label = string.format("%s · %.1f m", name, shown), z = z }
+	end
+	local za, zb = edits.endHeights(e)
+	add("Start", za)
+	for i, pt in ipairs(pts) do
+		if i ~= sel then add("Point " .. tostring(i), pt.z) end
+	end
+	add("End", zb)
+	return out
+end
+
+-- Set the selected point's height to that of m (an entry of matchSources, as the player saw it:
+-- the list may be a redraw behind), once (it does not follow its source).
+function M.match(s : Session, m : MatchSource) : {Request}
+	if m == nil or m.z == nil then return {} end
+	s.log("edit: match elevation point " .. tostring(s.selected) .. " to " .. m.label)
+	return M.setHeight(s, m.z)
 end
 
 ------------------------------------------------------------------ back
@@ -447,7 +567,7 @@ function M.mouse(s : Session, w : World, button : integer, kind : MouseKind, y :
 			local had = M.dragging(s) or s.pressGrabbed == true
 			local reqs = release(s)
 			if kind == "clicked" and not had then
-				for _, r in ipairs(askBuild(s)) do reqs[#reqs + 1] = r end
+				for _, r in ipairs(askBuild(s, w)) do reqs[#reqs + 1] = r end
 				return true, reqs
 			end
 			return had, reqs
@@ -455,7 +575,24 @@ function M.mouse(s : Session, w : World, button : integer, kind : MouseKind, y :
 		return false, {}
 	end
 	if kind ~= "clicked" then return false, {} end
-	return true, M.click(s)
+	return true, M.click(s, w)
+end
+
+-- The controls for what is under the mouse while editing, as one line for the tooltip; nil while
+-- dragging (or not editing). Read off the same hit a press and a right-click act on (press, remove).
+function M.hint(s : Session) : string
+	if s.phase ~= "done" or s.edit == nil or M.dragging(s) then return nil end
+	local h = s.hit
+	if h == nil then return "Click: build · Esc: back" end
+	if h.kind == "point" then return "Click: select · Drag: slide · Shift+drag: height · Right-click: remove" end
+	if h.kind == "track" then return "Click: add point" end
+	if h.kind == "leg" then return "Click: add turn" end
+	if h.kind == "pi" then
+		if h.mobility == "fixed" then return "Fixed until another turn is added" end
+		if h.mobility == "ray" then return "Drag: slide along the end" end
+		return "Drag: move · Right-click: remove"
+	end
+	return "Drag: curve size" -- (a bracket)
 end
 
 -- Every 50 ms while the tool is open: a picked end that is gone undoes its pick; while editing,

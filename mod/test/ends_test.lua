@@ -20,20 +20,36 @@ local function endAt(x, y, deg)
 	return { x = x, y = y, dx = math.cos(math.rad(deg)), dy = math.sin(math.rad(deg)) }
 end
 
--- Each case: the ends, and the layout expected.
+-- Each case: the ends, the layout expected and how many turns it has. Ends off by a hair are laid
+-- with turns, but each turn is below straightThreshold, so buildPath runs one straight between
+-- them: their headings are only as close as that threshold. Ends in line to float noise are laid
+-- straight, so their headings are only as close as that noise.
 local cases = {
-	{ "corner", endAt(0, 0, 0), endAt(500, 400, -90), "corner" },
-	{ "straight", endAt(0, 0, 0), endAt(600, 0, 180), "straight" },
-	{ "parallel, offset", endAt(0, 0, 0), endAt(600, 100, 180), "s-curve" },
-	{ "rays meet behind", endAt(0, 0, 0), endAt(400, 300, 90), "s-curve" },
-	{ "rays meet too far", endAt(0, 0, 0), endAt(300, 20, 179), "s-curve" },
-	{ "diagonal corner", endAt(100, -50, 45), endAt(-200, 700, 0), "corner" },
+	{ "straight", endAt(0, 0, 0), endAt(600, 0, 180), "straight", 0 },
+	{ "straight, diagonal", endAt(0, 0, 45), endAt(300, 300, 225), "straight", 0 },
+	{ "in line but off by a hair", endAt(0, 0, 0), endAt(600, 0.005, 180), "s-curve", 2 },
+	{ "facing but angled by a hair", endAt(0, 0, 0), endAt(600, 0, 180 + math.deg(1e-5)), "s-curve", 2 },
+	{ "in line to float noise", endAt(0, 0, 0), endAt(600, 0.001, 180 + math.deg(5e-7)), "straight", 0 },
+	-- two ends of one straight line in game (float32 data): 1.4e-7 rad and 0.086 mm apart
+	{ "in line in game", { x = 2131.8533, y = -1847.1685, dx = -0.984807737, dy = 0.173648271 },
+		{ x = 1363.1891, y = -1711.6321, dx = 0.984807761, dy = -0.173648132 }, "straight", 0 },
+	{ "corner", endAt(0, 0, 0), endAt(500, 400, -90), "corner", 1 },
+	{ "diagonal corner", endAt(100, -50, 45), endAt(-200, 600, 0), "corner", 1 },
+	{ "parallel, offset", endAt(0, 0, 0), endAt(600, 100, 180), "s-curve", 2 },
+	{ "rays meet behind", endAt(0, 0, 0), endAt(400, 300, 90), "s-curve", 2 },
+	{ "rays meet over 1 km out", endAt(0, 0, 0), endAt(100, 300, -10), "s-curve", 2 },
+	{ "rays meet under MIN_LEG out", endAt(0, 0, 0), endAt(10, 300, -90), "s-curve", 2 },
+	{ "over 800 m apart", endAt(0, 0, 0), endAt(900, 100, 180), "long s-curve", 3 },
+	{ "over 800 m apart, rays meet ahead", endAt(0, 0, 0), endAt(700, 500, -90), "long s-curve", 3 },
 }
 
 for _, c in ipairs(cases) do
-	local name, a, b, want = c[1], c[2], c[3], c[4]
+	local name, a, b, want, turns = c[1], c[2], c[3], c[4], c[5]
+	local tol = name:find("by a hair") and G.DEFAULT_PARAMS.straightThreshold
+		or (name:find("float noise") or name:find("in game")) and 1e-5 or 1e-9
 	local pis, how = E.initialPis(a, b)
-	check(how == want, string.format("%s: laid as %s", name, tostring(how)))
+	check(how == want and pis ~= nil and #pis == turns + 2,
+		string.format("%s: laid as %s with %d turns", name, tostring(how), pis and #pis - 2 or -1))
 	if pis ~= nil then
 		local path = G.buildPath(pis, G.DEFAULT_PARAMS, nil)
 		local nodes = A.sample(path, 10)
@@ -41,7 +57,7 @@ for _, c in ipairs(cases) do
 		local leave, arrive = atan2(a.dy, a.dx), atan2(-b.dy, -b.dx)
 		check(math.abs(first.x - a.x) + math.abs(first.y - a.y) < 1e-9
 			and math.abs(last.x - b.x) + math.abs(last.y - b.y) < 1e-6, name .. ": starts and ends on the ends")
-		check(angleDiff(first.heading, leave) < 1e-9 and angleDiff(last.heading, arrive) < 1e-9,
+		check(angleDiff(first.heading, leave) < tol and angleDiff(last.heading, arrive) < tol,
 			string.format("%s: leaves at %.1f deg, arrives at %.1f deg", name, math.deg(first.heading), math.deg(last.heading)))
 		local bad = false
 		for _, nd in ipairs(nodes) do
@@ -51,31 +67,38 @@ for _, c in ipairs(cases) do
 	end
 end
 
--- Turned layouts lay a lead turn LEAD out on each end's ray and a free turn halfway between them,
--- so the middle leg runs near the straight line between the ends and the player can drag it.
 local function d(p, x, y) return math.sqrt((p.x - x) ^ 2 + (p.y - y) ^ 2) end
-local function leadsAt(name, a, b, wantA, wantB)
-	local pis = E.initialPis(a, b)
-	check(#pis == 5, name .. ": five turns")
-	local la, lb = pis[2], pis[4]
-	check(math.abs(d(la, a.x, a.y) - wantA) < 1e-9 and d(la, a.x + wantA * a.dx, a.y + wantA * a.dy) < 1e-9,
-		string.format("%s: first lead %.1f m out along the ray", name, d(la, a.x, a.y)))
-	check(math.abs(d(lb, b.x, b.y) - wantB) < 1e-9 and d(lb, b.x + wantB * b.dx, b.y + wantB * b.dy) < 1e-9,
-		string.format("%s: last lead %.1f m out along the ray", name, d(lb, b.x, b.y)))
-	return pis
+-- Is turn p want out along end e's ray?
+local function onRay(p, e, want)
+	return d(p, e.x + want * e.dx, e.y + want * e.dy) < 1e-9
 end
-local pc = leadsAt("corner", endAt(0, 0, 0), endAt(500, 400, -90), E.LEAD, E.LEAD)
-check(d(pc[3], 350, 100) < 1e-9, "corner: the middle turn is halfway between the leads, not where the rays meet")
-check(G.cornerGeometry(pc[2], pc[3], pc[4], G.DEFAULT_PARAMS) == nil
-	and G.cornerGeometry(pc[1], pc[2], pc[3], G.DEFAULT_PARAMS) ~= nil
-	and G.cornerGeometry(pc[3], pc[4], pc[5], G.DEFAULT_PARAMS) ~= nil, "corner: the leads curve, the middle turn does not")
-local ps = leadsAt("s-curve", endAt(0, 0, 0), endAt(600, 100, 180), E.LEAD, E.LEAD)
-check(d(ps[3], 300, 50) < 1e-9, "s-curve: the middle turn is halfway between the leads")
--- a short corner: each lead stops halfway to the corner
-leadsAt("short corner", endAt(0, 0, 0), endAt(30, 60, -90), 15, 30)
--- a short s-curve: each lead a third of the distance between the ends
+
+-- One turn: where the rays meet, next to both ends.
+local pc = E.initialPis(endAt(0, 0, 0), endAt(500, 400, -90))
+check(d(pc[2], 500, 0) < 1e-9, "corner: the turn is where the rays meet")
+local pd = E.initialPis(endAt(0, 0, 0), endAt(500, 50, math.deg(atan2(-50, 480))))
+check(#pd == 3 and d(pd[2], 980, 0) < 1e-6, "corner: rays meeting 980 m from an end still make one turn")
+pd = E.initialPis(endAt(0, 0, 0), endAt(21, 300, -90))
+check(#pd == 3, "corner: rays meeting just over MIN_LEG out make one turn")
+
+-- Two turns: each on its end's ray at min(LEAD, dist/3).
+local a, b = endAt(0, 0, 0), endAt(600, 100, 180)
+local ps = E.initialPis(a, b)
+check(onRay(ps[2], a, E.LEAD) and onRay(ps[3], b, E.LEAD), "s-curve: a turn LEAD out on each ray")
+a, b = endAt(0, 0, 0), endAt(60, 20, 180)
 local short = math.sqrt(60 ^ 2 + 20 ^ 2)
-leadsAt("short s-curve", endAt(0, 0, 0), endAt(60, 20, 180), short / 3, short / 3)
+ps = E.initialPis(a, b)
+check(onRay(ps[2], a, short / 3) and onRay(ps[3], b, short / 3), "short s-curve: each turn a third of the distance out")
+a, b = endAt(0, 0, 0), endAt(100, 300, -10)
+ps = E.initialPis(a, b)
+local third = math.sqrt(100 ^ 2 + 300 ^ 2) / 3
+check(onRay(ps[2], a, third) and onRay(ps[3], b, third), "rays meeting over 1 km out: two turns on the rays")
+
+-- Three turns: a lead LEAD out on each ray and a free turn halfway between them.
+a, b = endAt(0, 0, 0), endAt(700, 500, -90)
+local pl = E.initialPis(a, b)
+check(onRay(pl[2], a, E.LEAD) and onRay(pl[4], b, E.LEAD), "long: a lead LEAD out on each ray")
+check(d(pl[3], 450, 150) < 1e-9, "long: the middle turn is halfway between the leads, not where the rays meet")
 
 local pis, why = E.initialPis(endAt(0, 0, 0), endAt(30, 0, 180))
 check(pis == nil and why ~= nil, "ends 30 m apart refused: " .. tostring(why))

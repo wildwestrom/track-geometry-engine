@@ -130,7 +130,7 @@ b = endAt(1500, 800, 0, -1, 10, 0)
 plan, why = P.path(a, b, nil, flat, dry)
 check(plan ~= nil, "turn: a plan (" .. tostring(why) .. ")")
 sound(plan, a, b, "turn")
-check(#plan.curves >= 1 and plan.minRadius < math.huge and plan.info == "1787 m, corner",
+check(#plan.curves >= 1 and plan.minRadius < math.huge and plan.info == "1787 m, long s-curve",
 	"turn: " .. tostring(plan.info) .. ", " .. #plan.curves .. " curve(s), smallest radius " .. string.format("%.0f m", plan.minRadius))
 local worst = 0
 for k = 2, #plan.built.nodes do

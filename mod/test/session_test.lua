@@ -8,6 +8,7 @@ local S = require("westrom_track_geometry::/track_geometry/tg_session.script.tl"
 local E = require("westrom_track_geometry::/track_geometry/tg_edit.script.tl")
 
 local failures = 0
+local LIMIT = 0.085 -- the made-up track type's grade limit
 local function check(ok, what)
 	print((ok and "ok   " or "FAIL ") .. what)
 	if not ok then failures = failures + 1 end
@@ -18,14 +19,15 @@ local endA = { node = 1, x = 0, y = 0, dx = 1, dy = 0, z = 0, grade = 0 }
 local endB = { node = 2, x = 1500, y = 800, dx = 0, dy = -1, z = 0, grade = 0 }
 
 -- A tool on a made-up world: the session, the world it is shown, and every request it made.
-local function newTool()
+local function newTool(a, b)
+	a, b = a or endA, b or endB
 	local t = { live = true, free = { [1] = true, [2] = true }, shift = false, asked = {} }
 	t.w = {
 		grab = 10, cameraDist = 1000,
 		shift = function() return t.shift end,
-		gradeLimit = function() return 0.085 end,
+		gradeLimit = function() return LIMIT end,
 		snap = function(x, y, _, exclude)
-			for _, e in ipairs({ endA, endB }) do
+			for _, e in ipairs({ a, b }) do
 				if x ~= nil and e.node ~= exclude and t.free[e.node] and (e.x - x) ^ 2 + (e.y - y) ^ 2 <= 40 ^ 2 then return e end
 			end
 			return nil, "Point at the end of a track."
@@ -65,10 +67,11 @@ local function click(t) press(t); return letGo(t) end
 local function rightClick(t) mouse(t, 2, "released"); note(t, S.back(t.s, t.w)) end
 local function esc(t) note(t, S.back(t.s, t.w)) end
 -- Both ends picked.
-local function editing()
-	local t = newTool()
-	moveTo(t, 5, 5); click(t)
-	moveTo(t, 1495, 795); click(t)
+local function editing(a, b)
+	local t = newTool(a, b)
+	a, b = a or endA, b or endB
+	moveTo(t, a.x + 5, a.y + 5); click(t)
+	moveTo(t, b.x - 5, b.y - 5); click(t)
 	return t
 end
 -- The middle of the edit's longest leg, and a spot far from all of it.
@@ -197,6 +200,223 @@ tick(t, S.RIGHT_TICKS + 1)
 rightClick(t)
 check(#E.points(e) == 0 and t.s.phase == "done", "vertical: a right-click on the point removes it")
 
+-- too close: a drag is not stopped by the 20 m spacing; the build waits until the point is clear
+local n1, n2 = nodes[math.floor(#nodes / 2)], nodes[math.floor(#nodes / 2) + 20]
+moveTo(t, n1.x, n1.y); press(t); letGo(t)
+moveTo(t, n2.x, n2.y); press(t)
+check(#E.points(e) == 2 and t.s.dragEl ~= nil and t.s.dragEl.i == 2, "too close: a second point, grabbed")
+local n3 = nodes[math.floor(#nodes / 2) + 1]
+moveTo(t, n3.x, n3.y)
+check(E.points(e)[2].tooClose and math.abs(E.points(e)[2].s - n3.s) < 1, "too close: the drag goes within 20 m of the neighbour")
+letGo(t)
+check(t.s.dragEl == nil and E.points(e)[2].tooClose, "too close: let go there, it stays too close")
+moveTo(t, FAR_X, FAR_Y)
+check(click(t) == true and asked(t, "askBuild") == 0 and t.s.editMsg ~= nil
+	and t.s.editMsg:find("too close", 1, true) ~= nil, "too close: the build is refused: " .. tostring(t.s.editMsg))
+-- dragged past its neighbour, the grab follows the point to its new place in the order
+moveTo(t, n3.x, n3.y); press(t)
+local n4 = nodes[math.floor(#nodes / 2) - 5]
+moveTo(t, n4.x, n4.y)
+check(t.s.dragEl ~= nil and t.s.dragEl.i == 1 and math.abs(E.points(e)[1].s - n4.s) < 1 and E.points(e)[2].s > E.points(e)[1].s,
+	"too close: dragged past its neighbour, it is point 1 now and still grabbed")
+local n5 = nodes[math.floor(#nodes / 2) - 10]
+moveTo(t, n5.x, n5.y)
+check(math.abs(E.points(e)[1].s - n5.s) < 1 and not E.points(e)[1].tooClose, "too close: the drag goes on with the new index, clear")
+letGo(t)
+moveTo(t, FAR_X, FAR_Y)
+check(click(t) == true and asked(t, "askBuild") == 1, "too close: once clear, a click asks to build")
+note(t, S.confirmOpened(t.s)); S.confirmClosed(t.s); tick(t, S.CLOSED_TICKS + 1)
+tick(t, S.RIGHT_TICKS + 1)
+moveTo(t, E.points(e)[1].x, E.points(e)[1].y); rightClick(t)
+tick(t, S.RIGHT_TICKS + 1)
+moveTo(t, E.points(e)[1].x, E.points(e)[1].y); rightClick(t)
+check(#E.points(e) == 0, "too close: both points removed again")
+
+-- too steep: a height set directly passes the limit, and the build waits until it is eased
+tick(t, S.RIGHT_TICKS + 1)
+moveTo(t, n1.x, n1.y); press(t); letGo(t)
+check(E.setHeight(e, 1, 200) and E.steepest(e) > LIMIT, "too steep: a height set directly passes the limit")
+moveTo(t, FAR_X, FAR_Y)
+check(click(t) == true and asked(t, "askBuild") == 0 and t.s.editMsg ~= nil
+	and t.s.editMsg:find("too steep", 1, true) ~= nil and t.s.editMsg:find("too close", 1, true) == nil,
+	"too steep: the build is refused: " .. tostring(t.s.editMsg))
+-- too steep and too close at once: the refusal names both
+E.insertElevation(e, E.points(e)[1].s + 15)
+check(#E.points(e) == 2 and E.points(e)[2].tooClose, "too steep: and a point too close")
+moveTo(t, FAR_X, FAR_Y)
+check(click(t) == true and asked(t, "askBuild") == 0 and t.s.editMsg:find("too steep", 1, true) ~= nil
+	and t.s.editMsg:find("too close", 1, true) ~= nil, "too steep and too close: the refusal names both: " .. tostring(t.s.editMsg))
+tick(t, S.RIGHT_TICKS + 1)
+moveTo(t, E.points(e)[2].x, E.points(e)[2].y); rightClick(t)
+E.setHeight(e, 1, E.points(e)[1].z - 190)
+check(E.steepest(e) <= LIMIT, "too steep: eased")
+moveTo(t, FAR_X, FAR_Y)
+check(click(t) == true and asked(t, "askBuild") == 1, "too steep: once eased, a click asks to build")
+
+-- the track up on a bridge: the ground under the mouse is behind it, so it is picked along the
+-- view ray (the eye through the ground point), as is a slide
+t = editing()
+e = t.s.edit
+S.setMode(t.s, "vertical")
+nodes = E.nodes(e)
+-- (the track is at 0; here the ground is 100 m below it, so the mouse's ground point is 100 m on)
+local function lookAt(nd)
+	local gx, gy = nd.x + 100, nd.y + 100
+	t.w.ray = { ex = nd.x - 300, ey = nd.y - 300, ez = 300, gx = gx + 0.0, gy = gy + 0.0, gz = -100 }
+	moveTo(t, gx, gy)
+end
+local bm = math.floor(#nodes / 2)
+lookAt(nodes[bm])
+check(t.s.hit ~= nil and t.s.hit.kind == "track" and math.abs(t.s.hit.s - nodes[bm].s) < 1,
+	"bridge: the raised track is under the mouse along its view ray")
+check(press(t) == true and #E.points(e) == 1 and math.abs(E.points(e)[1].s - nodes[bm].s) < 1,
+	"bridge: a press on it adds a point there (not a build)")
+lookAt(nodes[bm + 10])
+check(math.abs(E.points(e)[1].s - nodes[bm + 10].s) < 1, "bridge: the point slides along the ray: " .. string.format("%.1f m", E.points(e)[1].s))
+letGo(t)
+check(asked(t, "askBuild") == 0, "bridge: the press and its click do not ask to build")
+t.w.ray = nil
+
+------------------------------------------------------------------ selecting a point and setting its height
+t = editing()
+e = t.s.edit
+S.setMode(t.s, "vertical")
+nodes = E.nodes(e)
+local m = math.floor(#nodes / 2)
+check(S.selection(t.s, LIMIT) == nil, "select: nothing selected at first")
+-- a press on the track adds a point, selected
+moveTo(t, nodes[m].x, nodes[m].y); press(t); letGo(t)
+check(t.s.selected == 1, "select: a point just added is selected")
+local sel = S.selection(t.s, LIMIT)
+check(sel ~= nil and sel.i == 1 and math.abs(sel.s - nodes[m].s) < 1 and sel.grade ~= nil and not sel.tooClose and sel.steep == nil,
+	"select: the selection reads out its index, chainage, height and grade")
+-- a click on another point selects it; a click on nothing keeps the selection and asks to build
+moveTo(t, nodes[m + 20].x, nodes[m + 20].y); press(t); letGo(t)
+check(t.s.selected == 2, "select: a second point added is selected")
+moveTo(t, E.points(e)[1].x, E.points(e)[1].y); press(t); letGo(t)
+check(t.s.selected == 1 and #E.points(e) == 2, "select: a click on a point selects it (and adds none)")
+moveTo(t, FAR_X, FAR_Y)
+check(click(t) == true and asked(t, "askBuild") == 1 and t.s.selected == 1, "select: a click on nothing keeps it and asks to build")
+-- setting its height applies at once, past the limit too
+asked(t, "ghostNow")
+note(t, S.setHeight(t.s, 200))
+check(E.points(e)[1].z == 200 and asked(t, "ghostNow") == 1, "select: a height set applies as asked, and the ghost is made at once")
+local rev2 = e.rev
+check(#S.setHeight(t.s, 200) == 0 and e.rev == rev2, "select: the height it has already asks nothing (the box echoing its value)")
+sel = S.selection(t.s, LIMIT)
+check(sel.z == 200 and sel.steep ~= nil and sel.steep:find("too steep", 1, true) ~= nil, "select: the selection says it is too steep: " .. tostring(sel.steep))
+-- a drag past its neighbour: the selection follows the point
+moveTo(t, E.points(e)[1].x, E.points(e)[1].y); press(t)
+moveTo(t, nodes[m + 30].x, nodes[m + 30].y)
+check(t.s.selected == t.s.dragEl.i and E.points(e)[t.s.selected].z == 200, "select: the dragged point is selected and the selection follows it")
+letGo(t)
+local held = t.s.selected
+-- a Shift-drag selects the point it grabs, and the selection reads its height live
+moveTo(t, E.points(e)[3 - held].x, E.points(e)[3 - held].y)
+t.shift = true
+mouse(t, 0, "moved", 500); press(t)
+check(t.s.selected == 3 - held, "select: a Shift-drag selects the point it grabs")
+mouse(t, 0, "moved", 490); tick(t)
+check(math.abs(S.selection(t.s, LIMIT).z - E.points(e)[t.s.selected].z) < 1e-9, "select: the selection follows a Shift-drag's height")
+letGo(t)
+t.shift = false
+-- a point too close: no grade, but its height can be set
+local closeAt = E.points(e)[t.s.selected].s + 5
+E.insertElevation(e, closeAt)
+local ci
+for k, p in ipairs(E.points(e)) do if p.tooClose then ci = k end end
+moveTo(t, E.points(e)[ci].x, E.points(e)[ci].y); press(t); letGo(t)
+sel = S.selection(t.s, LIMIT)
+check(t.s.selected == ci and sel.tooClose and sel.grade == nil, "select: a point too close has no grade")
+note(t, S.setHeight(t.s, 50))
+check(E.points(e)[ci].z == 50, "select: a point too close can still have its height set")
+-- removing a point before the selected one keeps the same point selected; removing it clears it
+local keep = E.points(e)[3]
+t.s.selected = 3
+tick(t, S.RIGHT_TICKS + 1)
+moveTo(t, E.points(e)[1].x, E.points(e)[1].y); rightClick(t)
+check(#E.points(e) == 2 and t.s.selected == 2 and E.points(e)[2].s == keep.s, "select: removing a point before it keeps it selected")
+tick(t, S.RIGHT_TICKS + 1)
+moveTo(t, E.points(e)[2].x, E.points(e)[2].y); rightClick(t)
+check(#E.points(e) == 1 and t.s.selected == nil and S.selection(t.s, LIMIT) == nil, "select: removing the selected point clears it")
+check(#S.setHeight(t.s, 10) == 0, "select: with nothing selected, a height does nothing")
+-- the mode switching to horizontal, and leaving the edit, clear it
+moveTo(t, E.points(e)[1].x, E.points(e)[1].y); press(t); letGo(t)
+check(t.s.selected == 1, "select: selected again")
+S.setMode(t.s, "horizontal")
+check(t.s.selected == nil, "select: switching to horizontal clears it")
+S.setMode(t.s, "vertical")
+moveTo(t, E.points(e)[1].x, E.points(e)[1].y); press(t); letGo(t)
+tick(t, S.RIGHT_TICKS + 1)
+esc(t)
+check(t.s.phase == "to" and t.s.selected == nil, "select: leaving the edit clears it")
+
+------------------------------------------------------------------ matching another point's height
+-- ends at different heights: the start 36.4 m up, the end 1.9 m
+local hiA = { node = 1, x = 0, y = 0, dx = 1, dy = 0, z = 36.4, grade = 0 }
+local loB = { node = 2, x = 1500, y = 800, dx = 0, dy = -1, z = 1.9, grade = 0 }
+t = editing(hiA, loB)
+e = t.s.edit
+S.setMode(t.s, "vertical")
+nodes = E.nodes(e)
+check(#S.matchSources(t.s) == 0, "match: nothing to match with no point selected")
+for _, k in ipairs({ 30, 60, 90 }) do
+	local nd = nodes[math.floor(#nodes * k / 100)]
+	moveTo(t, nd.x, nd.y); press(t); letGo(t)
+end
+note(t, S.setHeight(t.s, 18.94)) -- point 3 (the last added, selected)
+moveTo(t, E.points(e)[1].x, E.points(e)[1].y); press(t); letGo(t)
+note(t, S.setHeight(t.s, 25))
+moveTo(t, E.points(e)[2].x, E.points(e)[2].y); press(t); letGo(t)
+check(t.s.selected == 2, "match: point 2 selected")
+local src = S.matchSources(t.s)
+-- (the height only: where along the track read as a second height)
+local want = { "Start · 36.4 m", "Point 1 · 25.0 m", "Point 3 · 18.9 m", "End · 1.9 m" }
+local labels = {}
+for k, m in ipairs(src) do labels[k] = m.label end
+check(table.concat(labels, " | ") == table.concat(want, " | "),
+	"match: Start, the other points and End, in order, labelled: " .. table.concat(labels, " | "))
+-- picking one sets the selected point's height at once
+asked(t, "ghostNow")
+local function pick(k) note(t, S.match(t.s, S.matchSources(t.s)[k])) end
+pick(3)
+check(E.points(e)[2].z == 18.94 and asked(t, "ghostNow") == 1, "match: point 3's height, at once")
+pick(1)
+check(E.points(e)[2].z == 36.4, "match: the start's height")
+pick(4)
+check(E.points(e)[2].z == 1.9 and t.s.selected == 2, "match: the end's height; still selected")
+-- one-off: the point does not follow its source
+note(t, S.setHeight(t.s, 10))
+moveTo(t, E.points(e)[1].x, E.points(e)[1].y); press(t); letGo(t)
+note(t, S.setHeight(t.s, 30))
+check(E.points(e)[2].z == 10, "match: one-off, the point does not follow its source")
+-- past the grade limit too: the build is then refused
+moveTo(t, E.points(e)[2].x, E.points(e)[2].y); press(t); letGo(t)
+note(t, S.setHeight(t.s, 300))
+moveTo(t, E.points(e)[3].x, E.points(e)[3].y); press(t); letGo(t)
+pick(3) -- point 2, 300 m up
+check(E.points(e)[3].z == 300 and S.selection(t.s, LIMIT).steep ~= nil, "match: past the limit too, and then too steep")
+-- a too-close point is listed like any other, with its own height
+E.insertElevation(e, E.points(e)[1].s + 5)
+local tc
+for k, p in ipairs(E.points(e)) do if p.tooClose then tc = k end end
+E.setHeight(e, tc, 44)
+local listed = false
+for _, m in ipairs(S.matchSources(t.s)) do if m.label:find(string.format("Point %d ", tc), 1, true) and m.z == 44 then listed = true end end
+check(listed, "match: a point too close is listed with its own height")
+check(#S.match(t.s, nil) == 0, "match: no entry does nothing")
+-- an entry as it was drawn applies its own height, even after the points reorder
+local drawn = S.matchSources(t.s)[1] -- the start
+moveTo(t, E.points(e)[1].x, E.points(e)[1].y); press(t)
+moveTo(t, nodes[#nodes - 5].x, nodes[#nodes - 5].y); letGo(t)
+moveTo(t, E.points(e)[2].x, E.points(e)[2].y); press(t); letGo(t)
+note(t, S.match(t.s, drawn))
+check(E.points(e)[2].z == 36.4, "match: an entry drawn before a reorder applies the height it showed")
+E.setHeight(e, 1, -0.01)
+local shownZero = false
+for _, m in ipairs(S.matchSources(t.s)) do if m.label:find("Point 1 ", 1, true) and m.label == "Point 1 · 0.0 m" then shownZero = true end end
+check(shownZero, "match: a height just below zero shows as 0.0 m, not -0.0")
+
 ------------------------------------------------------------------ ends that go away
 -- the end is removed in the middle of a drag: back to picking it, nothing of the edit left
 t = editing()
@@ -221,6 +441,85 @@ check(asked(t, "closeConfirm") == 1 and asked(t, "closeMode") == 1 and asked(t, 
 check(t.s.confirmOpen == true, "start gone: the window counts as open until the GUI says it closed")
 S.confirmClosed(t.s)
 check(t.s.confirmOpen == false, "start gone: then it is closed")
+
+------------------------------------------------------------------ the hint line
+-- The hint names a gesture only where that gesture does something there.
+local function says(line, what) return line ~= nil and line:find(what, 1, true) ~= nil end
+-- A corner: one turn where the ends' rays meet, fixed until a turn is added.
+local cornerB = { node = 2, x = 500, y = 400, dx = 0, dy = -1, z = 0, grade = 0 }
+-- The edit for trying a turn of mobility mob: the corner for a fixed one, the corner with one turn
+-- added for ray turns, the s-curve (three turns) for a free one.
+local function withTurns(mob)
+	local t = editing(endA, mob ~= "free" and cornerB or nil)
+	for _ = 1, (mob == "ray" and 1 or 0) do
+		local x, y = onLeg(t.s.edit); moveTo(t, x, y); click(t)
+	end
+	return t
+end
+-- Over handle hd of withTurns(mob): the hint, and what a press and a right-click there do.
+local function tryHandle(mob, hd)
+	local t = withTurns(mob)
+	local e = t.s.edit
+	moveTo(t, hd.x, hd.y)
+	local over = t.s.hit ~= nil and t.s.hit.kind == hd.kind and t.s.hit.i == hd.i
+	local hint = S.hint(t.s)
+	press(t)
+	local grabbed = t.s.drag ~= nil
+	letGo(t)
+	local turns = E.turnCount(e)
+	moveTo(t, hd.x, hd.y); rightClick(t)
+	return over, hint, grabbed, E.turnCount(e) < turns
+end
+
+t = editing()
+e = t.s.edit
+moveTo(t, FAR_X, FAR_Y)
+check(S.hint(t.s) == "Click: build · Esc: back", "hint: over nothing: " .. tostring(S.hint(t.s)))
+lx, ly = onLeg(e)
+moveTo(t, lx, ly)
+local hint = S.hint(t.s)
+turns = E.turnCount(e)
+press(t)
+check(says(hint, "Click: add turn") and E.turnCount(e) == turns + 1, "hint: over a leg: " .. tostring(hint))
+check(S.hint(t.s) == nil, "hint: none while dragging")
+letGo(t)
+local seen = {}
+for _, mob in ipairs({ "fixed", "ray", "free" }) do
+	for _, hd in ipairs(E.handles(withTurns(mob).s.edit)) do
+		local key = hd.kind == "pi" and hd.mobility or "bracket"
+		if not seen[key] and (hd.kind ~= "pi" or hd.mobility == mob) then
+			local over, hint, grabbed, removed = tryHandle(mob, hd)
+			if over then
+				seen[key] = true
+				check(says(hint, "Drag") == grabbed and says(hint, "Right-click") == removed,
+					string.format("hint: %s: %s (press grabs: %s, right-click removes: %s)", key, tostring(hint),
+						tostring(grabbed), tostring(removed)))
+			end
+		end
+	end
+end
+check(seen.fixed and seen.ray and seen.free and seen.bracket, "hint: every kind of turn and a bracket was tried")
+
+-- vertical: the track, and a point
+t = editing()
+e = t.s.edit
+S.setMode(t.s, "vertical")
+nodes = E.nodes(e)
+m = math.floor(#nodes / 2)
+moveTo(t, nodes[m].x, nodes[m].y)
+hint = S.hint(t.s)
+press(t); letGo(t)
+check(says(hint, "Click: add point") and #E.points(e) == 1, "hint: over the track (vertical): " .. tostring(hint))
+t.s.selected = nil
+moveTo(t, nodes[m].x, nodes[m].y)
+hint = S.hint(t.s)
+press(t); letGo(t)
+check(says(hint, "Click: select") and says(hint, "Shift+drag: height") and t.s.selected == 1 and #E.points(e) == 1,
+	"hint: over a point: " .. tostring(hint))
+rightClick(t)
+check(says(hint, "Right-click: remove") and #E.points(e) == 0, "hint: a point's right-click removes it")
+moveTo(t, FAR_X, FAR_Y)
+check(S.hint(t.s) == "Click: build · Esc: back", "hint: over nothing (vertical)")
 
 ------------------------------------------------------------------ odd moments
 -- a press right after the second pick, before any tick of the edit and with no grab radius known

@@ -2,19 +2,27 @@
 -- ends), each with the curve size (tangent budget) the player set by dragging a bracket. The edits:
 --   move a turn   : free turns go anywhere; the turn next to an end only slides along that end's
 --                   ray, so the new track always leaves and arrives along the ends' headings. A turn
---                   next to both ends cannot move until another is added (no starting layout has one).
+--                   next to both ends (the corner layout) cannot move until another is added.
 --   add a turn    : on a leg, at the point nearest the mouse. On the straight layout (no turns) it
---                   adds three, so the middle one is free to move.
+--                   adds three, so the middle one is free to move. On the corner layout it splits
+--                   the leg in place: both turns then slide on their rays and the track does not
+--                   move (unless the turn lands inside the curve, which then shrinks to fit).
 --   remove a turn : free turns only (removing one next to an end would kink the join).
 --   resize a curve: drag the bracket where it starts or ends; sets that turn's curve size, up to
 --                   the room the neighbouring curves leave (tg_geometry.cornerLayouts).
 -- And the vertical profile (tg_profile) through elevation points between the ends, each kept as a
 -- share of the path's length, so they follow the horizontal edits:
 --   add a point   : at a chainage, on the profile as it is, so adding one changes nothing.
---   move a point  : along the path and up or down, at least MIN_SPAN from its neighbours (the
---                   ends included), and only as far as the steepest grade stays within the limit
---                   (a profile already steeper than the limit may move without getting steeper).
+--   move a point  : along the path (past its neighbours too: the points reorder) and up or down,
+--                   only as far as the steepest grade stays within the limit (a profile already
+--                   steeper than the limit may move without getting steeper).
+--   set a height  : as asked, past the limit too; the profile is then too steep.
 --   remove a point: any; the ends are not elevation points and stay.
+-- A point within MIN_SPAN of an end or of another point is too close: it is left out of the
+-- profile (so the spline never gets a tiny span) and the build is refused until it is clear. Of
+-- two points too close to each other, the one placed (added or slid) last is the one too close.
+-- A profile whose steepest grade at the path's nodes is past the limit is too steep: the build is
+-- refused until it is eased.
 --
 -- The edit keeps its own design params, and its path sampled every STEP (made again only when the
 -- turns or curves change), so callers work in metres of chainage and never pass either in. Its
@@ -32,10 +40,30 @@ local record Turn
 	budget : number -- the curve's tangent budget the player set (m); nil: automatic
 end
 
--- An elevation point: where along the path, as a share of its length (0..1), and its height (m).
+-- An elevation point: where along the path, as a share of its length (0..1), its height (m), and
+-- when it was last placed (added or slid; of two too close, the later one gives way).
 local record Elevation
 	f : number
 	z : number
+	seq : integer
+end
+
+-- What an elevation point too close is too close to.
+local enum Near
+	"end"
+	"neighbour"
+end
+
+-- Why an elevation point is too close: the nearest end or neighbour in the way, gap m off.
+local record Closeness
+	near : Near
+	gap : number
+end
+
+-- The points too close by index, as of a revision.
+local record CloseCache
+	rev : integer
+	close : {integer : Closeness}
 end
 
 -- The path, sampled every STEP, as of a horizontal revision.
@@ -53,9 +81,11 @@ local record Edit
 	dp : geometry.DesignParams
 	turns : {Turn}
 	elevations : {Elevation} -- in order along the path, the ends not included
+	placed : integer -- the last elevation point placement (Elevation.seq)
 	rev : integer -- bumped on every change
 	hrev : integer -- bumped on every change to the horizontal alignment (turns, curves)
 	sampled : Sampled
+	closeCache : CloseCache
 end
 
 local enum HitKind
@@ -77,12 +107,26 @@ local record Hit
 	s : number -- elevation points and the track: the chainage (m)
 end
 
--- An elevation point, read out: its chainage (m), height (m), and where it is on the ground.
+-- The mouse's view ray: from the eye (the camera) through the ground point under the mouse.
+local record Ray
+	ex : number
+	ey : number
+	ez : number
+	gx : number
+	gy : number
+	gz : number
+end
+
+-- An elevation point, read out: its chainage (m), height (m), and where it is on the ground. And
+-- whether it is too close (left out of the profile), to what ("neighbour" or "end") and how far.
 local record Point
 	s : number
 	z : number
 	x : number
 	y : number
+	tooClose : boolean
+	near : Near
+	gap : number
 end
 
 local record EditMod
@@ -90,6 +134,7 @@ local record EditMod
 	Hit : Hit
 	HitKind : HitKind
 	Point : Point
+	Ray : Ray
 	MIN_GAP : number
 	MIN_SPAN : number
 	STEP : number
@@ -112,13 +157,18 @@ local record EditMod
 	nodes : function(e : Edit) : {alignment.Sample}
 	length : function(e : Edit) : number
 	chainageAt : function(e : Edit, x : number, y : number) : number, number
-	hit : function(e : Edit, vertical : boolean, x : number, y : number, r : number) : Hit
+	hit : function(e : Edit, vertical : boolean, x : number, y : number, r : number, ray ?: Ray) : Hit
+	chainageOnRay : function(e : Edit, ray : Ray) : number, number
 	-- the vertical profile
 	profile : function(e : Edit) : profiles.Profile, string
+	endHeights : function(e : Edit) : number, number
 	steepest : function(e : Edit) : number
+	gradeProblem : function(e : Edit, limit : number) : string, number
 	points : function(e : Edit) : {Point}
+	spacingProblem : function(e : Edit) : string
 	insertElevation : function(e : Edit, s : number) : integer, string
-	moveElevation : function(e : Edit, i : integer, s : number, z : number, limit : number) : boolean
+	moveElevation : function(e : Edit, i : integer, s : number, z : number, limit : number) : boolean, integer
+	setHeight : function(e : Edit, i : integer, z : number) : boolean
 	removeElevation : function(e : Edit, i : integer) : boolean
 end
 
@@ -126,7 +176,8 @@ local M : EditMod = {}
 
 -- Closest two neighbouring turns may get (m).
 M.MIN_GAP = 10.0
--- Closest two elevation points may get along the path, the ends included (m).
+-- Closest two elevation points may be along the path, the ends included, and both be in the
+-- profile (m). A point closer than this is too close.
 M.MIN_SPAN = 20.0
 -- The path is read this finely (m): for the ground under it, the readout, picking...
 M.STEP = 10.0
@@ -145,7 +196,7 @@ function M.new(a : ends.End, b : ends.End, dp ?: geometry.DesignParams) : Edit, 
 	if pis == nil then return nil, why end
 	local turns : {Turn} = {}
 	for i, p in ipairs(pis) do turns[i] = { pos = p } end
-	return { a = a, b = b, dp = dp or M.PARAMS, turns = turns, elevations = {}, rev = 0, hrev = 0 }, why
+	return { a = a, b = b, dp = dp or M.PARAMS, turns = turns, elevations = {}, placed = 0, rev = 0, hrev = 0 }, why
 end
 
 ------------------------------------------------------------------ the horizontal alignment
@@ -351,21 +402,60 @@ function M.chainageAt(e : Edit, x : number, y : number) : number, number
 	return alignment.project(sampled(e).nodes, x, y)
 end
 
+-- How far the point (px, py, pz) is from the ray (m): from the line beyond the eye.
+local function offRay(ray : Ray, px : number, py : number, pz : number) : number
+	local dx, dy, dz = ray.gx - ray.ex, ray.gy - ray.ey, ray.gz - ray.ez
+	local wx, wy, wz = px - ray.ex, py - ray.ey, pz - ray.ez
+	local dd = dx * dx + dy * dy + dz * dz
+	local t = dd > 0 and math.max(0, (wx * dx + wy * dy + wz * dz) / dd) or 0
+	return math.sqrt((wx - t * dx) ^ 2 + (wy - t * dy) ^ 2 + (wz - t * dz) ^ 2)
+end
+
+-- The chainage where the track, at its profile's height, passes nearest the ray (m), and how far
+-- off it is; nil when there is no profile.
+function M.chainageOnRay(e : Edit, ray : Ray) : number, number
+	local c = sampled(e)
+	local p = M.profile(e)
+	if p == nil or #c.nodes == 0 then return nil, math.huge end
+	local function off(s : number) : number
+		local x, y = alignment.pointAt(c.nodes, s)
+		return offRay(ray, x, y, profiles.heightAt(p, s))
+	end
+	local best, bestD = 0.0, math.huge
+	for _, nd in ipairs(c.nodes) do
+		local d = off(nd.s)
+		if d < bestD then best, bestD = nd.s, d end
+	end
+	-- (then every 0.5 m, a STEP either side of the nearest node)
+	local lo, hi = math.max(0, best - M.STEP), math.min(c.len, best + M.STEP)
+	for s = lo, hi, 0.5 do
+		local d = off(s)
+		if d < bestD then best, bestD = s, d end
+	end
+	return best, bestD
+end
+
 -- What is at (x, y) within r. Horizontal: a turn or a bracket, else a leg (or the track along it,
--- which leaves the legs at the curves). Vertical: an elevation point, else the track. nil: nothing.
-function M.hit(e : Edit, vertical : boolean, x : number, y : number, r : number) : Hit
+-- which leaves the legs at the curves). Vertical: an elevation point, else the track, both also up
+-- at their heights along ray (the mouse's view ray), when it is given. nil: nothing.
+function M.hit(e : Edit, vertical : boolean, x : number, y : number, r : number, ray ?: Ray) : Hit
 	local c = sampled(e)
 	if vertical then
 		local best : Hit = nil
-		local bestD = r * r
+		local bestD = r
 		for i, el in ipairs(e.elevations) do
 			local s = el.f * c.len
 			local px, py = alignment.pointAt(c.nodes, s)
-			local d = d2(x, y, px, py)
+			local d = math.sqrt(d2(x, y, px, py)) -- (its circle on the ground)
+			if ray ~= nil then d = math.min(d, offRay(ray, px, py, el.z)) end -- (its top, up at its height)
 			if d <= bestD then best, bestD = { kind = "point", i = i, s = s, x = px, y = py }, d end
 		end
 		if best ~= nil then return best end
 		local s, d = alignment.project(c.nodes, x, y)
+		if ray ~= nil then
+			local rs, rd = M.chainageOnRay(e, ray)
+			if rs ~= nil and rd < d then s, d = rs, rd end
+		end
 		if d <= r then return { kind = "track", s = s } end
 		return nil
 	end
@@ -388,91 +478,178 @@ end
 
 ------------------------------------------------------------------ the vertical profile
 
--- The profile through the elevation points els: from end a at its track's grade to end b (the path
--- arrives against b's direction, so its grade there is the opposite).
+-- Which of the points els (in order along a path len long) are too close: of the ones placed
+-- earlier, a point is in the profile when it is MIN_SPAN clear of both ends and of each one in it;
+-- else it is too close.
+local function closeness(els : {Elevation}, len : number) : {integer : Closeness}
+	local order : {integer} = {}
+	for k = 1, #els do order[k] = k end
+	table.sort(order, function(p : integer, q : integer) : boolean
+		local a, b = els[p], els[q]
+		return a.seq < b.seq or (a.seq == b.seq and p < q)
+	end)
+	local close : {integer : Closeness} = {}
+	local kept : {number} = {}
+	for _, k in ipairs(order) do
+		local s = els[k].f * len
+		local near, gap : Near, number = "end", math.min(s, len - s)
+		for _, o in ipairs(kept) do
+			local d = math.abs(s - o)
+			if d < gap then near, gap = "neighbour", d end
+		end
+		if gap < M.MIN_SPAN then close[k] = { near = near, gap = gap } else kept[#kept + 1] = s end
+	end
+	return close
+end
+
+-- The profile through the elevation points els that are not too close: from end a at its track's
+-- grade to end b (the path arrives against b's direction, so its grade there is the opposite).
 local function profileWith(e : Edit, els : {Elevation}, len : number) : profiles.Profile, string
+	local close = closeness(els, len)
 	local pts : {profiles.Point} = { { s = 0, z = e.a.z } }
-	for _, el in ipairs(els) do pts[#pts + 1] = { s = el.f * len, z = el.z } end
+	for k, el in ipairs(els) do
+		if close[k] == nil then pts[#pts + 1] = { s = el.f * len, z = el.z } end
+	end
 	pts[#pts + 1] = { s = len, z = e.b.z }
 	return profiles.solve(pts, e.a.grade, -e.b.grade)
+end
+
+-- e's points too close (kept until the next change).
+local function closeOf(e : Edit) : {integer : Closeness}
+	local c = e.closeCache
+	if c == nil or c.rev ~= e.rev then
+		c = { rev = e.rev, close = closeness(e.elevations, sampled(e).len) }
+		e.closeCache = c
+	end
+	return c.close
+end
+
+-- The heights of the start and the end (m).
+function M.endHeights(e : Edit) : number, number
+	return e.a.z, e.b.z
 end
 
 function M.profile(e : Edit) : profiles.Profile, string
 	return profileWith(e, e.elevations, sampled(e).len)
 end
 
-local function steepestOf(p : profiles.Profile, ss : {number}) : number
-	local worst = 0.0
-	for _, s in ipairs(ss) do worst = math.max(worst, math.abs(profiles.gradeAt(p, s))) end
-	return worst
+-- The steepest grade of p at the chainages ss, as a magnitude, and where (the first such).
+local function steepestOf(p : profiles.Profile, ss : {number}) : number, number
+	local worst, at = 0.0, 0.0
+	for _, s in ipairs(ss) do
+		local g = math.abs(profiles.gradeAt(p, s))
+		if g > worst then worst, at = g, s end
+	end
+	return worst, at
 end
 
 -- The steepest grade at the path's nodes, as a magnitude; huge if there is no profile.
 function M.steepest(e : Edit) : number
 	local p = M.profile(e)
 	if p == nil then return math.huge end
-	return steepestOf(p, sampled(e).ss)
+	return (steepestOf(p, sampled(e).ss))
+end
+
+-- Why the build must wait while the profile is too steep (its steepest grade at the path's nodes
+-- past limit: where and how much), and the chainage there; nil when it is not.
+function M.gradeProblem(e : Edit, limit : number) : string, number
+	local p = M.profile(e)
+	if p == nil then return nil, nil end -- (no profile: the ghost says why)
+	local g, at = steepestOf(p, sampled(e).ss)
+	if g <= limit then return nil, nil end
+	-- (rounded up: 85.4 is not "85, limit 85")
+	return string.format("too steep: %d ‰ at %.0f m (limit %.0f ‰)", math.ceil(g * 1000), at, limit * 1000), at
 end
 
 -- The elevation points in metres, in order along the path.
 function M.points(e : Edit) : {Point}
 	local c = sampled(e)
+	local close = closeOf(e)
 	local out : {Point} = {}
 	for i, el in ipairs(e.elevations) do
 		local s = el.f * c.len
 		local x, y = alignment.pointAt(c.nodes, s)
-		out[i] = { s = s, z = el.z, x = x, y = y }
+		local cl = close[i]
+		out[i] = { s = s, z = el.z, x = x, y = y, tooClose = cl ~= nil, near = cl and cl.near, gap = cl and cl.gap }
 	end
 	return out
 end
 
--- Where elevation point i may go along the path: MIN_SPAN from its neighbours (m).
-local function spanRoom(e : Edit, i : integer, len : number) : number, number
-	local els = e.elevations
-	local lo = i > 1 and els[i - 1].f * len or 0.0
-	local hi = i < #els and els[i + 1].f * len or len
-	return lo + M.MIN_SPAN, hi - M.MIN_SPAN
+-- Why the build must wait while a point is too close (the first along the path), or nil.
+function M.spacingProblem(e : Edit) : string
+	local close = closeOf(e)
+	for i = 1, #e.elevations do
+		local cl = close[i]
+		if cl ~= nil then
+			-- (rounded down: 19.6 m is not "20 m, needs 20 m")
+			return string.format("elevation point %d is too close to %s (%d m, needs %.0f m)", i,
+				cl.near == "end" and "the end" or "its neighbour", math.floor(cl.gap), M.MIN_SPAN)
+		end
+	end
+	return nil
 end
 
--- Add an elevation point at chainage s on the profile as it is. Its index, or nil and why not.
+-- The points in order along the path (of two at one spot, the one placed first comes first).
+local function sortEls(els : {Elevation})
+	table.sort(els, function(a : Elevation, b : Elevation) : boolean
+		return a.f < b.f or (a.f == b.f and a.seq < b.seq)
+	end)
+end
+
+-- el, just added to or changed in e's points: sort them again, count the change, and say where
+-- el is now.
+local function place(e : Edit, el : Elevation) : integer
+	sortEls(e.elevations)
+	e.rev = e.rev + 1
+	for k, v in ipairs(e.elevations) do if v == el then return k end end
+	return nil
+end
+
+-- Chainage s, kept on the path (m).
+local function onPath(s : number, len : number) : number
+	return math.max(0, math.min(len, s))
+end
+
+-- Add an elevation point at chainage s on the profile as it is (too close, when it is within
+-- MIN_SPAN of an end or another point). Its index, or nil and why not.
 function M.insertElevation(e : Edit, s : number) : integer, string
 	local len = sampled(e).len
 	local p, why = M.profile(e)
 	if p == nil then return nil, why end
-	local i = 1
-	while i <= #e.elevations and e.elevations[i].f * len < s do i = i + 1 end
-	local lo = i > 1 and e.elevations[i - 1].f * len or 0.0
-	local hi = i <= #e.elevations and e.elevations[i].f * len or len
-	if s - lo < M.MIN_SPAN or hi - s < M.MIN_SPAN then return nil, "too close to the next point" end
-	table.insert(e.elevations, i, { f = s / len, z = profiles.heightAt(p, s) })
-	e.rev = e.rev + 1
-	return i, nil
+	s = onPath(s, len)
+	e.placed = e.placed + 1
+	local el : Elevation = { f = s / len, z = profiles.heightAt(p, s), seq = e.placed }
+	table.insert(e.elevations, el)
+	return place(e, el), nil
 end
 
--- Move elevation point i towards chainage s and height z: s stays MIN_SPAN from the neighbours,
--- and the move stops where the steepest grade at the path's nodes would pass the limit (or, on a
--- profile already past it, would get steeper). false when it cannot move at all.
-function M.moveElevation(e : Edit, i : integer, s : number, z : number, limit : number) : boolean
+-- Move elevation point i towards chainage s (on the path; past its neighbours too) and height z.
+-- The move stops where the steepest grade at the path's nodes would pass the limit (or, on a
+-- profile already past it, would get steeper); a point too close is not in the profile, so only
+-- the others count until it is clear. A point slid is placed anew: of two too close, it gives way.
+-- false when it cannot move at all; and the point's index after the move (the points reorder).
+function M.moveElevation(e : Edit, i : integer, s : number, z : number, limit : number) : boolean, integer
 	local el = e.elevations[i]
-	if el == nil then return false end
+	if el == nil then return false, i end
 	local c = sampled(e)
 	local len, ss = c.len, c.ss
-	local lo, hi = spanRoom(e, i, len)
-	if lo > hi then return false end
-	s = math.max(lo, math.min(hi, s))
+	s = onPath(s, len)
 	local s0, z0 = el.f * len, el.z
+	local seq = s ~= s0 and e.placed + 1 or el.seq
 	local allowed = math.max(limit, M.steepest(e))
-	local function at(t : number) : {Elevation}
-		local els : {Elevation} = {}
-		for k, v in ipairs(e.elevations) do els[k] = v end
-		els[i] = { f = (s0 + t * (s - s0)) / len, z = z0 + t * (z - z0) }
-		return els
+	local function moved(t : number) : Elevation
+		return { f = (s0 + t * (s - s0)) / len, z = z0 + t * (z - z0), seq = seq }
 	end
 	local function fits(t : number) : boolean
-		local p = profileWith(e, at(t), len)
+		local els : {Elevation} = {}
+		for k, v in ipairs(e.elevations) do els[k] = v end
+		els[i] = moved(t)
+		sortEls(els)
+		local p = profileWith(e, els, len)
 		return p ~= nil and steepestOf(p, ss) <= allowed
 	end
-	-- the furthest fitting share of the way (bisection: the steepest grade grows with the move)
+	-- the furthest fitting share of the way (bisection: the steepest grade grows with the move;
+	-- a share that does not fit is never taken)
 	local t = 1.0
 	if not fits(1.0) then
 		local good, bad = 0.0, 1.0
@@ -482,9 +659,21 @@ function M.moveElevation(e : Edit, i : integer, s : number, z : number, limit : 
 		end
 		t = good
 	end
-	local moved = at(t)[i]
-	if moved.f == el.f and moved.z == el.z then return t > 0 end
-	e.elevations[i] = moved
+	if t == 0 then return false, i end
+	local m = moved(t)
+	if m.f == el.f and m.z == el.z then return true, i end
+	e.placed = math.max(e.placed, seq)
+	e.elevations[i] = m
+	return true, place(e, m)
+end
+
+-- Set elevation point i's height to z, as asked: no limit (a profile past it refuses the build
+-- instead). It stays where it is along the path, so it is not placed anew. false: no such point.
+function M.setHeight(e : Edit, i : integer, z : number) : boolean
+	local el = e.elevations[i]
+	if el == nil then return false end
+	if el.z == z then return true end
+	el.z = z
 	e.rev = e.rev + 1
 	return true
 end

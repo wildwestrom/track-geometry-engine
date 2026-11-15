@@ -26,6 +26,7 @@ local record Badge
 	speed : number -- the game's slowest curve limit over the curve (m/s); nil while unknown
 	grade : number -- rise over run at the badge
 	slowest : boolean -- the path's slowest curve
+	steep : boolean -- spans: too steep (past the grade limit at a node over it)
 end
 
 local record Readout
@@ -35,7 +36,7 @@ local record Readout
 	curves : function(path : {geometry.Segment}) : {Curve}
 	badges : function(nodes : {alignment.Sample}, z : {number}, speeds : {number}, curves : {Curve}) : {Badge}
 	alongBadges : function(nodes : {alignment.Sample}, z : {number}, speeds : {number}, every : number) : {Badge}
-	profileBadges : function(nodes : {alignment.Sample}, p : profiles.Profile, every : number) : {Badge}
+	profileBadges : function(nodes : {alignment.Sample}, p : profiles.Profile, every : number, limit ?: number) : {Badge}
 	summary : function(nodes : {alignment.Sample}, z : {number}, speeds : {number}, trackSpeed : number, minRadius : number) : {string}
 end
 
@@ -151,18 +152,28 @@ end
 
 -- The vertical profile's badges: one at every point of the profile (the ends included) with its
 -- height and grade, one halfway along each span with the grade there, and one every `every` m
--- with the grade (none closer than half that to a point).
-function M.profileBadges(nodes : {alignment.Sample}, p : profiles.Profile, every : number) : {Badge}
+-- with the grade (none closer than half that to a point). A span whose grade at any of the
+-- nodes over it (its ends included) is past limit is marked too steep (none without a limit).
+function M.profileBadges(nodes : {alignment.Sample}, p : profiles.Profile, every : number, limit ?: number) : {Badge}
 	local out : {Badge} = {}
 	if #nodes < 2 then return out end
-	local function at(kind : string, s : number)
+	local function at(kind : string, s : number) : Badge
 		local x, y = alignment.pointAt(nodes, s)
-		out[#out + 1] = { kind = kind, x = x, y = y, z = profiles.heightAt(p, s), grade = profiles.gradeAt(p, s), slowest = false }
+		local b : Badge = { kind = kind, x = x, y = y, z = profiles.heightAt(p, s), grade = profiles.gradeAt(p, s), slowest = false, steep = false }
+		out[#out + 1] = b
+		return b
+	end
+	local function steep(s0 : number, s1 : number) : boolean
+		if limit == nil then return false end
+		for _, nd in ipairs(nodes) do
+			if nd.s >= s0 and nd.s <= s1 and math.abs(profiles.gradeAt(p, nd.s)) > limit then return true end
+		end
+		return false
 	end
 	local pts = p.points
 	for i, q in ipairs(pts) do
 		at("point", q.s)
-		if i < #pts then at("span", (q.s + pts[i + 1].s) / 2) end
+		if i < #pts then at("span", (q.s + pts[i + 1].s) / 2).steep = steep(q.s, pts[i + 1].s) end
 	end
 	local len = pts[#pts].s
 	local s = every

@@ -138,11 +138,12 @@ structure DesignParams (α : Type) where
       next to the path's ends take all the room they have instead (see `cornerLayouts`). -/
   legBudget : α
   /-- Minimum permitted arc radius (world units; 1 unit = 1 m). No corner is rounded —
-      or resized — tighter than this: the tangent budget is floored at `minRadius ·
-      tan(Δ/2)`, the pullback that yields exactly this radius. A corner too sharp or
-      whose legs are too short to reach it is rounded as gently as the legs allow
-      (budget capped at half the shorter leg). Roughly an AREMA-style absolute floor for
-      sharp standard-gauge (yard / industrial) track. `≤ 0` disables the floor. -/
+      or resized — tighter than this: the tangent budget is floored at
+      `radiusFloorBudget`, the pullback (transitions included) that yields this radius
+      (the solver's radius fit lands on it from above, within a few cm). A corner whose
+      legs are too short to reach it is rounded as gently as the legs allow (budget capped
+      at the room it has). 40 m is the tightest the game builds
+      (found experimentally). `≤ 0` disables the floor. -/
   minRadius : α
   /-- Corners whose `|sin Δ|` is below this are treated as straight (no arc). -/
   straightThreshold : α
@@ -160,6 +161,50 @@ structure DesignParams (α : Type) where
       √(a_max·R))`, so large-radius curves that *could* exceed it don't get oversized
       transitions, and straights run at this speed. `≤ 0` leaves the speed uncapped. -/
   maxDesignSpeed : α
+
+/-- Operating speed on an arc of radius `R`: `√(a_max·R)`, capped at the design speed (so
+    over-fast curves don't get oversized transitions). -/
+def DesignParams.speedAt [TrackScalar α] (dp : DesignParams α) (R : α) : α :=
+  let v := TrackScalar.sqrt (dp.maxLateralAccel * R)
+  if dp.maxDesignSpeed > 0 then min dp.maxDesignSpeed v else v
+
+/-- Transition length demanded on an arc of radius `R`: the larger of the jerk- and
+    yaw-acceleration-limited lengths at `speedAt R`. -/
+def DesignParams.transitionLength [TrackScalar α] (dp : DesignParams α) (R : α) : α :=
+  let V := dp.speedAt R
+  let lsJerk := if dp.maxLateralJerk > 0 then (V * V * V) / (R * dp.maxLateralJerk) else 0
+  let lsYaw  := if dp.maxYawAccel   > 0 then (V * V)     / (R * dp.maxYawAccel)  else 0
+  max lsJerk lsYaw
+
+/-- Spiral angle `θs = Ls/(2R)` of a corner of turn `Δ` on an arc of radius `R`, clamped to
+    `Δ/2` so an arc (of central angle `≥ 0`) remains. -/
+def DesignParams.spiralAngle [TrackScalar α] (dp : DesignParams α) (R Δ : α) : α :=
+  let two : α := natToScalar 2
+  min (dp.transitionLength R / (two * R)) (Δ / two)
+
+/-- Shift `(P, K)` of a unit clothoid of spiral angle `θ > 0`: the corner's tangent budget
+    is `R·((1+P)·tan(Δ/2) + K)` for an arc of radius `R`. -/
+def clothoidShift [TrackScalar α] (θ : α) : α × α :=
+  let Ls1 := natToScalar 2 * θ
+  let (X1, Y1) := clothoidOffset 0 (1 / Ls1) Ls1 clothoidPanels
+  (Y1 - (1 - TrackScalar.cos θ), X1 - TrackScalar.sin θ)
+
+/-- The tangent budget whose corner (of turn `delta`, `tanHalf = tan(Δ/2)`) has an arc of
+    radius `minRadius` (the fixed point of the solver's radius fit): `R·tan(Δ/2)` for a pure fillet, `R·((1+P)·tan(Δ/2) + K)` with the
+    transitions the speed model gives that arc. `0` when the floor is disabled.
+
+    Rejected: `minRadius·tan(Δ/2)` for every corner. It is the pure fillet's pullback only;
+    with transitions the same budget fits a tighter arc (a 100 m floor gave R ≈ 81 m), so
+    the floor let curves below the radius the game will build. -/
+def DesignParams.radiusFloorBudget [TrackScalar α] (dp : DesignParams α) (tanHalf delta : α) : α :=
+  let R := dp.minRadius
+  if R ≤ 0 then 0
+  else
+    let θ := if dp.maxLateralAccel ≤ 0 then 0 else dp.spiralAngle R delta
+    if θ ≤ 0 then R * absScalar tanHalf
+    else
+      let (P, K) := clothoidShift θ
+      R * absScalar ((1 + P) * tanHalf + K)
 
 /-- Directional and angular facts for one interior PI, independent of any chosen
     tangent budget. `none` means the corner is degenerate or near-straight. -/
@@ -191,7 +236,8 @@ structure CornerGeometry (α : Type) where
       adjacent leg. From `cornerLayouts`, the room its neighbours leave: on each leg, the
       leg less the budget of the curve at its far end (if any). -/
   maxBudget : α
-  /-- Minimum tangent budget implied by `DesignParams.minRadius`, capped to `maxBudget`. -/
+  /-- Minimum tangent budget, `DesignParams.radiusFloorBudget` (an arc of radius
+      `minRadius`), capped to `maxBudget`. -/
   minBudget : α
 
 /-- Compute shared corner geometry for an interior PI. This is the common source for
@@ -234,8 +280,7 @@ def cornerGeometry [TrackScalar α] (a b c : Vec3 α) (dp : DesignParams α)
       -- keep it signed and let the consumers `absScalar` it where a magnitude is wanted.
       let cosT := TrackScalar.cos delta
       let tanHalf := TrackScalar.sin delta / (1 + cosT)
-      let radiusFloorBudget := dp.minRadius * absScalar tanHalf
-      let lo := min radiusFloorBudget hi
+      let lo := min (dp.radiusFloorBudget tanHalf delta) hi
       -- Unit binormal of the corner's plane, oriented so a *positive* rotation about it
       -- carries `uIn` toward `uOut` along the selected turn. The geometric normal
       -- `uIn × uOut` already does this for the principal (minor) deflection; when the
@@ -367,7 +412,7 @@ def cornerLayouts [TrackScalar α] (pts : Array (Vec3 α)) (dp : DesignParams α
     | none => none
     | some g =>
         let hi := min (room (i - 1) (i - 1)) (room (i + 1) i)
-        let lo := min (dp.minRadius * absScalar g.tanHalf) hi
+        let lo := min (dp.radiusFloorBudget g.tanHalf g.delta) hi
         let bud := budget.getD i 0
         let b := get i
         some { toCornerGeometry := { g with maxBudget := hi, minBudget := lo }, budget := bud,
@@ -417,27 +462,13 @@ def solveCornerWithGeometry [TrackScalar α] (b : Vec3 α) (budget : α)
   -- the shortest that holds that speed within the jerk and yaw-accel limits. `θs`
   -- and `R` are mutually dependent, so we fixed-point from the pure-fillet radius.
   let aMax := dp.maxLateralAccel
-  let cap := dp.maxDesignSpeed
-  -- Operating speed at fitted radius `R`: the arc's `√(a_max·R)`, capped at the
-  -- design speed (so over-fast curves don't get oversized transitions).
-  let speedAt := fun (R : α) =>
-    let v := TrackScalar.sqrt (aMax * R)
-    if cap > 0 then min cap v else v
-  -- Transition length demanded at fitted radius `R` (the max of the two criteria).
-  let lsOf := fun (R : α) =>
-    let V := speedAt R
-    let lsJerk := if dp.maxLateralJerk > 0 then (V * V * V) / (R * dp.maxLateralJerk) else 0
-    let lsYaw  := if dp.maxYawAccel   > 0 then (V * V)     / (R * dp.maxYawAccel)  else 0
-    max lsJerk lsYaw
+  let speedAt := dp.speedAt
   -- Fitted radius for spiral angle `θ > 0` (unit-clothoid shift `(P, K)` at angle θ).
   let radiusOf := fun (θ : α) =>
-    let Ls1 := two * θ
-    let (X1, Y1) := clothoidOffset 0 (1 / Ls1) Ls1 clothoidPanels
-    let P := Y1 - (1 - TrackScalar.cos θ)
-    let K := X1 - TrackScalar.sin θ
+    let (P, K) := clothoidShift θ
     budget / safeDenom ((1 + P) * tanHalf + K)
   -- One step: radius → spiral angle `θs = Ls/(2R)`, clamped so an arc remains.
-  let stepθ := fun (R : α) => min (lsOf R / (two * R)) (Δ / two)
+  let stepθ := fun (R : α) => dp.spiralAngle R Δ
   let θs :=
     if aMax ≤ 0 then 0
     else Id.run do

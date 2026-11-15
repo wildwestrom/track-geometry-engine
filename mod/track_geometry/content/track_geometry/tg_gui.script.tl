@@ -70,11 +70,14 @@ local record ToolState
 	active : boolean
 	ticked : boolean -- the tool has ticked since it opened (until then its state is the last opening's)
 	opens : integer -- how often the tool has closed: in the redraw key, so the first tick always redraws
+	matchRedraws : integer -- bumped on each pick in the mode window's match list: in its redraw key, so the list shows its placeholder again
 	frame : integer -- frames drawn so far (counted by TgProbe, every frame)
 	tickFrame : integer -- the frame of the tool's last tick
 	hovered : integer -- entity under the mouse (Selector)
 	terrX : number -- ground under the mouse (read every frame by TgProbe)
 	terrY : number
+	terrZ : number
+	eye : Vec3f -- the camera, as of that frame (the view ray runs from it through the ground point)
 	ghost : SimpleProposal
 	ghostKey : string
 	ghostInfo : string -- the ghost's path: length and layout
@@ -121,7 +124,7 @@ local sess = sessions.new(say, toolLive)
 
 -- Drop the ghost and what was read out (the session starts over by itself).
 local function resetTool()
-	tool = { active = tool.active, terrX = tool.terrX, terrY = tool.terrY, buildMsg = tool.buildMsg,
+	tool = { active = tool.active, terrX = tool.terrX, terrY = tool.terrY, terrZ = tool.terrZ, eye = tool.eye, buildMsg = tool.buildMsg,
 		gameCtx = tool.gameCtx, getParams = tool.getParams, template = tool.template, modeOpen = tool.modeOpen,
 		grabNow = tool.grabNow, camDist = tool.camDist, frame = tool.frame, tickFrame = tool.tickFrame, ticked = tool.ticked,
 		opens = tool.opens }
@@ -139,6 +142,11 @@ end
 -- What the tool knows about that template (tg_world caches it).
 local function trackType() : world.TrackType
 	return world.trackType(trackTemplate())
+end
+
+-- The steepest grade the track type may be laid at.
+local function gradeLimit() : number
+	return trackType().maxGrade
 end
 
 local function readTemplate()
@@ -296,16 +304,112 @@ end
 
 local MODES : {sessions.Mode} = { "horizontal", "vertical" }
 
-local record ModeParam
-	selected : integer
+local run : function(reqs : {sessions.Request}) -- (below, with the session's adapter)
+
+local record ModeParam -- (none: the window reads the session)
+end
+
+-- What the mode window shows changes with this: the mode, the selected point, the edit and the
+-- grade limit. (The window gets its params once, so it re-reads the session on a timer.)
+local function modeKey() : string
+	local e = sess.edit
+	return table.concat({ sess.mode as string or "-", tostring(sess.selected), e ~= nil and tostring(e.rev) or "-",
+		string.format("%.4f", gradeLimit()), tostring(tool.matchRedraws or 0) }, "|")
+end
+
+local HEIGHT_STEP = 0.1 -- the height box's arrows step this (m)
+
+local function line(text : string) : TreeNodeId
+	return builtin.TextView{ text = text }
+end
+
+-- The match list: "Match the height of…" (value 0, always shown: the box has no placeholder of
+-- its own), then the start, the other points and the end (sessions.matchSources). A pick sets the
+-- selected point to that height, once, and the window is drawn again with the placeholder.
+local function matchList(sources : {sessions.MatchSource}, forPoint : integer) : TreeNodeId
+	local items : {TreeNodeId} = { builtin.ComboBoxItem{ value = 0, content = line("Match the height of…") } }
+	for k, m in ipairs(sources) do items[#items + 1] = builtin.ComboBoxItem{ value = k, content = line(m.label) } end
+	return builtin.ComboBox{
+		value = 0,
+		items = items,
+		onValueChange = function(v : integer|number|string)
+			local k = math.floor(tonumber(v) or 0)
+			-- (the placeholder, or the box echoing it; and the list is for the point it was drawn
+			-- for, and applies the entry as it was drawn)
+			if k < 1 or sources[k] == nil or sessions.dragging(sess) or sess.selected ~= forPoint then return end
+			tool.matchRedraws = (tool.matchRedraws or 0) + 1
+			run(sessions.match(sess, sources[k]))
+		end,
+	}
+end
+
+-- The Elevation section, in vertical mode: the selected point, its height (set at once, past the
+-- grade limit too: the build is then refused), the list to match it to another height, its
+-- grade, and why the build waits. Greyed out with no point selected.
+local function elevationSection() : TreeNodeId
+	local sel = sessions.selection(sess, gradeLimit())
+	if sel == nil then
+		return builtin.WithComponentParams{
+			enabled = false,
+			item = builtin.BoxLayout{ orientation = builtin.type.Orientation.Vertical,
+				children = { line("Elevation"), line("Select an elevation point."), matchList({}, nil) } },
+		}
+	end
+	local rows : {TreeNodeId} = {
+		line(string.format("Elevation: point %d", sel.i)),
+		builtin.BoxLayout{
+			orientation = builtin.type.Orientation.Horizontal,
+			children = {
+				line("Height (m) "),
+				builtin.DoubleSpinBox{
+					step = HEIGHT_STEP, -- (no min or max: the box's own clamp is only the UI's)
+					value = sel.z,
+					onValueChange = function(v : number)
+						-- (a drag owns the height while it lasts; the box only follows it. Within half a
+						-- step of the height it was given is the box echoing it, maybe rounded to its
+						-- step: taking that would move the point by itself. And the box is for the point
+						-- it was drawn for.)
+						if sessions.dragging(sess) or v == nil or v ~= v or sess.selected ~= sel.i then return end
+						if math.abs(v - sel.z) < HEIGHT_STEP / 2 then return end
+						run(sessions.setHeight(sess, v))
+					end,
+				},
+			},
+		},
+		matchList(sessions.matchSources(sess), sel.i),
+		line(sel.grade ~= nil and string.format("Grade: %+.1f ‰", sel.grade * 1000) or "Grade: —"),
+	}
+	if sel.steep ~= nil then rows[#rows + 1] = line(sel.steep:sub(1, 1):upper() .. sel.steep:sub(2)) end
+	if sel.tooClose then
+		rows[#rows + 1] = line(string.format("Too close: not in the profile until %.0f m clear.", edits.MIN_SPAN))
+	end
+	return builtin.BoxLayout{ orientation = builtin.type.Orientation.Vertical, children = rows }
 end
 
 -- A small window to switch between editing the horizontal and the vertical alignment. Opened
 -- from a click (as the confirm window; opening a window from onStep kills the game). A window
 -- recipe must wrap builtin.Window (RegisterWrapperRecipe, as the game's own windows do): a plain
 -- recipe returning one fails a native assertion in the window container (NodeStorage.cpp:51).
--- It sits at the bottom right of the screen, above the game bar (tg_gui.css.lua).
-local TgModeWindow = react.RegisterWrapperRecipe("TgModeWindow", builtin.Window, function(p : ModeParam, _ : any) : TreeNodeId
+-- It sits at the bottom right of the screen, above the game bar (tg_gui.css.lua). In vertical
+-- mode it has the Elevation section below the switch.
+local TgModeWindow = react.RegisterWrapperRecipe("TgModeWindow", builtin.Window, function(_p : ModeParam, _ : any) : TreeNodeId
+	local key = engine_react_util.useStepStateTimer(modeKey, 0.1)
+	local _ = key:old()
+	local isVertical = sessions.vertical(sess)
+	local modes = builtin.ToggleButtonGroup{
+		layout = "Horizontal", -- (each as wide as its label; "Uniform" squeezes them to nothing here)
+		buttons = {
+			{ content = builtin.TextView{ text = "Horizontal alignment" } },
+			{ content = builtin.TextView{ text = "Vertical alignment" } },
+		},
+		-- (1-based, as the game's own toggle groups; from the session, not the params, as the
+		-- window is drawn again on its timer)
+		initialSelected = isVertical and 2 or 1,
+		onValueChange = function(index : integer)
+			say(string.format("mode window: button %d", index))
+			if MODES[index] ~= nil then sessions.setMode(sess, MODES[index]) end
+		end,
+	}
 	return builtin.Window{
 		-- (no-close-button: the plain window surface, as the game's dialogs; the default one has a
 		-- notch for the close button. Size and place: tg_gui.css.lua, by the id.)
@@ -314,19 +418,8 @@ local TgModeWindow = react.RegisterWrapperRecipe("TgModeWindow", builtin.Window,
 		title = "Track Geometry",
 		closable = false,
 		movable = true,
-		content = builtin.ToggleButtonGroup{
-			layout = "Horizontal", -- (each as wide as its label; "Uniform" squeezes them to nothing here)
-			buttons = {
-				{ content = builtin.TextView{ text = "Horizontal alignment" } },
-				{ content = builtin.TextView{ text = "Vertical alignment" } },
-			},
-			initialSelected = p.selected, -- (the group keeps its own state: the window is not re-made on a click)
-			-- (1-based, as the game's own toggle groups)
-			onValueChange = function(index : integer)
-				say(string.format("mode window: button %d", index))
-				if MODES[index] ~= nil then sessions.setMode(sess, MODES[index]) end
-			end,
-		},
+		content = isVertical and builtin.BoxLayout{ orientation = builtin.type.Orientation.Vertical,
+			children = { modes, elevationSection() } } or modes,
 	}
 end)
 
@@ -341,7 +434,7 @@ local function openModeWindow()
 	if tool.modeOpen then return end
 	local wa = windowApi()
 	local ok, err = pcall(function() : string
-		wa.addSingletonWindow(TgModeWindow, { selected = sess.mode == "vertical" and 2 or 1 } as ModeParam)
+		wa.addSingletonWindow(TgModeWindow, {} as ModeParam)
 		return nil
 	end)
 	if ok and wa ~= nil then
@@ -457,16 +550,13 @@ local function vertical() : boolean
 	return sessions.vertical(sess)
 end
 
-local function gradeLimit() : number
-	return trackType().maxGrade
-end
-
--- The profile's badges (grade at each point and halfway between), for the badge layer.
+-- The profile's badges (grade at each point and halfway between, the spans too steep marked), for
+-- the badge layer.
 local function updateVBadges()
 	local e = sess.edit
 	if e == nil then tool.vbadges = nil; return end
 	local prof = edits.profile(e)
-	tool.vbadges = prof ~= nil and readout.profileBadges(edits.nodes(e), prof, plans.BADGE_EVERY) or nil
+	tool.vbadges = prof ~= nil and readout.profileBadges(edits.nodes(e), prof, plans.BADGE_EVERY, gradeLimit()) or nil
 end
 
 ------------------------------------------------------------------ the session's adapter
@@ -490,12 +580,16 @@ local function worldNow(fresh : boolean) : sessions.World
 		local ok, cam = pcall(function() : number return api.gui.camera.getCameraData().z end)
 		tool.camDist = ok and cam ~= nil and cam == cam and cam as number or nil
 	end
-	return { terrX = tool.terrX, terrY = tool.terrY, hovered = tool.hovered, grab = tool.grabNow, cameraDist = tool.camDist,
+	local eye, ray = tool.eye, nil as edits.Ray
+	if eye ~= nil and tool.terrX ~= nil and tool.terrZ ~= nil then
+		ray = { ex = eye.x, ey = eye.y, ez = eye.z, gx = tool.terrX, gy = tool.terrY, gz = tool.terrZ }
+	end
+	return { terrX = tool.terrX, terrY = tool.terrY, ray = ray, hovered = tool.hovered, grab = tool.grabNow, cameraDist = tool.camDist,
 		shift = shiftHeld, gradeLimit = gradeLimit, snap = snapEnd, endFree = endFree }
 end
 
 -- Carry out what the session asks for.
-local function run(reqs : {sessions.Request})
+run = function(reqs : {sessions.Request})
 	for _, r in ipairs(reqs) do
 		if r == "openMode" then openModeWindow()
 		elseif r == "closeMode" then closeModeWindow()
@@ -533,6 +627,18 @@ local function tooltip() : Builtin.ActionTooltipParam<any>
 	local lines : {string} = {}
 	local good, bad = false, false
 	local function path()
+		local spacing = sess.edit ~= nil and edits.spacingProblem(sess.edit) or nil
+		if spacing ~= nil then
+			lines[#lines + 1] = spacing:sub(1, 1):upper() .. spacing:sub(2)
+				.. (vertical() and "; drag it clear or right-click it away." or "; in vertical mode, drag it clear or right-click it away.")
+			bad = true
+		end
+		local steep = sess.edit ~= nil and edits.gradeProblem(sess.edit, gradeLimit()) or nil
+		if steep ~= nil then
+			lines[#lines + 1] = steep:sub(1, 1):upper() .. steep:sub(2)
+				.. (vertical() and "; ease the red spans." or "; in vertical mode, ease the red spans.")
+			bad = true
+		end
 		if tool.ghostInfo ~= nil then lines[#lines + 1] = "Path: " .. tool.ghostInfo end
 		local l = tool.line
 		if l ~= nil and tool.ghostInfo ~= nil then
@@ -567,36 +673,25 @@ local function tooltip() : Builtin.ActionTooltipParam<any>
 		if d ~= nil then
 			lines[1] = d.height and "Raising or lowering the elevation point (move the mouse up or down)."
 				or "Sliding the elevation point along the track."
-		elseif h ~= nil and h.kind == "point" then
-			lines[1] = "Drag to slide this elevation point along the track; Shift-drag to raise or lower it. Right-click to remove it."
-		elseif h ~= nil and h.kind == "track" then
-			lines[1] = "Press to add an elevation point here (and drag it; Shift for its height)."
-		else
+		elseif h == nil then
 			lines[1] = "Press on the track to add an elevation point. Drag a point to slide it; Shift-drag for its height."
 		end
-		lines[#lines + 1] = string.format("Grade limit: %.0f ‰ (the editor keeps within it)", gradeLimit() * 1000)
+		lines[#lines + 1] = string.format("Grade limit: %.0f ‰ (a drag keeps within it)", gradeLimit() * 1000)
 		if sess.editMsg ~= nil then lines[#lines + 1] = sess.editMsg; bad = true end
 		path()
-		lines[#lines + 1] = "Click elsewhere to build. Esc to go back."
 	else
 		local h = sess.drag or sess.hit
 		if sess.drag ~= nil then
 			lines[1] = "Dragging the " .. sessions.handleName(h) .. "."
-		elseif h ~= nil and h.kind == "pi" then
-			if h.mobility == "fixed" then lines[1] = "This turn is next to both ends and cannot move. Add another turn first."
-			elseif h.mobility == "ray" then lines[1] = "Drag to slide this turn along its end's line. (Next to an end: it stays.)"
-			else lines[1] = "Drag to move this turn. Right-click to remove it." end
-		elseif h ~= nil and h.kind ~= "leg" then
-			lines[1] = "Drag to resize the curve (the " .. sessions.handleName(h) .. ")."
-		elseif h ~= nil then
-			lines[1] = "Press and drag to add a turn here."
-		else
+		elseif h == nil then
 			lines[1] = "Drag a turn or a curve's bracket. Press on the track to add a turn."
 		end
 		if sess.editMsg ~= nil then lines[#lines + 1] = sess.editMsg; bad = true end
 		path()
-		lines[#lines + 1] = "Click elsewhere to build. Esc to go back."
 	end
+	-- last: the controls for what is under the mouse
+	local hint = sessions.hint(sess)
+	if hint ~= nil then lines[#lines + 1] = hint end
 	local param : ConstructionReactUtil.SimpleTooltipRecipeParams = {
 		message = { message = table.concat(lines, "\n"), good = good and not bad, bad = bad },
 		cost = tool.cost,
@@ -650,6 +745,7 @@ end
 
 local BADGE_BG = { 0.16, 0.33, 0.55, 0.85 } -- as the track builder's own badges
 local BADGE_SLOW = { 230 / 255, 109 / 255, 149 / 255, 0.95 } -- the slowest curve: the Speed Limit layer's "slow"
+local BADGE_STEEP = { 0.8, 0.12, 0.12, 0.95 } -- a span too steep (past the grade limit)
 local BADGE_TEXT = { 1, 1, 1, 1 }
 local ICONS = "::/gui/construction/build_control/"
 local BADGE_W = 90 -- a badge's size on the screen, about (px): width, and height with two rows or one
@@ -689,7 +785,7 @@ local function badgeRows(b : readout.Badge) : {TreeNodeId}
 end
 
 local function badgeView(b : readout.Badge) : TreeNodeId
-	local style = styleutil.makeStyle{ backgroundColor = b.slowest and BADGE_SLOW or BADGE_BG, anchorPoint = { 1.0, 1.0 } }
+	local style = styleutil.makeStyle{ backgroundColor = b.steep and BADGE_STEEP or b.slowest and BADGE_SLOW or BADGE_BG, anchorPoint = { 1.0, 1.0 } }
 	style.padding = api.type.Vec4f.new(4, 2, 4, 2)
 	return builtin.Component{
 		meta = { styleSheet = style },
@@ -774,6 +870,8 @@ local COLORS : {string : {number}} = {
 	fixed = { 0.6, 0.6, 0.6, 1.0 },
 	bracket = { 0.3, 1.0, 0.4, 1.0 },
 	hot = { 1.0, 1.0, 1.0, 1.0 }, -- under the mouse or dragged
+	selected = { 1.0, 1.0, 0.1, 1.0 }, -- the selected elevation point (the mode window sets its height)
+	tooClose = { 1.0, 0.15, 0.15, 0.4 }, -- an elevation point too close to a neighbour or an end
 }
 
 local function paint(e : Builtin.Type.EdgeRenderable.Edge, c : {number}, width : number) : Builtin.Type.EdgeRenderable.Edge
@@ -859,7 +957,8 @@ local function editEdges() : {Builtin.Type.EdgeRenderable.Edge}
 end
 
 -- The vertical gizmos: at each end and elevation point a circle on the ground (where the mouse
--- grabs it) and a post from the ground up to the track; grey at the ends, white under the mouse.
+-- grabs it) and a post from the ground up to the track (a point's own height); grey at the ends,
+-- white under the mouse, see-through red when a point is too close (it is not in the profile).
 local function verticalEdges() : {Builtin.Type.EdgeRenderable.Edge}
 	local e, r = sess.edit, sess.grab or 10.0
 	local edges : {Builtin.Type.EdgeRenderable.Edge} = {}
@@ -868,9 +967,9 @@ local function verticalEdges() : {Builtin.Type.EdgeRenderable.Edge}
 	local prof = edits.profile(e)
 	if prof == nil then return edges end
 	local nodes = edits.nodes(e)
-	local function post(s : number, c : {number})
+	local function post(s : number, c : {number}, height ?: number)
 		local x, y = alignment.pointAt(nodes, s)
-		local g, z = zAt(x, y), profiles.heightAt(prof, s)
+		local g, z = zAt(x, y), height or profiles.heightAt(prof, s)
 		edges[#edges + 1] = circleEdge(x, y, g, r, c, w)
 		if math.abs(z - g) > 0.1 then
 			-- (a hair off vertical: a straight with no run has no direction)
@@ -881,7 +980,9 @@ local function verticalEdges() : {Builtin.Type.EdgeRenderable.Edge}
 	post(edits.length(e), COLORS.fixed)
 	local h = sess.hit
 	local hot = sess.dragEl ~= nil and sess.dragEl.i or (h ~= nil and h.kind == "point" and h.i or nil)
-	for i, pt in ipairs(edits.points(e)) do post(pt.s, i == hot and COLORS.hot or COLORS.ray) end
+	for i, pt in ipairs(edits.points(e)) do
+		post(pt.s, pt.tooClose and COLORS.tooClose or i == hot and COLORS.hot or i == sess.selected and COLORS.selected or COLORS.ray, pt.z)
+	end
 	return edges
 end
 
@@ -904,7 +1005,7 @@ local function toolAction(abort : function()) : TreeNodeId
 			end,
 			onSelect = function(entity : Engine.Entity, _i : {integer}, _d : Gui.SelectionDetails) : boolean
 				tool.hovered = entity
-				run(sessions.click(sess))
+				run(sessions.click(sess, worldNow(false)))
 				return true
 			end,
 			onSelectSecondary = function(_e : Engine.Entity, _i : {integer}, _d : Gui.SelectionDetails) : boolean
@@ -1091,7 +1192,9 @@ local TgProbe = react.RegisterRecipe("TgProbe", function() : TreeNodeId
 			if not api.gui.mouse.hasTerrainPosition() then return nil end
 			return api.gui.mouse.getTerrainPosition()
 		end)
-		if ok and pos ~= nil then tool.terrX, tool.terrY = pos.x, pos.y else tool.terrX, tool.terrY = nil, nil end
+		if ok and pos ~= nil then tool.terrX, tool.terrY, tool.terrZ = pos.x, pos.y, pos.z else tool.terrX, tool.terrY, tool.terrZ = nil, nil, nil end
+		local eok, eye = pcall(function() : Vec3f return api.gui.camera.getEye() end)
+		tool.eye = eok and eye or nil
 		local bok, err = pcall(placeBadges as function() : string)
 		if not bok and tool.badgeErr ~= tostring(err) then
 			tool.badgeErr = tostring(err)

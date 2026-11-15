@@ -82,7 +82,7 @@ check(lines[2] == "Grade: -80.0 ‰ to +120.0 ‰, steepest +120.0 ‰ at 150 m"
 -- the profile's badges: at each point (ends too) and halfway along each span
 local P = require("westrom_track_geometry::/track_geometry/tg_profile.script.tl")
 local A = require("westrom_track_geometry::/track_geometry/tg_alignment.script.tl")
-local prof = assert(P.solve({ { s = 0, z = 0 }, { s = 100, z = 3 }, { s = 300, z = 3 } }, 0.02, 0))
+local prof = assert(P.solve({ { s = 0, z = 0 }, { s = 100, z = 3 }, { s = 300, z = 7 } }, 0.02, 0))
 local pb = R.profileBadges(nodes, prof, 1000)
 check(#pb == 5 and pb[1].kind == "point" and pb[2].kind == "span" and pb[3].kind == "point",
 	"profile badges: a point, a span, a point, ...")
@@ -94,6 +94,20 @@ for _, b in ipairs(pg) do kinds[b.kind] = (kinds[b.kind] or 0) + 1 end
 -- grade badges at 40..280 m, but none within 20 m of a point (0, 100, 300) or a span middle (50, 200)
 check(kinds.point == 3 and kinds.span == 2 and kinds.grade == 5 and pg[6].kind == "grade" and near(pg[6].x, 80),
 	"profile badges: every 40 m in the clear")
+-- a span too steep: its steepest grade at the nodes over it (ends included) past the limit. This
+-- profile peaks at +33.9 ‰ (50 m) on the first span; the second starts at +24.5 ‰ (100 m) and
+-- peaks at +27.1 ‰ (140 m).
+local function steepSpans(limit)
+	local out = {}
+	for _, b in ipairs(R.profileBadges(nodes, prof, 1000, limit)) do
+		if b.kind == "span" then out[#out + 1] = tostring(b.steep)
+		elseif b.steep then out[#out + 1] = "not a span" end
+	end
+	return table.concat(out, ",")
+end
+check(steepSpans(0.03) == "true,false", "profile badges: the span past the limit is too steep: " .. steepSpans(0.03))
+check(steepSpans(0.02) == "true,true", "profile badges: a span past it at its first node is too steep: " .. steepSpans(0.02))
+check(steepSpans(0.04) == "false,false" and steepSpans(nil) == "false,false", "profile badges: none within the limit, or with none")
 local sp = {}
 for i = 1, 30 do sp[i] = 1000 end
 sp[12] = 25 -- one slow piece, 110..120 m
