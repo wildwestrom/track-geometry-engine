@@ -8,6 +8,7 @@ local P = require("westrom_track_geometry::/track_geometry/tg_plan.script.tl")
 local E = require("westrom_track_geometry::/track_geometry/tg_edit.script.tl")
 local S = require("westrom_track_geometry::/track_geometry/tg_structures.script.tl")
 local A = require("westrom_track_geometry::/track_geometry/tg_alignment.script.tl")
+local N = require("westrom_track_geometry::/track_geometry/tg_ends.script.tl")
 
 local failures = 0
 local function check(ok, what)
@@ -159,6 +160,116 @@ check(type(lines) == "table" and #lines > 0, "readout: summary: " .. table.conca
 -- speeds missing (the game gave none): still a readout
 local r0 = P.readout(plan, {})
 check(r0 ~= nil and r0.badges ~= nil, "readout: without speeds, still badges")
+
+------------------------------------------------------------------ switches
+-- The game refuses a new piece that overlaps the existing track without sharing a node with it, so
+-- the pieces out of (and into) a switch are merged until the first node clear of the track there.
+local function straightPiece(x0, x1, y)
+	return { edge = 7, node0 = 1, node1 = 2, p0 = { x = x0, y = y, z = 0 }, t0 = { x = x1 - x0, y = 0, z = 0 },
+		p1 = { x = x1, y = y, z = 0 }, t1 = { x = x1 - x0, y = 0, z = 0 } }
+end
+local function clearance(nd, pcs)
+	local best = math.huge
+	for _, pc in ipairs(pcs) do
+		local p = N.pieceAt(pc, N.nearestOnPiece(pc, nd.x, nd.y))
+		best = math.min(best, math.sqrt((p.x - nd.x) ^ 2 + (p.y - nd.y) ^ 2))
+	end
+	return best
+end
+local main = straightPiece(-200, 200, 0)
+local cut = N.splitEnd(main, 0.5)
+check(cut.beside ~= nil and #cut.beside == 2, "switch: a split end knows the two halves beside it")
+local far = N.groundEnd(400, -300, 0)
+local sw = N.aim(cut, far.x, far.y)
+check(sw.beside == cut.beside, "switch: aiming keeps the pieces beside the end")
+plan, why = P.path(sw, far, nil, flat, dry)
+check(plan ~= nil, "switch out: a plan (" .. tostring(why) .. ")")
+local bn = plan.built.nodes
+check(clearance(bn[2], { main }) >= N.CLEAR - 1e-6,
+	string.format("switch out: the first piece reaches clear of the track (%.2f m)", clearance(bn[2], { main })))
+check(bn[2].s < 120, string.format("switch out: and not much further (%.1f m)", bn[2].s))
+plan, why = P.path(far, N.aim(cut, far.x, far.y), nil, flat, dry)
+check(plan ~= nil, "switch in: a plan (" .. tostring(why) .. ")")
+bn = plan.built.nodes
+check(clearance(bn[#bn - 1], { main }) >= N.CLEAR - 1e-6,
+	string.format("switch in: the last piece starts clear of the track (%.2f m)", clearance(bn[#bn - 1], { main })))
+-- (a short piece at the switch: the track runs on past it, so clear of the piece alone is not clear)
+local stub = straightPiece(-6, 6, 0)
+stub.beyond = { straightPiece(6, 200, 0), straightPiece(-200, -6, 0) }
+local short = N.aim(N.splitEnd(stub, 0.5), far.x, far.y)
+plan, why = P.path(short, far, nil, flat, dry)
+check(plan ~= nil and math.abs(plan.built.nodes[2].y) >= N.CLEAR - 1e-6,
+	string.format("switch out of a short piece: clear of the track running on past it (%.2f m off its line)",
+		plan ~= nil and math.abs(plan.built.nodes[2].y) or -1))
+-- (a short path into a switch: every node but the switch's own is clear of its track)
+local nearby = N.groundEnd(45, -6, 0)
+plan, why = P.path(nearby, N.aim(cut, nearby.x, nearby.y), nil, flat, dry)
+check(plan ~= nil, "short switch in: a plan (" .. tostring(why) .. ")")
+if plan ~= nil then
+	local unclear = 0
+	for i = 1, #plan.built.nodes - 1 do
+		if clearance(plan.built.nodes[i], { main }) < N.CLEAR - 1e-6 and i > 1 then unclear = unclear + 1 end
+	end
+	check(unclear == 0, "short switch in: no node between the ends within CLEAR of the track (" .. unclear .. ")")
+end
+-- (a crossover between parallel tracks a little over CLEAR apart: a node near the far end is
+-- clear of the near track but on the far one, so it may not stand)
+local function through(node, x, y, pcs)
+	return N.nodeEnd(node, x, y, 0, { { dx = 1, dy = 0, grade = 0 }, { dx = -1, dy = 0, grade = 0 } }, pcs)
+end
+local lineA, lineB = straightPiece(-300, 600, 0), straightPiece(-300, 600, 5.2)
+local xa, xb = through(11, 0, 0, { lineA }), through(12, 232, 5.2, { lineB })
+plan, why = P.path(N.aim(xa, xb.x, xb.y), N.aim(xb, xa.x, xa.y), nil, flat, dry)
+check(plan ~= nil, "crossover: a plan (" .. tostring(why) .. ")")
+if plan ~= nil then
+	local onTrack = 0
+	for i = 2, #plan.built.nodes - 1 do
+		local nd = plan.built.nodes[i]
+		if clearance(nd, { lineA, lineB }) < N.CLEAR - 1e-6 then onTrack = onTrack + 1 end
+	end
+	check(onTrack == 0, "crossover: no node between the ends within CLEAR of either track (" .. onTrack .. " of "
+		.. #plan.built.nodes - 2 .. ")")
+end
+-- (a shallow switch runs beside the joints of the track it leaves: the pieces through them merge)
+local function pieceOf(edge, n0, x0, n1, x1)
+	local pc = straightPiece(x0, x1, 0)
+	pc.edge, pc.node0, pc.node1 = edge, n0, n1
+	return pc
+end
+local cutPiece = pieceOf(20, 1, 0, 2, 80)
+-- (22 is laid the other way round)
+cutPiece.beyond = { pieceOf(21, 2, 80, 3, 180), pieceOf(22, 4, 400, 3, 180), pieceOf(19, 0, -100, 1, 0) }
+local shallow = N.splitEnd(cutPiece, 0.25) -- at x = 20
+-- the branch: one piece to (320, 5), parallel at both ends
+local branch = { edge = -1, p0 = { x = 20, y = 0, z = 0 }, t0 = { x = 300, y = 0, z = 0 },
+	p1 = { x = 320, y = 5, z = 0 }, t1 = { x = 300, y = 0, z = 0 } }
+local function always() return true end
+local runs = N.runs(shallow, branch, always)
+check(#runs == 1, "runs: only the side the branch runs along (" .. #runs .. ")")
+if #runs == 1 then
+	local r = runs[1]
+	-- joint 2 at 60 m along is 0.5 m off the branch, joint 3 at 160 m is 2.7 m off: past NEAR
+	check(r.first == shallow.beside[2] and #r.edges == 1 and r.edges[1] == 21 and r.nodes[1] == 2 and r.node == 3,
+		"runs: the half ahead takes the next piece, up to the first joint clear of the branch")
+	check(near(r.p.x, 180) and near(r.t0.x, 160) and near(r.t1.x, 160) and near(r.t0.y, 0),
+		"runs: the merged piece runs from the cut to that joint")
+end
+check(#N.runs(shallow, branch, function() return false end) == 0, "runs: none through a joint that may not go")
+local steep = { edge = -1, p0 = { x = 20, y = 0, z = 0 }, t0 = { x = 60, y = 0, z = 0 },
+	p1 = { x = 70, y = 30, z = 0 }, t1 = { x = 0, y = 60, z = 0 } }
+check(#N.runs(shallow, steep, always) == 0, "runs: none when the branch is clear at the joint")
+-- (a node end, with the piece ahead laid toward the node)
+local atNode = N.nodeEnd(3, 160, 0, 0, { { dx = 1, dy = 0, grade = 0 }, { dx = -1, dy = 0, grade = 0 } },
+	{ pieceOf(21, 2, 80, 3, 160), pieceOf(22, 4, 200, 3, 160), pieceOf(23, 4, 200, 5, 600) })
+local out = { edge = -1, p0 = { x = 160, y = 0, z = 0 }, t0 = { x = 300, y = 0, z = 0 },
+	p1 = { x = 460, y = 5, z = 0 }, t1 = { x = 300, y = 0, z = 0 } }
+runs = N.runs(atNode, out, always)
+check(#runs == 1 and runs[1].first.edge == 22 and runs[1].edges[1] == 23 and runs[1].node == 5
+	and near(runs[1].p.x, 600) and near(runs[1].t1.x, 440),
+	"runs: from a node end, through a piece laid the other way")
+local plain = P.path(N.trackEnd(1, 0, 0, 0, 1, 0, 0), far, nil, flat, dry)
+check(plain ~= nil and plain.built.nodes[2].s < bn[#bn].s - bn[#bn - 1].s,
+	"switch: a free end's pieces are not merged")
 
 ------------------------------------------------------------------ no path
 plan, why = P.path(endAt(0, 0, 1, 0, 0, 0), endAt(1, 0, -1, 0, 0, 0), nil, flat, dry)

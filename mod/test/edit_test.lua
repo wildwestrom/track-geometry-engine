@@ -288,7 +288,25 @@ noOverlap(dg, "drag end, close to the turn")
 keepsHeadings(dg, "drag end, close to the turn")
 check(not E.moveEnd(dg, 3, gnd(rayX + 2, 1)) and dg.b.x == rayX + 30, "drag end: not onto its neighbouring turn")
 check(not E.moveEnd(dg, 1, gnd(-50, -50)) and dg.a.x == 0, "drag end: a track end stays")
-check(not E.moveEnd(dg, 3, endAt(500, 300, 90)) and dg.b.kind == "ground", "drag end: not onto track yet")
+-- dropped on track, a dragged ground end becomes that end: the path arrives along its heading
+local nextNode = 100
+local function trackAt(x, y, deg)
+	local t = endAt(x, y, deg)
+	nextNode = nextNode + 1
+	t.kind, t.node, t.z, t.grade = "track", nextNode, 0, 0
+	return t
+end
+local onto = trackAt(500, 300, -90)
+check(E.moveEnd(dg, 3, onto) and dg.b == onto and E.polyline(dg)[#E.polyline(dg)].x == 500, "drop on track: the end is that track end")
+joinsSmoothly(dg, "drop on track")
+check(#endHandles(dg) == 1 and E.moveEnd(dg, #E.polyline(dg), gnd(450, 380, 7)) and dg.b.kind == "ground"
+	and #E.polyline(dg) == 3 and E.polyline(dg)[2].x == rayX and E.budget(dg, 2) == set,
+	"drop on track: until let go it moves on, and back on the ground the turns are as they were")
+check(E.moveEnd(dg, 3, onto) and not E.moveEnd(dg, #E.polyline(dg), trackAt(30, 0, 0)) and dg.b == onto,
+	"drop on track: not onto track too close to the other end")
+E.dropEnd(dg)
+check(#endHandles(dg) == 0 and not E.moveEnd(dg, #E.polyline(dg), gnd(450, 380)) and dg.b == onto,
+	"drop on track: let go, it is fixed like any other track end")
 local dgg = assert(E.new(gnd(0, 0), gnd(600, 0)))
 check(#endHandles(dgg) == 2 and E.moveEnd(dgg, 1, gnd(-100, 200)) and dgg.a.x == -100 and E.polyline(dgg)[1].y == 200,
 	"drag end: ground to ground, both ends move")
@@ -299,6 +317,40 @@ check(E.dragBracket(dgg, fi, true, E.polyline(dgg)[fi].x - 60, E.polyline(dgg)[f
 local fset = E.budget(dgg, fi)
 check(E.moveEnd(dgg, 3, gnd(700, 300)) and E.budget(dgg, fi) == fset, "drag end: a free turn's curve size holds")
 noOverlap(dgg, "drag end, free turn")
+-- a free turn on its leg (dgg: ground to ground, one sized turn at (250, 300)) goes onto the end's ray
+local up = trackAt(700, 300, 180) -- (a track coming from +x: the new track leaves it going -x)
+local rev1 = dgg.rev
+check(E.moveEnd(dgg, 3, up) and E.turnCount(dgg) == 1 and E.mobility(dgg, 2) == "ray" and E.budget(dgg, fi) == fset
+	and math.abs(E.polyline(dgg)[2].x - 250) < 1e-9 and math.abs(E.polyline(dgg)[2].y - 300) < 1e-9 and dgg.rev > rev1,
+	"drop on track: the turn on its leg slides on that end's ray now, with its curve size")
+keepsHeadings(dgg, "drop on track, a free turn")
+check(E.moveEnd(dgg, 3, trackAt(700, 500, 180)) and math.abs(E.polyline(dgg)[2].x - 250) < 1e-9 and math.abs(E.polyline(dgg)[2].y - 500) < 1e-9,
+	"drop on track: the turn goes to the ray where it is nearest")
+keepsHeadings(dgg, "drop on track, the turn moved onto the ray")
+check(E.moveEnd(dgg, 3, trackAt(200, 500, 180)) and math.abs(E.polyline(dgg)[2].x - (200 - 20)) < 1e-9,
+	"drop on track: a turn behind the end goes MIN_LEG out on the ray")
+E.dropEnd(dgg)
+-- no turn on its leg: one is added, as the one-turn layout
+local bare = assert(E.new(gnd(0, 0), gnd(600, 0)))
+check(E.moveEnd(bare, 2, trackAt(600, 200, 180)) and E.turnCount(bare) == 1 and E.mobility(bare, 2) == "ray"
+	and math.abs(E.polyline(bare)[2].y - 200) < 1e-9 and #endHandles(bare) == 2,
+	"drop on track: no turn on its leg: one is added on the end's ray")
+keepsHeadings(bare, "drop on track, a turn added")
+check(E.moveEnd(bare, 3, gnd(600, 100)) and E.turnCount(bare) == 0, "drop on track: back on the ground, the added turn is gone")
+-- a node with track through it: it heads along the track, toward the other end
+local through = { kind = "node", node = 5, x = 600, y = 200, z = 3,
+	dirs = { { dx = 1, dy = 0, grade = 0.01 }, { dx = -1, dy = 0, grade = -0.01 } } }
+check(E.moveEnd(bare, 2, through) and bare.b.kind == "node" and bare.b.dx == -1 and bare.b.grade == -0.01 and bare.b.z == 3,
+	"drop on a node: it heads as the second click would, toward the other end")
+keepsHeadings(bare, "drop on a node")
+-- a turn beyond the one on its leg stays where it is
+local two = assert(E.new(gnd(0, 0), gnd(900, 0)))
+E.insertOnLeg(two, 1, 300, 0); E.insertOnLeg(two, 2, 600, 0)
+check(E.movePi(two, 2, 300, 100) and E.movePi(two, 3, 600, -100) and E.moveEnd(two, 4, trackAt(900, 50, 180))
+	and math.abs(E.polyline(two)[3].x - 600) < 1e-9 and math.abs(E.polyline(two)[3].y - 50) < 1e-9 and E.polyline(two)[2].y == 100 and E.mobility(two, 2) == "free",
+	"drop on track: only the turn on its leg moves")
+check(not E.moveEnd(two, 4, trackAt(325, 100, 180)) and two.b.y == 50, "drop on track: not where its turn would land on the next one")
+keepsHeadings(two, "drop on track, two turns")
 local eh2 = E.hit(dg, false, E.polyline(dg)[2].x, E.polyline(dg)[2].y, 10)
 check(eh2 ~= nil and eh2.kind == "pi", "drag end: a press on the turn next to a ground end grabs the turn")
 
@@ -493,6 +545,44 @@ check(E.points(hs)[2].tooClose and E.setHeight(hs, 2, 300) and E.gradeProblem(hs
 	"a point too close set very high does not make the profile too steep")
 
 check(E.removeElevation(v, 2) and #E.points(v) == 1 and not E.removeElevation(v, 5), "remove a point")
+
+-- a ground end's height is edited like an elevation point's (it cannot slide); a track end's stays
+local ge = assert(E.new(vend(0, 0, 0, 100, 0), gnd(1000, 0, 100)))
+local last = #E.polyline(ge)
+check(not E.liftableEnd(ge, 1) and E.liftableEnd(ge, last), "ground end: its height can be set, a track end's cannot")
+local geh = E.hit(ge, true, 1002, 1, 5)
+check(geh ~= nil and geh.kind == "end" and geh.i == last and geh.s == E.length(ge) and geh.x == 1000,
+	"ground end: hit in vertical mode")
+check(E.hit(ge, true, 2, 1, 5).kind == "track", "track end: not hit in vertical mode (the track there is)")
+local geRay = E.hit(ge, true, 1000, 100, 5, { ex = 1000, ey = -300, ez = 400, gx = 1000, gy = 100, gz = 0 })
+check(E.hit(ge, true, 1000, 100, 5) == nil and geRay ~= nil and geRay.kind == "end",
+	"ground end at 100 m: hit up at its height along the view ray, 100 m off on the ground")
+E.insertElevation(ge, 995) -- too close to the end: the end still wins at the end
+local near = E.hit(ge, true, 1000, 0, 5)
+check(near ~= nil and near.kind == "end", "ground end: hit over a point too close to it")
+E.removeElevation(ge, 1)
+local revG = ge.rev
+check(E.setEndHeight(ge, last, 160) and select(2, E.ends(ge)).z == 160 and ge.b.kind == "ground" and ge.rev > revG
+	and select(2, E.endHeights(ge)) == 160, "ground end: a height set directly applies as asked")
+check(math.abs(P.heightAt(assert(E.profile(ge)), E.length(ge)) - 160) < 1e-9, "ground end: the profile ends at its height")
+local why = E.gradeProblem(ge, 0.04)
+check(why ~= nil and E.steepest(ge) > 0.04, "ground end: too-steep checks include it: " .. tostring(why))
+check(not E.setEndHeight(ge, 1, 120) and ge.a.z == 100, "track end: its height stays")
+check(E.setEndHeight(ge, last, 100) and E.gradeProblem(ge, 0.04) == nil, "ground end: set back, no longer too steep")
+check(E.moveEndHeight(ge, last, 200, 0.04) and ge.b.z > 100 and ge.b.z < 200
+	and E.steepest(ge) <= 0.04 + 1e-9 and E.steepest(ge) > 0.039,
+	string.format("ground end: a height drag stops at the limit (%.1f m, %.1f permille)", ge.b.z, E.steepest(ge) * 1000))
+check(not E.moveEndHeight(ge, 1, 200, 0.04), "track end: no height drag")
+-- the free grade at a ground end: no overshoot in the end span
+local gf = assert(E.new(gnd(0, 0, 0), gnd(1000, 0, 0)))
+E.insertElevation(gf, 100)
+E.setHeight(gf, 1, 1)
+E.insertElevation(gf, 400)
+E.setHeight(gf, 2, 20)
+local gpf = assert(E.profile(gf))
+local dips = false
+for s = 0, 100, 1 do if P.heightAt(gpf, s) < -1e-9 or P.heightAt(gpf, s) > 1 + 1e-9 then dips = true end end
+check(not dips, "ground end: no overshoot in its span")
 
 print(failures == 0 and "all passed" or (failures .. " failed"))
 os.exit(failures == 0 and 0 or 1)

@@ -1,7 +1,8 @@
 -- The track's vertical profile: a monotone cubic in chainage through the elevation points
 -- (Fritsch–Carlson, with Fritsch–Butland grades as in PCHIP). The first and last points are the
 -- path's ends and the grades there are the existing tracks' grades, so the new track joins them
--- without a kink (a ground end has none: its grade is free). Between two points the profile is the
+-- without a kink (a ground end has none: its grade is free, the one-sided PCHIP formula from its
+-- first span, so the end span does not overshoot either). Between two points the profile is the
 -- cubic Hermite with their heights and grades. An interior point is level where the profile turns
 -- there or a span next to it is level; elsewhere its grade is a weighted harmonic mean of the two
 -- spans' grades. So the profile never overshoots between interior points: two points at one height
@@ -35,11 +36,24 @@ end
 local M : ProfileMod = {}
 
 -- The grades at the points, or nil and why not. Needs two points or more with strictly
--- increasing chainage. An end grade g0 or gN nil is free (a ground end): the chord grade of its
--- span. Interior point i, between spans of length h1, h2 with chord grades d1, d2:
+-- increasing chainage. An end grade g0 or gN nil is free (a ground end): freeEnd. Interior
+-- point i, between spans of length h1, h2 with chord grades d1, d2:
 -- 0 if d1 and d2 differ in sign or either is 0, else the harmonic mean of d1 and d2 weighted
 --   w1 = 2 h2 + h1, w2 = h2 + 2 h1:  (w1 + w2) / g = w1 / d1 + w2 / d2
 -- which keeps |g| within 3 |d| on both sides, so each span between interior points is monotone.
+-- The grade at a free end, from its span (length h1, chord grade d1) and the next (h2, d2; nil with
+-- no next span): the one-sided three-point formula ((2 h1 + h2) d1 - h1 d2) / (h1 + h2), 0 when
+-- it points away from d1, and at most 3 d1 when the profile turns back at the next point. So the
+-- end span is monotone (both its grades within 3 d1 and of d1's sign, or 0), like the interior.
+-- With one span, the chord grade.
+local function freeEnd(h1 : number, d1 : number, h2 : number, d2 : number) : number
+	if h2 == nil then return d1 end
+	local g = ((2 * h1 + h2) * d1 - h1 * d2) / (h1 + h2)
+	if g * d1 <= 0 then return 0 end
+	if d1 * d2 < 0 and math.abs(g) > 3 * math.abs(d1) then return 3 * d1 end
+	return g
+end
+
 function M.solve(points : {Point}, g0 : number, gN : number) : Profile, string
 	local n = #points
 	if n < 2 then return nil, "a profile needs two points" end
@@ -49,7 +63,7 @@ function M.solve(points : {Point}, g0 : number, gN : number) : Profile, string
 		if not (h[i] > 0) then return nil, "elevation points out of order at " .. i end
 		d[i] = (points[i + 1].z - points[i].z) / h[i]
 	end
-	local g : {number} = { g0 or d[1] }
+	local g : {number} = { g0 or freeEnd(h[1], d[1], h[2], d[2]) }
 	for i = 2, n - 1 do
 		local d1, d2 = d[i - 1], d[i]
 		if d1 * d2 <= 0 then
@@ -59,7 +73,7 @@ function M.solve(points : {Point}, g0 : number, gN : number) : Profile, string
 			g[i] = (w1 + w2) / (w1 / d1 + w2 / d2)
 		end
 	end
-	g[n] = gN or d[n - 1]
+	g[n] = gN or freeEnd(h[n - 1], d[n - 1], h[n - 2], d[n - 2])
 	return { points = points, grades = g }, nil
 end
 

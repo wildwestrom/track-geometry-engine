@@ -78,6 +78,25 @@ for s = 0, 300, 5 do level = level and near(P.heightAt(p, s), 1.9) and near(P.gr
 check(level, "a span between two equal heights stays level")
 check(within(p, climb[2], climb[3]), "a climb out of a level span does not dip first")
 
+-- a free end grade (a ground end): the one-sided three-point formula from its first span,
+--   g = ((2 h1 + h2) d1 - h1 d2) / (h1 + h2)
+-- set to 0 when it points away from the span, and kept within 3 d1 when the next span turns back
+local free = { { s = 0, z = 0 }, { s = 100, z = 2 }, { s = 300, z = 8 } } -- d1 = 0.02, d2 = 0.03
+p = assert(P.solve(free, nil, nil))
+check(near(P.gradeAt(p, 0), (400 * 0.02 - 100 * 0.03) / 300), "free start: the one-sided formula")
+check(near(P.gradeAt(p, 300), (500 * 0.03 - 200 * 0.02) / 300), "free end: the one-sided formula, from the end")
+p = assert(P.solve({ { s = 0, z = 0 }, { s = 100, z = 1 }, { s = 200, z = -4 } }, nil, 0)) -- d1 = 0.01, d2 = -0.05
+check(near(P.gradeAt(p, 0), 0.03), "free start: kept within 3 d1 when the profile turns back")
+-- d1 = 0.01, d2 = 0.95: the formula points down, away from the span; it would dip below the start
+local kink = { { s = 0, z = 0 }, { s = 100, z = 1 }, { s = 120, z = 20 } }
+p = assert(P.solve(kink, nil, 0))
+check(near(P.gradeAt(p, 0), 0), "free start: level when the formula points away from its span")
+check(within(p, kink[1], kink[2]), "free start: no overshoot in the end span")
+p = assert(P.solve({ { s = 0, z = 0 }, { s = 100, z = 0 }, { s = 300, z = 8 } }, nil, nil))
+check(near(P.gradeAt(p, 0), 0), "free start next to a level span: level")
+p = assert(P.solve({ { s = 0, z = 3 }, { s = 250, z = 8 } }, nil, nil))
+check(near(P.gradeAt(p, 0), 0.02) and near(P.gradeAt(p, 125), 0.02), "two free ends: a straight grade")
+
 -- what cannot be solved
 check(P.solve({ { s = 0, z = 0 } }, 0, 0) == nil, "one point: no profile")
 check(P.solve({ { s = 0, z = 0 }, { s = 100, z = 1 }, { s = 100, z = 2 } }, 0, 0) == nil, "two points at one chainage: no profile")

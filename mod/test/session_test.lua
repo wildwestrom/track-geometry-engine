@@ -20,8 +20,8 @@ local endA = Ends.trackEnd(1, 0, 0, 0, 1, 0, 0)
 local endB = Ends.trackEnd(2, 1500, 800, 0, 0, -1, 0)
 
 -- A tool on a made-up world: the session, the world it is shown, and every request it made. The
--- free ends are a and b while t.free says so; t.onTrack puts the mouse over a track piece with no
--- free end; the ground is at height t.groundZ.
+-- free ends are a and b while t.free says so; t.piece is the track piece under the mouse (nil:
+-- none); the ground is at height t.groundZ.
 local function newTool(a, b)
 	a, b = a or endA, b or endB
 	local t = { live = true, free = { [1] = true, [2] = true }, shift = false, asked = {}, groundZ = 0 }
@@ -34,7 +34,8 @@ local function newTool(a, b)
 			for _, e in ipairs({ a, b }) do
 				if x ~= nil and t.free[e.node] then near[#near + 1] = e end -- (over no ground: none near)
 			end
-			return Ends.snap(near, t.onTrack and { [98] = true, [99] = true } or {}, x, y, z, exclude)
+			for _, e in ipairs(t.others or {}) do near[#near + 1] = e end -- (t.others: more ends on the map)
+			return Ends.snap(near, t.piece, x, y, z, exclude)
 		end,
 		endThere = function(e) return e.node == nil or t.free[e.node] == true end,
 	}
@@ -93,12 +94,14 @@ local FAR_X, FAR_Y = 200, 3000
 
 ------------------------------------------------------------------ picking the ends
 local t = newTool()
-t.onTrack = true
+-- (a piece too short to cut where the mouse is)
+t.piece = { edge = 98, node0 = 91, node1 = 92, p0 = { x = 698, y = 700, z = 0 }, t0 = { x = 10, y = 0, z = 0 },
+	p1 = { x = 708, y = 700, z = 0 }, t1 = { x = 10, y = 0, z = 0 } }
 moveTo(t, 700, 700)
-check(t.s.phase == "from" and t.s.hover == nil and t.s.hoverMsg ~= nil, "picking: over track with no free end, nothing, and why")
+check(t.s.phase == "from" and t.s.hover == nil and t.s.hoverMsg ~= nil, "picking: over track with nothing to pick, nothing, and why")
 click(t)
 check(t.s.phase == "from" and t.s.from == nil, "picking: a click on nothing picks nothing")
-t.onTrack = nil
+t.piece = nil
 moveTo(t, nil, nil)
 check(t.s.hover == nil and t.s.hoverMsg ~= nil, "picking: over no ground, nothing, and why")
 moveTo(t, 5, 5)
@@ -187,6 +190,57 @@ check(t.s.to.kind == "ground" and t.s.to.x == 420 and t.s.to.y == 350 and t.s.to
 letGo(t)
 check(t.s.drag == nil and t.s.to.x == 420 and asked(t, "ghostNow") == 1 and asked(t, "askBuild") == 0,
 	"drag end: the drop leaves it there, and does not ask to build")
+-- dropped on track it becomes that end, heading as the second click would give it
+t.piece = { edge = 50, node0 = 61, node1 = 62, p0 = { x = -1000, y = 500, z = 4 }, t0 = { x = 2000, y = 0, z = 0 },
+	p1 = { x = 1000, y = 500, z = 4 }, t1 = { x = 2000, y = 0, z = 0 } }
+moveTo(t, 421, 351); press(t)
+moveTo(t, 400, 503)
+check(t.s.drag ~= nil and t.s.to.kind == "split" and math.abs(t.s.to.x - 400) < 1e-6 and t.s.to.y == 500 and t.s.to.dx == -1
+	and t.s.edit.b == t.s.to, "drop on track: over a piece the dragged end is a cut there, heading toward the start")
+local cur = S.cursor(t.s)
+check(cur.state == "trackEnd" and cur.y == 500 and cur.z == 4, "drop on track: the cursor shows the snap")
+t.piece = nil
+moveTo(t, 400, 520)
+check(t.s.drag ~= nil and t.s.to.kind == "ground" and t.s.to.y == 520 and S.cursor(t.s).state == "dragging",
+	"drop on track: dragged on in the same drag, it is a ground end again")
+t.others = { Ends.trackEnd(7, 430, 540, 2, 0, -1, 0.01) }
+t.free[7] = true
+moveTo(t, 400, 530)
+check(t.s.to.node == 7 and t.s.to.dy == -1, "drop on track: within SNAP of a free end, it is that end")
+letGo(t)
+moveTo(t, 431, 541)
+check(t.s.drag == nil and t.s.to.node == 7 and asked(t, "ghostNow") == 1 and (t.s.hit == nil or t.s.hit.kind ~= "end"),
+	"drop on track: let go, it is that end and a handle no more")
+press(t)
+check(t.s.drag == nil or t.s.drag.kind ~= "end", "drop on track: a press on it grabs it no more")
+letGo(t)
+t.free[7] = false
+tick(t)
+check(t.s.phase == "to" and t.s.edit == nil, "drop on track: the end it became is checked like a picked one")
+-- no turn on its leg: one is added, and the grab follows the end's new index; a node
+t = editing(Ends.groundEnd(0, 0, 0), Ends.groundEnd(600, 0, 0))
+t.others = { Ends.nodeEnd(8, 600, 200, 3, { { dx = 1, dy = 0, grade = 0 }, { dx = -1, dy = 0, grade = 0 } }) }
+t.free[8] = true
+moveTo(t, 601, 1); press(t)
+moveTo(t, 602, 203)
+check(t.s.to.kind == "node" and t.s.to.dx == -1 and E.turnCount(t.s.edit) == 1 and t.s.drag.i == 3,
+	"drop on a node: it heads toward the start, on a turn added on its ray")
+moveTo(t, 700, 300)
+check(t.s.to.kind == "ground" and t.s.to.x == 700 and E.turnCount(t.s.edit) == 0 and t.s.drag.i == 2,
+	"drop on a node: dragged on, the turn is gone again")
+moveTo(t, 602, 203); letGo(t)
+check(t.s.to.kind == "node" and E.turnCount(t.s.edit) == 1, "drop on a node: let go there, it stays")
+-- a drag that ends without the button let go (a mode switch) drops the end where it is too
+t = editing(Ends.groundEnd(0, 0, 0), Ends.groundEnd(600, 0, 0))
+t.others = { Ends.nodeEnd(8, 600, 200, 3, { { dx = 1, dy = 0, grade = 0 }, { dx = -1, dy = 0, grade = 0 } }) }
+t.free[8] = true
+moveTo(t, 601, 1); press(t)
+moveTo(t, 602, 203)
+note(t, S.setMode(t.s, "vertical")); note(t, S.setMode(t.s, "horizontal"))
+check(t.s.drag == nil and t.s.to.kind == "node" and not E.draggableEnd(t.s.edit, 3),
+	"drop on a node: a mode switch in the middle of the drag fixes it there")
+
+t = editing(endA, Ends.groundEnd(300, 200, 0))
 moveTo(t, 3, 2)
 check(t.s.hit == nil or t.s.hit.kind ~= "end", "drag end: a track end is no handle")
 press(t)
@@ -362,8 +416,8 @@ check(S.selection(t.s, LIMIT) == nil, "select: nothing selected at first")
 moveTo(t, nodes[m].x, nodes[m].y); press(t); letGo(t)
 check(t.s.selected == 1, "select: a point just added is selected")
 local sel = S.selection(t.s, LIMIT)
-check(sel ~= nil and sel.i == 1 and math.abs(sel.s - nodes[m].s) < 1 and sel.grade ~= nil and not sel.tooClose and sel.steep == nil,
-	"select: the selection reads out its index, chainage, height and grade")
+check(sel ~= nil and sel.name == "Point 1" and sel.key == "point 1" and math.abs(sel.s - nodes[m].s) < 1 and sel.grade ~= nil and not sel.tooClose and sel.steep == nil,
+	"select: the selection reads out its name, chainage, height and grade")
 -- a click on another point selects it; a click on nothing keeps the selection and asks to build
 moveTo(t, nodes[m + 20].x, nodes[m + 20].y); press(t); letGo(t)
 check(t.s.selected == 2, "select: a second point added is selected")
@@ -427,8 +481,8 @@ check(t.s.phase == "to" and t.s.selected == nil, "select: leaving the edit clear
 
 ------------------------------------------------------------------ matching another point's height
 -- ends at different heights: the start 36.4 m up, the end 1.9 m
-local hiA = { node = 1, x = 0, y = 0, dx = 1, dy = 0, z = 36.4, grade = 0 }
-local loB = { node = 2, x = 1500, y = 800, dx = 0, dy = -1, z = 1.9, grade = 0 }
+local hiA = { kind = "track", node = 1, x = 0, y = 0, dx = 1, dy = 0, z = 36.4, grade = 0 }
+local loB = { kind = "track", node = 2, x = 1500, y = 800, dx = 0, dy = -1, z = 1.9, grade = 0 }
 t = editing(hiA, loB)
 e = t.s.edit
 S.setMode(t.s, "vertical")
@@ -491,6 +545,76 @@ local shownZero = false
 for _, m in ipairs(S.matchSources(t.s)) do if m.label:find("Point 1 ", 1, true) and m.label == "Point 1 · 0.0 m" then shownZero = true end end
 check(shownZero, "match: a height just below zero shows as 0.0 m, not -0.0")
 
+------------------------------------------------------------------ a ground end's height
+t = editing(endA, Ends.groundEnd(600, 300, 0))
+e = t.s.edit
+local gx, gy = t.s.to.x, t.s.to.y -- (the ground under the second click)
+S.setMode(t.s, "vertical")
+local gi = #E.polyline(e)
+moveTo(t, gx + 2, gy + 1)
+check(t.s.hit ~= nil and t.s.hit.kind == "end" and t.s.hit.i == gi, "ground end: under the mouse in vertical mode")
+local gh = S.hint(t.s)
+check(gh ~= nil and gh:find("Shift+drag: height", 1, true) ~= nil and gh:find("cannot slide", 1, true) ~= nil,
+	"ground end: the hint says Shift-drag sets its height and it cannot slide: " .. tostring(gh))
+local cur = S.cursor(t.s)
+check(cur ~= nil and cur.x == gx and cur.y == gy and cur.state == "handle", "ground end: the cursor is on it")
+-- a press selects it and never slides it
+check(press(t) == true and t.s.selectedEnd == gi and t.s.selected == nil, "ground end: a press selects it")
+moveTo(t, 500, 250)
+check(t.s.to.x == gx and t.s.to.y == gy and t.s.to.z == 0 and #E.points(e) == 0, "ground end: a drag without Shift never slides it")
+letGo(t)
+check(asked(t, "askBuild") == 0 and t.s.selectedEnd == gi, "ground end: the click that selects it does not build")
+local sel = S.selection(t.s, LIMIT)
+check(sel ~= nil and sel.name == "End" and sel.z == 0 and sel.s == E.length(e) and sel.grade ~= nil and not sel.tooClose,
+	"ground end: the selection reads it out")
+-- the height box
+asked(t, "ghostNow")
+note(t, S.setHeight(t.s, 9))
+check(t.s.to.z == 9 and t.s.edit.b == t.s.to and asked(t, "ghostNow") == 1, "ground end: the height box sets its height")
+-- the match list: the start and the points, not itself
+moveTo(t, E.nodes(e)[20].x, E.nodes(e)[20].y); press(t); letGo(t)
+note(t, S.setHeight(t.s, 2.5))
+moveTo(t, gx, gy); press(t); letGo(t)
+local glabels = {}
+for k, m in ipairs(S.matchSources(t.s)) do glabels[k] = m.label end
+check(table.concat(glabels, " | ") == "Start · 0.0 m | Point 1 · 2.5 m", "ground end: match list without itself: " .. table.concat(glabels, " | "))
+note(t, S.match(t.s, S.matchSources(t.s)[2]))
+check(t.s.to.z == 2.5 and t.s.selectedEnd == gi, "ground end: matched to a point's height; still selected")
+-- selecting a point clears the end's selection, and back
+moveTo(t, E.points(e)[1].x, E.points(e)[1].y); press(t); letGo(t)
+check(t.s.selected == 1 and t.s.selectedEnd == nil, "ground end: selecting a point unselects the end")
+moveTo(t, gx, gy); press(t); letGo(t)
+-- Shift-drag: its height, stopping at the limit
+t.shift = true
+mouse(t, 0, "moved", 500)
+check(press(t) == true and t.s.dragEl ~= nil and t.s.dragEl.isEnd and t.s.dragEl.height, "ground end: Shift at the press grabs its height")
+check(S.cursor(t.s).state == "dragging", "ground end: the cursor shows the drag")
+mouse(t, 0, "moved", 499)
+tick(t)
+check(math.abs(t.s.to.z - 3.5) < 1e-6 and t.s.to.x == gx, string.format("ground end: a pixel up raises it 1 m (%.3f m)", t.s.to.z))
+mouse(t, 0, "moved", 0)
+tick(t)
+check(t.s.to.z < 500 and E.steepest(e) <= LIMIT + 1e-9, string.format("ground end: a Shift-drag stops at the limit (%.1f m)", t.s.to.z))
+letGo(t)
+t.shift = false
+check(t.s.dragEl == nil and asked(t, "ghostNow") >= 1 and asked(t, "askBuild") == 0, "ground end: letting go ends the drag")
+-- set past the limit: too steep, so no build
+note(t, S.setHeight(t.s, 400))
+moveTo(t, 300, -400)
+click(t)
+check(asked(t, "askBuild") == 0 and t.s.editMsg ~= nil and t.s.editMsg:find("too steep") ~= nil, "ground end: too high, the build is refused")
+note(t, S.setHeight(t.s, 0))
+-- a right-click on it removes nothing
+tick(t, S.RIGHT_TICKS + 1)
+moveTo(t, gx, gy); rightClick(t)
+check(t.s.phase == "done" and t.s.to.kind == "ground", "ground end: a right-click does not remove it")
+-- a track end is no vertical handle
+moveTo(t, 3, 2)
+check(t.s.hit == nil or t.s.hit.kind ~= "end", "ground end: a track end stays fixed")
+-- switching mode clears it
+S.setMode(t.s, "horizontal")
+check(t.s.selectedEnd == nil, "ground end: switching mode clears its selection")
+
 ------------------------------------------------------------------ ends that go away
 -- the end is removed in the middle of a drag: back to picking it, nothing of the edit left
 t = editing()
@@ -520,7 +644,7 @@ check(t.s.confirmOpen == false, "start gone: then it is closed")
 -- The hint names a gesture only where that gesture does something there.
 local function says(line, what) return line ~= nil and line:find(what, 1, true) ~= nil end
 -- A corner: one turn where the ends' rays meet, fixed until a turn is added.
-local cornerB = { node = 2, x = 500, y = 400, dx = 0, dy = -1, z = 0, grade = 0 }
+local cornerB = { kind = "track", node = 2, x = 500, y = 400, dx = 0, dy = -1, z = 0, grade = 0 }
 -- The edit for trying a turn of mobility mob: the corner for a fixed one, the corner with one turn
 -- added for ray turns, the s-curve (three turns) for a free one.
 local function withTurns(mob)
@@ -669,6 +793,56 @@ t.live = false
 moveTo(t, FAR_X, FAR_Y)
 check(click(t) == false and asked(t, "askBuild") == 0 and not S.backIsOurs(t.s) and not S.canGoBack(t.s),
 	"not live: clicks and back are not the tool's")
+
+------------------------------------------------------------------ existing-node ends (a switch)
+-- node 1 has track through it along x (climbing 1 % towards +x); node 2 along y
+local function dirs(dx, dy, grade)
+	return { { dx = dx, dy = dy, grade = grade }, { dx = -dx, dy = -dy, grade = -grade } }
+end
+local nodeA = Ends.nodeEnd(1, 0, 0, 0, dirs(1, 0, 0.01))
+local nodeB = Ends.nodeEnd(2, 1500, 800, 0, dirs(0, 1, 0))
+t = newTool(nodeA, endB)
+moveTo(t, 3, 3)
+check(t.s.hover ~= nil and t.s.hover.node == 1 and S.cursor(t.s).state == "trackEnd", "node: the mouse snaps to a node with track through it")
+click(t)
+check(t.s.phase == "to" and t.s.from.node == 1, "node: a click picks it as the start")
+moveTo(t, -600, 100)
+check(t.s.from.dx == -1 and t.s.from.grade == -0.01, "node: before the second click, it leaves toward the mouse (behind)")
+moveTo(t, 600, -100)
+check(t.s.from.dx == 1 and t.s.from.grade == 0.01, "node: re-picked live as the mouse moves (ahead)")
+click(t)
+check(t.s.phase == "done" and t.s.from.node == 1 and t.s.from.dx == 1 and t.s.edit ~= nil, "node: the second click locks its direction")
+moveTo(t, -600, 100)
+local ea = (E.ends(t.s.edit))
+check(t.s.from.dx == 1 and ea.dx == 1 and ea.node == 1, "node: locked once editing, the mouse moves it no more")
+check(not E.draggableEnd(t.s.edit, 1) and not E.liftableEnd(t.s.edit, 1), "node: a node end neither moves nor lifts")
+-- a node as the second end: aimed at the start
+t = newTool(endA, nodeB)
+moveTo(t, 3, 3); click(t)
+moveTo(t, 1497, 797)
+check(t.s.hover ~= nil and t.s.hover.node == 2 and t.s.hover.dy == -1, "node: as the end, it points toward the start")
+click(t)
+check(t.s.phase == "done" and t.s.to.node == 2 and t.s.to.dy == -1 and t.s.edit ~= nil, "node: the second click ends the track there")
+-- a point along a piece: cut there, aimed like a node
+t = newTool()
+t.piece = { edge = 50, node0 = 61, node1 = 62, p0 = { x = -1000, y = 300, z = 0 }, t0 = { x = 2000, y = 0, z = 0 },
+	p1 = { x = 1000, y = 300, z = 0 }, t1 = { x = 2000, y = 0, z = 0 } }
+moveTo(t, 100, 303)
+check(t.s.hover ~= nil and t.s.hover.kind == "split" and math.abs(t.s.hover.x - 100) < 1e-6 and S.cursor(t.s).state == "trackEnd",
+	"cut: over a piece, the point on it under the mouse")
+click(t)
+t.piece = nil
+moveTo(t, -700, 600)
+check(t.s.from.kind == "split" and t.s.from.dx == -1, "cut: before the second click, it leaves toward the mouse")
+moveTo(t, 700, 600); click(t)
+check(t.s.phase == "done" and t.s.from.kind == "split" and t.s.from.dx == 1 and t.s.edit ~= nil, "cut: the second click locks it")
+
+-- gone: the pick is undone
+t = newTool(nodeA, endB)
+moveTo(t, 3, 3); click(t); moveTo(t, 600, 0)
+t.free[1] = nil
+tick(t)
+check(t.s.phase == "from" and t.s.from == nil, "node: a picked node that is gone undoes its pick")
 
 if failures > 0 then
 	print(failures .. " FAILED")

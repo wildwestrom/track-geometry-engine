@@ -206,8 +206,40 @@ local function updateGhost()
 	if plan == nil then tool.ghostWhy = pwhy; tool.line = nil; return end
 	if plan.note ~= nil then say("ghost: no structures: " .. plan.note) end
 	local nodes, grades = plan.built.nodes, plan.grades
+	-- (a switch: the pieces at a node end are replaced, as the game's builder does)
+	-- (each once: two node ends can share a piece)
+	local replace : {integer} = {}
+	local listed : {integer : boolean} = {}
+	for _, en in ipairs({ a, b }) do
+		for _, e in ipairs(world.piecesAt(en)) do
+			if not listed[e] then listed[e] = true; replace[#replace + 1] = e end
+		end
+	end
+	-- (a shallow switch: the track it runs beside is merged through the joints there, each piece
+	-- into one run only, and never a piece or node the other end is on)
+	local runs : {ends.Run} = {}
+	local used : {integer : boolean} = {}
+	for _, e in ipairs(replace) do used[e] = true end
+	for _, en in ipairs({ a, b }) do
+		if en ~= nil and en.kind == "split" then used[en.piece.edge] = true end
+	end
+	if b ~= nil and #nodes >= 2 then
+		for i, en in ipairs({ a, b }) do
+			local other = i == 1 and b or a
+			local n0, n1 = nodes[i == 1 and 1 or #nodes - 1], nodes[i == 1 and 2 or #nodes]
+			local T = alignment.tangentLength(n0, n1)
+			local branch : ends.Piece = { edge = -1, p0 = { x = n0.x, y = n0.y, z = 0 }, p1 = { x = n1.x, y = n1.y, z = 0 },
+				t0 = { x = math.cos(n0.heading) * T, y = math.sin(n0.heading) * T, z = 0 },
+				t1 = { x = math.cos(n1.heading) * T, y = math.sin(n1.heading) * T, z = 0 } }
+			for _, r in ipairs(ends.runs(en, branch, function(joint : integer, from : integer, to : integer) : boolean
+				if used[to] or joint == other.node or not world.mergeable(joint, from, to) then return false end
+				used[to] = true
+				return true
+			end)) do runs[#runs + 1] = r end
+		end
+	end
 	local ok, p, why = pcall(proposals.make, nodes, { template = trackTemplate(), z = plan.built.z, grades = grades,
-		from = a, to = b,
+		from = a, to = b, replace = replace, runs = runs,
 		kinds = plan.kinds, bridgeType = bridgeType, tunnelType = tunnelType })
 	if not ok then tool.ghostWhy = "error: " .. tostring(p); say("ghost: " .. tool.ghostWhy); return end
 	if p == nil then tool.ghostWhy = why; return end
@@ -218,6 +250,9 @@ local function updateGhost()
 		if sess.phase == "done" and sess.drag == nil then
 			say(string.format("tool: path %s: from %s (%.1f, %.1f) leaving %.2f deg, to %s (%.1f, %.1f) arriving %.2f deg, %d pieces, grade %+.1f ‰ to %+.1f ‰",
 				plan.info, ends.name(a), a.x, a.y, math.deg(nodes[1].heading), ends.name(b), b.x, b.y, math.deg(nodes[#nodes].heading), #nodes - 1, grades[1] * 1000, grades[#grades] * 1000))
+			for _, r in ipairs(runs) do
+				say(string.format("tool: existing piece %d runs on through %d joints to node %d", r.first.edge, #r.nodes, r.node))
+			end
 			local function own(e : ends.End, sign : number) : string
 				return ends.hasHeading(e) and string.format("%.2f deg", math.deg(atan2(sign * e.dy, sign * e.dx))) or "none (ground)"
 			end
@@ -240,7 +275,7 @@ local function cannotBuild() : string
 	if tool.dataKey ~= tool.ghostKey or tool.cost == nil then return "the game is still checking it" end
 	if tool.critical then return "the game refuses it" end
 	if tool.hasErrors then return "the game reports errors on it" end
-	if not (world.joinable(sess.from) and world.joinable(sess.to)) then return "an end is gone or no longer free" end
+	if not (world.joinable(sess.from) and world.joinable(sess.to)) then return "an end is gone or its track has changed" end
 	local ok, bal = pcall(function() : integer return api.engine.util.finance.getPlayersBalance(api.engine.util.getPlayer()) end)
 	-- (the game itself lets the account go negative)
 	if ok and bal ~= nil and tool.cost > (bal as integer) then return "not enough money" end
@@ -318,11 +353,11 @@ local run : function(reqs : {sessions.Request}) -- (below, with the session's ad
 local record ModeParam -- (none: the window reads the session)
 end
 
--- What the mode window shows changes with this: the mode, the selected point, the edit and the
+-- What the mode window shows changes with this: the mode, the selection, the edit and the
 -- grade limit. (The window gets its params once, so it re-reads the session on a timer.)
 local function modeKey() : string
 	local e = sess.edit
-	return table.concat({ sess.mode as string or "-", tostring(sess.selected), e ~= nil and tostring(e.rev) or "-",
+	return table.concat({ sess.mode as string or "-", sessions.selectedKey(sess) or "-", e ~= nil and tostring(e.rev) or "-",
 		string.format("%.4f", gradeLimit()), tostring(tool.matchRedraws or 0) }, "|")
 end
 
@@ -334,8 +369,8 @@ end
 
 -- The match list: "Match the height of…" (value 0, always shown: the box has no placeholder of
 -- its own), then the start, the other points and the end (sessions.matchSources). A pick sets the
--- selected point to that height, once, and the window is drawn again with the placeholder.
-local function matchList(sources : {sessions.MatchSource}, forPoint : integer) : TreeNodeId
+-- selection to that height, once, and the window is drawn again with the placeholder.
+local function matchList(sources : {sessions.MatchSource}, forKey : string) : TreeNodeId
 	local items : {TreeNodeId} = { builtin.ComboBoxItem{ value = 0, content = line("Match the height of…") } }
 	for k, m in ipairs(sources) do items[#items + 1] = builtin.ComboBoxItem{ value = k, content = line(m.label) } end
 	return builtin.ComboBox{
@@ -343,29 +378,29 @@ local function matchList(sources : {sessions.MatchSource}, forPoint : integer) :
 		items = items,
 		onValueChange = function(v : integer|number|string)
 			local k = math.floor(tonumber(v) or 0)
-			-- (the placeholder, or the box echoing it; and the list is for the point it was drawn
+			-- (the placeholder, or the box echoing it; and the list is for the selection it was drawn
 			-- for, and applies the entry as it was drawn)
-			if k < 1 or sources[k] == nil or sessions.dragging(sess) or sess.selected ~= forPoint then return end
+			if k < 1 or sources[k] == nil or sessions.dragging(sess) or sessions.selectedKey(sess) ~= forKey then return end
 			tool.matchRedraws = (tool.matchRedraws or 0) + 1
 			run(sessions.match(sess, sources[k]))
 		end,
 	}
 end
 
--- The Elevation section, in vertical mode: the selected point, its height (set at once, past the
--- grade limit too: the build is then refused), the list to match it to another height, its
--- grade, and why the build waits. Greyed out with no point selected.
+-- The Elevation section, in vertical mode: the selected point or ground end, its height (set at
+-- once, past the grade limit too: the build is then refused), the list to match it to another
+-- height, its grade, and why the build waits. Greyed out with nothing selected.
 local function elevationSection() : TreeNodeId
 	local sel = sessions.selection(sess, gradeLimit())
 	if sel == nil then
 		return builtin.WithComponentParams{
 			enabled = false,
 			item = builtin.BoxLayout{ orientation = builtin.type.Orientation.Vertical,
-				children = { line("Elevation"), line("Select an elevation point."), matchList({}, nil) } },
+				children = { line("Elevation"), line("Select an elevation point or a ground end."), matchList({}, nil) } },
 		}
 	end
 	local rows : {TreeNodeId} = {
-		line(string.format("Elevation: point %d", sel.i)),
+		line("Elevation: " .. sel.name),
 		builtin.BoxLayout{
 			orientation = builtin.type.Orientation.Horizontal,
 			children = {
@@ -376,16 +411,16 @@ local function elevationSection() : TreeNodeId
 					onValueChange = function(v : number)
 						-- (a drag owns the height while it lasts; the box only follows it. Within half a
 						-- step of the height it was given is the box echoing it, maybe rounded to its
-						-- step: taking that would move the point by itself. And the box is for the point
+						-- step: taking that would move the point by itself. And the box is for the selection
 						-- it was drawn for.)
-						if sessions.dragging(sess) or v == nil or v ~= v or sess.selected ~= sel.i then return end
+						if sessions.dragging(sess) or v == nil or v ~= v or sessions.selectedKey(sess) ~= sel.key then return end
 						if math.abs(v - sel.z) < HEIGHT_STEP / 2 then return end
 						run(sessions.setHeight(sess, v))
 					end,
 				},
 			},
 		},
-		matchList(sessions.matchSources(sess), sel.i),
+		matchList(sessions.matchSources(sess), sel.key),
 		line(sel.grade ~= nil and string.format("Grade: %+.1f ‰", sel.grade * 1000) or "Grade: —"),
 	}
 	if sel.steep ~= nil then rows[#rows + 1] = line(sel.steep:sub(1, 1):upper() .. sel.steep:sub(2)) end
@@ -500,8 +535,8 @@ local function openConfirm()
 						closeConfirm()
 						-- (an end may have gone, or been built on, while the window was open)
 						if not (world.joinable(from) and world.joinable(to)) then
-							sessions.refuse(sess, "Cannot build: an end is gone or no longer free.")
-							say("build: not sent: an end is gone or no longer free")
+							sessions.refuse(sess, "Cannot build: an end is gone or its track has changed.")
+							say("build: not sent: an end is gone or its track has changed")
 							return
 						end
 						build(p, info, cost)
@@ -570,9 +605,10 @@ end
 
 ------------------------------------------------------------------ the session's adapter
 
-local function snapEnd(x : number, y : number, z : number, hovered : integer, exclude : integer) : ends.End, string
-	local near, onHovered = world.endsNear(x, y, hovered)
-	return ends.snap(near, onHovered, x, y, z, exclude)
+local function snapEnd(x : number, y : number, z : number, hovered : integer, exclude : ends.End) : ends.End, string
+	-- (near the start's piece, not under the mouse: the ground, not a refusal)
+	local near, piece = world.endsNear(x, y, hovered, exclude ~= nil and exclude.piece ~= nil and exclude.piece.edge or nil)
+	return ends.snap(near, piece, x, y, z, exclude)
 end
 local function shiftHeld() : boolean
 	return api.gui.inputAction.modifierOnlyActionIsActive("IA_PRECISION_MODE")
@@ -975,8 +1011,9 @@ local function editEdges() : {Builtin.Type.EdgeRenderable.Edge}
 end
 
 -- The vertical gizmos: at each end and elevation point a circle on the ground (where the mouse
--- grabs it) and a post from the ground up to the track (a point's own height); grey at the ends,
--- white under the mouse, see-through red when a point is too close (it is not in the profile).
+-- grabs it) and a post from the ground up to the track (a point's own height); grey at a track
+-- end, amber at a ground end (its height can be set), white under the mouse, see-through red when
+-- a point is too close (it is not in the profile).
 local function verticalEdges() : {Builtin.Type.EdgeRenderable.Edge}
 	local e, r = sess.edit, sess.grab or 10.0
 	local edges : {Builtin.Type.EdgeRenderable.Edge} = {}
@@ -994,10 +1031,17 @@ local function verticalEdges() : {Builtin.Type.EdgeRenderable.Edge}
 			edges[#edges + 1] = straightEdge(x, y, g, x + 0.01, y, z, c, w)
 		end
 	end
-	post(0, COLORS.fixed)
-	post(edits.length(e), COLORS.fixed)
-	local h = sess.hit
-	local hot = sess.dragEl ~= nil and sess.dragEl.i or (h ~= nil and h.kind == "point" and h.i or nil)
+	local h, d = sess.hit, sess.dragEl
+	local last = #edits.polyline(e)
+	for _, i in ipairs({ 1, last }) do
+		local c = COLORS.fixed
+		if edits.liftableEnd(e, i) then
+			local isHot = (d ~= nil and d.isEnd and d.i == i) or (d == nil and h ~= nil and h.kind == "end" and h.i == i)
+			c = isHot and COLORS.hot or sess.selectedEnd == i and COLORS.selected or COLORS.groundEnd
+		end
+		post(i == 1 and 0.0 or edits.length(e), c)
+	end
+	local hot = d ~= nil and not d.isEnd and d.i or (h ~= nil and h.kind == "point" and h.i or nil)
 	for i, pt in ipairs(edits.points(e)) do
 		post(pt.s, pt.tooClose and COLORS.tooClose or i == hot and COLORS.hot or i == sess.selected and COLORS.selected or COLORS.ray, pt.z)
 	end

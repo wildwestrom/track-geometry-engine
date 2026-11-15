@@ -1,9 +1,10 @@
 -- What the tool reads from the game world: track type facts, the ground and water at a point, and
--- the track ends (is a node still there, the free end at a node, the free ends near a point). It
+-- the track ends (is a node still there, the end at a node, the ends near a point). It
 -- also holds what is known about how asking the game can crash it:
 --   - asking the street system about an entity that is not a node crashes the game (no pcall
 --     helps), so every node is checked first;
---   - a proposal that names a node that is gone kills the game, so callers check joinable().
+--   - a proposal that names a node that is gone kills the game, so callers check joinable()
+--     before every ghost and build.
 -- Every read is guarded; a failed read gives nil (or the defaults, for a track type) and never
 -- raises. A track type's facts are cached per template and year; a failed lookup is not cached
 -- (asked again next time) and is logged once per template.
@@ -38,9 +39,13 @@ local record WorldMod
 	-- track ends
 	nodeAlive : function(n : integer) : boolean
 	freeEnd : function(n : integer) : ends.End
+	nodeEnd : function(n : integer) : ends.End
 	joinable : function(e : ends.End) : boolean
 	isTrackEdge : function(e : integer) : boolean
-	endsNear : function(x : number, y : number, hovered : integer) : {ends.End}, {integer : boolean}
+	piecesAt : function(e : ends.End) : {integer}
+	mergeable : function(joint : integer, from : integer, to : integer) : boolean
+	endsNear : function(x : number, y : number, hovered : integer, skip ?: integer) : {ends.End}, ends.Piece
+	piece : function(e : integer) : ends.Piece
 end
 
 local M : WorldMod = {}
@@ -180,6 +185,18 @@ local function segmentsAt(n : integer, tracks : boolean) : {integer}
 	return {}
 end
 
+local runningOn : function(pieces : {ends.Piece}) : {ends.Piece}
+
+-- The unit direction along piece be at its node n, away from n, and the piece's grade that way;
+-- nil when its tangent there has no horizontal length.
+local function awayFrom(be : Engine.Component.BaseEdge, n : integer) : ends.Dir
+	local t = be.node0 == n and be.tangent0 or be.tangent1
+	local sign = be.node0 == n and 1 or -1
+	local len = math.sqrt(t.x * t.x + t.y * t.y)
+	if len < 1e-6 then return nil end
+	return { dx = sign * t.x / len, dy = sign * t.y / len, grade = sign * t.z / len }
+end
+
 -- The free track end at node n (a node with a single track piece and no street), or nil.
 function M.freeEnd(n : integer) : ends.End
 	if n == nil or n < 0 or not M.nodeAlive(n) then return nil end
@@ -189,24 +206,151 @@ function M.freeEnd(n : integer) : ends.End
 		local be = api.engine.getComponent(segs[1], api.type.ComponentType.BASE_EDGE) as Engine.Component.BaseEdge
 		local node = api.engine.getComponent(n, api.type.ComponentType.BASE_NODE) as Engine.Component.BaseNode
 		if be == nil or node == nil or be.roadType ~= api.type["enum"].RoadType.TRACK then return nil end
-		local tx, ty, tz : number, number, number
-		if be.node0 == n then
-			tx, ty, tz = -be.tangent0.x, -be.tangent0.y, -be.tangent0.z
-		else
-			tx, ty, tz = be.tangent1.x, be.tangent1.y, be.tangent1.z
-		end
-		local len = math.sqrt(tx * tx + ty * ty)
-		if len < 1e-6 then return nil end
-		return ends.trackEnd(n, node.position.x, node.position.y, node.position.z, tx / len, ty / len, tz / len)
+		local d = awayFrom(be, n)
+		if d == nil then return nil end
+		-- (out of the track: against the piece)
+		return ends.trackEnd(n, node.position.x, node.position.y, node.position.z, -d.dx, -d.dy, -d.grade)
 	end)
 	return ok and e as ends.End or nil
 end
 
--- Can a proposal still join end e? A free track end only while it is free: once track is built on
--- it (or it is gone) a proposal naming its node is wrong or kills the game. A ground end names no
--- node. (nil: no end, nothing to join.)
+-- The node end at node n (a node with two or more track pieces and no street: track through it,
+-- or a junction), with each piece's direction there in either sense, or nil.
+function M.nodeEnd(n : integer) : ends.End
+	if n == nil or n < 0 or not M.nodeAlive(n) then return nil end
+	local segs = segmentsAt(n, true)
+	if #segs < 2 or #segmentsAt(n, false) > 0 then return nil end -- (no level crossings)
+	local ok, e = pcall(function() : ends.End
+		local node = api.engine.getComponent(n, api.type.ComponentType.BASE_NODE) as Engine.Component.BaseNode
+		if node == nil then return nil end
+		local dirs : {ends.Dir} = {}
+		local at : {ends.Piece} = {}
+		for _, seg in ipairs(segs) do
+			at[#at + 1] = M.piece(seg)
+			local be = api.engine.getComponent(seg, api.type.ComponentType.BASE_EDGE) as Engine.Component.BaseEdge
+			if be ~= nil and be.roadType == api.type["enum"].RoadType.TRACK then
+				local d = awayFrom(be, n)
+				if d ~= nil then
+					dirs[#dirs + 1] = d
+					dirs[#dirs + 1] = { dx = -d.dx, dy = -d.dy, grade = -d.grade }
+				end
+			end
+		end
+		if #dirs == 0 then return nil end
+		local beside = at
+		for _, pc in ipairs(runningOn(at)) do beside[#beside + 1] = pc end
+		return ends.nodeEnd(n, node.position.x, node.position.y, node.position.z, dirs, beside)
+	end)
+	return ok and e as ends.End or nil
+end
+
+-- The track pieces running on from `pieces`, out to RUN_ON along the track (not `pieces`
+-- themselves): what a switch there must stay clear of besides them (ends.clearance).
+local RUN_ON, RUN_ON_PIECES = 200.0, 24
+runningOn = function(pieces : {ends.Piece}) : {ends.Piece}
+	local seen : {integer : boolean} = {}
+	local queue : {{ends.Piece, number}} = {}
+	for _, pc in ipairs(pieces) do
+		seen[pc.edge] = true
+		queue[#queue + 1] = { pc, 0.0 }
+	end
+	local out : {ends.Piece} = {}
+	local i = 1
+	while i <= #queue and #out < RUN_ON_PIECES do
+		local pc, far = queue[i][1] as ends.Piece, queue[i][2] as number
+		i = i + 1
+		for _, n in ipairs({ pc.node0, pc.node1 }) do
+			for _, seg in ipairs(segmentsAt(n, true)) do
+				if not seen[seg] then
+					seen[seg] = true
+					local q = M.piece(seg)
+					if q ~= nil then
+						out[#out + 1] = q
+						local reach = far + math.sqrt((q.p1.x - q.p0.x) ^ 2 + (q.p1.y - q.p0.y) ^ 2)
+						if reach < RUN_ON then queue[#queue + 1] = { q, reach } end
+					end
+				end
+			end
+		end
+	end
+	return out
+end
+
+-- The track piece e as the tool reads it, or nil (not a live track piece).
+function M.piece(e : integer) : ends.Piece
+	local ok, pc = pcall(function() : ends.Piece
+		if e == nil or e <= 0 or not api.engine.entityExists(e) then return nil end
+		local be = api.engine.getComponent(e, api.type.ComponentType.BASE_EDGE) as Engine.Component.BaseEdge
+		if be == nil or be.roadType ~= api.type["enum"].RoadType.TRACK then return nil end
+		local function p(v : Vec3f) : ends.Point return { x = v.x, y = v.y, z = v.z } end
+		return { edge = e, node0 = be.node0, node1 = be.node1, p0 = p(be.position0), t0 = p(be.tangent0),
+			p1 = p(be.position1), t1 = p(be.tangent1) }
+	end)
+	return ok and pc as ends.Piece or nil
+end
+
+-- Is piece a still the piece b was read as (the same nodes, where they were, the same shape)?
+local function samePiece(a : ends.Piece, b : ends.Piece) : boolean
+	if a == nil or b == nil or a.node0 ~= b.node0 or a.node1 ~= b.node1 then return false end
+	for _, k in ipairs({ "p0", "t0", "p1", "t1" }) do
+		local u, v = (a as {string : ends.Point})[k], (b as {string : ends.Point})[k]
+		if math.abs(u.x - v.x) + math.abs(u.y - v.y) + math.abs(u.z - v.z) > 1e-3 then return false end
+	end
+	return M.nodeAlive(a.node0) and M.nodeAlive(a.node1)
+end
+
+-- Can a proposal still join end e? A free track end only while it is free, a node end only while
+-- track still runs through it, along its heading once aimed: once that changes (or the node is
+-- gone) a proposal naming the node is wrong or kills the game. A cut only while its piece and the
+-- track running on from it are as they were read. A ground end names no node. (nil: no end,
+-- nothing to join.)
 function M.joinable(e : ends.End) : boolean
-	return e == nil or e.kind ~= "track" or M.freeEnd(e.node) ~= nil
+	if e == nil or e.kind == "ground" then return true end
+	if e.kind == "split" then
+		-- (and the track running on from it: the proposal can name those pieces too, ends.runs)
+		if not samePiece(M.piece(e.piece.edge), e.piece) then return false end
+		for _, pc in ipairs(e.piece.beyond or {}) do
+			if not samePiece(M.piece(pc.edge), pc) then return false end
+		end
+		return true
+	end
+	if e.kind ~= "node" then return M.freeEnd(e.node) ~= nil end
+	local now = M.nodeEnd(e.node)
+	if now == nil then return false end
+	-- (the pieces there are named in the proposal, which replaces them: the same ones, as read)
+	local was = e.beside or {}
+	if #(now.beside or {}) ~= #was then return false end
+	for _, pc in ipairs(was) do
+		if not samePiece(M.piece(pc.edge), pc) then return false end
+	end
+	if e.dx == nil then return true end
+	for _, d in ipairs(now.dirs) do
+		if d.dx * e.dx + d.dy * e.dy > 1 - 1e-6 then return true end
+	end
+	return false
+end
+
+-- The track pieces at a node end's node (a switch replaces them: tg_proposal); none for any
+-- other end.
+function M.piecesAt(e : ends.End) : {integer}
+	if e == nil or e.kind ~= "node" then return {} end
+	return segmentsAt(e.node, true)
+end
+
+-- Can the joint between track pieces `from` and `to` go, making them one piece (ends.runs)? Only
+-- a plain joint: those two pieces and nothing else there, of one kind (ground, bridge or tunnel,
+-- and its type) and one track type, and nothing standing on `to` (signals would need moving).
+function M.mergeable(joint : integer, from : integer, to : integer) : boolean
+	local ok, res = pcall(function() : boolean
+		local segs = segmentsAt(joint, true)
+		if #segs ~= 2 or #segmentsAt(joint, false) > 0 then return false end
+		if not ((segs[1] == from and segs[2] == to) or (segs[1] == to and segs[2] == from)) then return false end
+		local a = api.engine.getComponent(from, api.type.ComponentType.BASE_EDGE) as Engine.Component.BaseEdge
+		local b = api.engine.getComponent(to, api.type.ComponentType.BASE_EDGE) as Engine.Component.BaseEdge
+		if a == nil or b == nil or #(b.objects or {}) > 0 then return false end
+		return a.type == b.type and a.typeIndex == b.typeIndex and a.roadTemplate == b.roadTemplate
+	end)
+	return ok and res == true
 end
 
 -- Is e a track piece?
@@ -219,37 +363,40 @@ function M.isTrackEdge(e : integer) : boolean
 	return ok and res == true
 end
 
--- The free ends of the piece `hovered` and of the track pieces within ends.SNAP of (x, y) (x nil:
--- only the hovered piece's), and the nodes of the hovered piece, when it is a track piece.
-function M.endsNear(x : number, y : number, hovered : integer) : {ends.End}, {integer : boolean}
+-- The ends (free track ends and node ends) at the nodes of the piece `hovered` and of the track
+-- pieces within ends.SNAP of (x, y) (x nil: only the hovered piece's), and the piece to cut
+-- (tg_ends.snap): the hovered one when it is a track piece, else the nearest within
+-- ends.PIECE_SNAP of (x, y), never edge `skip`.
+function M.endsNear(x : number, y : number, hovered : integer, skip ?: integer) : {ends.End}, ends.Piece
 	local CT = api.type.ComponentType
 	local nodes : {integer : boolean} = {}
-	local onHovered : {integer : boolean} = {}
-	local function addEdge(e : integer, hov : boolean)
+	local around : {ends.Piece} = {}
+	local function addEdge(e : integer)
 		local be = api.engine.getComponent(e, CT.BASE_EDGE) as Engine.Component.BaseEdge
 		if be ~= nil and be.roadType == api.type["enum"].RoadType.TRACK then
 			nodes[be.node0], nodes[be.node1] = true, true
-			if hov then onHovered[be.node0], onHovered[be.node1] = true, true end
+			around[#around + 1] = M.piece(e)
 		end
 	end
-	pcall(function()
-		if hovered ~= nil and hovered > 0 and api.engine.entityExists(hovered) then addEdge(hovered, true) end
-	end)
+	local piece = M.piece(hovered)
+	if piece ~= nil then nodes[piece.node0], nodes[piece.node1] = true, true end
 	if x ~= nil then
 		local r = ends.SNAP
 		pcall(function()
 			local box = api.type.Box3.new(api.type.Vec3f.new(x - r, y - r, -2000), api.type.Vec3f.new(x + r, y + r, 6000))
 			api.engine.system.octreeSystem.findIntersectingEntities(box, function(e : Engine.Entity, _bv : Engine.Component.BoundingVolume)
-				addEdge(e, false)
+				addEdge(e)
 			end)
 		end)
+		if piece == nil then piece = ends.nearestPiece(around, x, y, skip) end
 	end
+	if piece ~= nil then piece.beyond = runningOn({ piece }) end
 	local out : {ends.End} = {}
 	for n in pairs(nodes) do
-		local e = M.freeEnd(n)
+		local e = M.freeEnd(n) or M.nodeEnd(n)
 		if e ~= nil then out[#out + 1] = e end
 	end
-	return out, onHovered
+	return out, piece
 end
 
 return M

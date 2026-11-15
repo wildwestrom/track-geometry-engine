@@ -109,6 +109,24 @@ function M.stub(a : ends.End, ground : Ground, water : Water) : Plan
 	return { dense = track, built = track, grades = grades, kinds = kinds, note = note }
 end
 
+-- The built nodes with the pieces out of a switch end a (and into one at b) merged, so the piece
+-- at a switch runs on to the first node clear of the track at both ends (ends.CLEAR): only that
+-- piece shares a node with the track, and the game refuses any other piece that overlaps it. (Of
+-- both ends: a node clear of a's track but on b's would leave the piece before it on b's track.)
+-- With no node clear, the path is one piece. A break among the merged nodes goes with them.
+local function clearSwitches(nodes : {alignment.Sample}, a : ends.End, b : ends.End) : {alignment.Sample}
+	local function clear(nd : alignment.Sample) : boolean
+		return ends.clearance(a, nd.x, nd.y) >= ends.CLEAR and ends.clearance(b, nd.x, nd.y) >= ends.CLEAR
+	end
+	local first, last = 2, #nodes - 1
+	while first <= last and not clear(nodes[first]) do first = first + 1 end
+	while last >= first and not clear(nodes[last]) do last = last - 1 end
+	local out : {alignment.Sample} = { nodes[1] }
+	for i = first, last do out[#out + 1] = nodes[i] end
+	out[#out + 1] = nodes[#nodes]
+	return out
+end
+
 -- The new track from a to b along the edit e (nil: the starting alignment), or nil and why there
 -- is none. Its profile leaves each end at its existing track's grade (tg_edit).
 function M.path(a : ends.End, b : ends.End, e : edits.Edit, ground : Ground, water : Water) : Plan, string
@@ -147,7 +165,7 @@ function M.path(a : ends.End, b : ends.End, e : edits.Edit, ground : Ground, wat
 		if free then breaks[#breaks + 1] = s end
 	end
 	for _, pt in ipairs(prof.points) do breaks[#breaks + 1] = pt.s end
-	local built = alignment.sample(path, math.huge, M.MAX_TURN, breaks)
+	local built = clearSwitches(alignment.sample(path, math.huge, M.MAX_TURN, breaks), a, b)
 	pinEnds(built, a, b)
 	if kinds ~= nil then kinds = alignment.carry(dense, kinds, built) end
 	local z, grades = profiles.sample(prof, chainages(built))

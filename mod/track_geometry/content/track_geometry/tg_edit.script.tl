@@ -12,8 +12,12 @@
 --   remove a turn : free turns only (removing one next to an end would kink the join).
 --   move an end   : a ground end only, anywhere (at least MIN_GAP from its neighbouring turn);
 --                   the turns stay, so the turn next to it still slides on the other end's ray,
---                   and the curve sizes stay with their turns. Other kinds of end stay. It takes
---                   the end it is dropped on, so a drop that changes its kind is one call.
+--                   and the curve sizes stay with their turns. Other kinds of end stay. Moved
+--                   onto track it becomes that end (a free track end, a node, a cut), heading as
+--                   the second click would give it: the turn next to it goes onto its ray, and
+--                   with no turn there (or one that is next to the other end's heading too) the
+--                   turns are laid afresh, as a starting layout. Until it is dropped it can
+--                   still move, back onto the ground too (the turns are then as they were).
 --   resize a curve: drag the bracket where it starts or ends; sets that turn's curve size, up to
 --                   the room the neighbouring curves leave (tg_geometry.cornerLayouts).
 -- And the vertical profile (tg_profile) through elevation points between the ends, each kept as a
@@ -24,6 +28,8 @@
 --                   steeper than the limit may move without getting steeper).
 --   set a height  : as asked, past the limit too; the profile is then too steep.
 --   remove a point: any; the ends are not elevation points and stay.
+--   an end's height: a ground end's, like a point's but it cannot slide (set as asked, or moved
+--                   up and down as far as the limit allows). Other kinds of end keep theirs.
 -- A point within MIN_SPAN of an end or of another point is too close: it is left out of the
 -- profile (so the spline never gets a tiny span) and the build is refused until it is clear. Of
 -- two points too close to each other, the one placed (added or slid) last is the one too close.
@@ -81,6 +87,13 @@ local record Sampled
 	ss : {number}
 end
 
+-- A ground end moved onto track and not dropped yet: which end, and the turns as they were on the
+-- ground, so the same drag can take it elsewhere.
+local record Held
+	first : boolean
+	turns : {Turn}
+end
+
 local record Edit
 	a : ends.End
 	b : ends.End
@@ -92,10 +105,11 @@ local record Edit
 	hrev : integer -- bumped on every change to the horizontal alignment (turns, curves)
 	sampled : Sampled
 	closeCache : CloseCache
+	held : Held
 end
 
 local enum HitKind
-	"end" -- end i (1 or the last), a ground end: it can be dragged
+	"end" -- end i (1 or the last), a ground end: dragged (horizontal), its height set (vertical)
 	"pi" -- a turn
 	"entry" -- the bracket where turn i's curve starts
 	"exit" -- ...or ends
@@ -111,7 +125,7 @@ local record Hit
 	x : number -- turns, ends and brackets: where they are
 	y : number
 	mobility : string -- turns only: "free", "ray" or "fixed"
-	s : number -- elevation points and the track: the chainage (m)
+	s : number -- elevation points, ends (vertical) and the track: the chainage (m)
 end
 
 -- The mouse's view ray: from the eye (the camera) through the ground point under the mouse.
@@ -162,6 +176,10 @@ local record EditMod
 	ends : function(e : Edit) : ends.End, ends.End
 	draggableEnd : function(e : Edit, i : integer) : boolean
 	moveEnd : function(e : Edit, i : integer, to : ends.End) : boolean
+	dropEnd : function(e : Edit)
+	liftableEnd : function(e : Edit, i : integer) : boolean
+	setEndHeight : function(e : Edit, i : integer, z : number) : boolean
+	moveEndHeight : function(e : Edit, i : integer, z : number, limit : number) : boolean
 	-- the path
 	path : function(e : Edit) : {geometry.Segment}
 	nodes : function(e : Edit) : {alignment.Sample}
@@ -364,28 +382,72 @@ function M.ends(e : Edit) : ends.End, ends.End
 	return e.a, e.b
 end
 
--- Can end i (1 or the last) be dragged? A ground end can.
+-- Can end i (1 or the last) be dragged? A ground end can, and one moved onto track until it is
+-- dropped.
 function M.draggableEnd(e : Edit, i : integer) : boolean
 	local en = endOf(e, i)
-	return en ~= nil and en.kind == "ground"
+	if en == nil then return false end
+	return en.kind == "ground" or (e.held ~= nil and e.held.first == (i == 1))
 end
 
--- Move end i (1 or the last), a ground end, to the end `to`. Only onto the ground for now (onto
--- track, the turn next to it would need that end's ray). false when it cannot go there:
--- not a ground end, onto track, within MIN_GAP of its neighbouring turn, or closer to the other
--- end than ends too close to pick (tg_ends.initialPis).
+-- The turns, each copied (so moving one leaves the original list as it was).
+local function copies(turns : {Turn}) : {Turn}
+	local out : {Turn} = {}
+	for k, t in ipairs(turns) do out[k] = { pos = t.pos, budget = t.budget } end
+	return out
+end
+
+-- Move end i (1 or the last), a ground end, to the end `to`: the ground, or track there (a node or
+-- cut is aimed at the other end), which it then is. From the turns as they were on the ground:
+-- onto the ground they stay; onto track the turn next to the end goes onto its ray (where it is
+-- nearest, at least MIN_LEG out), and with no turn there, or one next to the other end's heading
+-- too, the turns are laid afresh (tg_ends.initialPis). The last turn index changes with the turn
+-- count. false when it cannot go there: not such an end, within MIN_GAP of its neighbouring turn
+-- (the turn on the ray of its neighbour), or closer to the other end than ends too close to pick.
 function M.moveEnd(e : Edit, i : integer, to : ends.End) : boolean
-	if not M.draggableEnd(e, i) or to.kind ~= "ground" then return false end
-	local q = e.turns[i == 1 and 2 or i - 1].pos
-	if d2(to.x, to.y, q.x, q.y) < M.MIN_GAP * M.MIN_GAP then return false end
-	local o = endOf(e, i == 1 and #e.turns or 1)
-	if d2(to.x, to.y, o.x, o.y) < (2 * ends.MIN_LEG) ^ 2 then return false end
-	local cur = endOf(e, i)
-	if cur.x == to.x and cur.y == to.y and cur.z == to.z then return true end
-	if i == 1 then e.a = to else e.b = to end
-	e.turns[i].pos = geometry.vec(to.x, to.y, 0)
+	if not M.draggableEnd(e, i) then return false end
+	local first = i == 1
+	local cur, other = e.a, e.b
+	if not first then cur, other = e.b, e.a end
+	if d2(to.x, to.y, other.x, other.y) < (2 * ends.MIN_LEG) ^ 2 then return false end
+	to = ends.aim(to, other.x, other.y)
+	local onTrack = to.kind ~= "ground"
+	if onTrack and not ends.hasHeading(to) then return false end
+	if onTrack and ends.key(cur) == ends.key(to) then return true end
+	if not onTrack and cur.x == to.x and cur.y == to.y and cur.z == to.z then return true end
+	local held = e.held
+	local before = held ~= nil and held.turns or e.turns
+	local turns = copies(before)
+	local n = #turns
+	local k, j = n, n - 1 -- (the end's turn index, and its neighbour's)
+	if first then k, j = 1, 2 end
+	local q = turns[j].pos
+	if not onTrack then
+		if d2(to.x, to.y, q.x, q.y) < M.MIN_GAP * M.MIN_GAP then return false end
+		turns[k].pos = geometry.vec(to.x, to.y, 0)
+	elseif n == 2 or (n == 3 and ends.hasHeading(other)) then
+		local pis = ends.initialPis(first and to or other, first and other or to)
+		if pis == nil then return false end
+		turns = {}
+		for m, p in ipairs(pis) do turns[m] = { pos = p } end
+	else
+		local t = math.max(ends.MIN_LEG, (q.x - to.x) * to.dx + (q.y - to.y) * to.dy)
+		local x, y = to.x + t * to.dx, to.y + t * to.dy
+		local r = turns[first and 3 or n - 2].pos
+		if d2(x, y, r.x, r.y) < M.MIN_GAP * M.MIN_GAP then return false end
+		turns[k].pos, turns[j].pos = geometry.vec(to.x, to.y, 0), geometry.vec(x, y, 0)
+	end
+	if not onTrack then e.held = nil
+	elseif held == nil then e.held = { first = first, turns = before } end
+	if first then e.a = to else e.b = to end
+	e.turns = turns
 	bumpH(e)
 	return true
+end
+
+-- The dragged end is let go: where it is, it stays (on track, it is fixed like any other).
+function M.dropEnd(e : Edit)
+	e.held = nil
 end
 
 -- The ends that can be dragged, the turns and the brackets of every curve.
@@ -492,20 +554,30 @@ function M.chainageOnRay(e : Edit, ray : Ray) : number, number
 end
 
 -- What is at (x, y) within r. Horizontal: a ground end, else a turn or a bracket, else a leg (or
--- the track along it, which leaves the legs at the curves). Vertical: an elevation point, else the
--- track, both also up at their heights along ray (the mouse's view ray), when it is given. nil:
--- nothing.
+-- the track along it, which leaves the legs at the curves). Vertical: the nearest ground end or
+-- elevation point (the end a hair ahead), else the track, all also up at their heights along ray
+-- (the mouse's view ray), when it is given. nil: nothing.
 function M.hit(e : Edit, vertical : boolean, x : number, y : number, r : number, ray ?: Ray) : Hit
 	local c = sampled(e)
 	if vertical then
 		local best : Hit = nil
 		local bestD = r
+		local function consider(h : Hit, z : number, ahead : number)
+			local d = math.sqrt(d2(x, y, h.x, h.y)) -- (its circle on the ground)
+			if ray ~= nil then d = math.min(d, offRay(ray, h.x, h.y, z)) end -- (its top, up at its height)
+			d = d - ahead
+			if d <= bestD then best, bestD = h, d end
+		end
+		for _, i in ipairs({ 1, #e.turns }) do
+			local en = endOf(e, i)
+			if M.liftableEnd(e, i) then
+				consider({ kind = "end", i = i, s = i == 1 and 0.0 or c.len, x = en.x, y = en.y }, en.z, 1e-6)
+			end
+		end
 		for i, el in ipairs(e.elevations) do
 			local s = el.f * c.len
 			local px, py = alignment.pointAt(c.nodes, s)
-			local d = math.sqrt(d2(x, y, px, py)) -- (its circle on the ground)
-			if ray ~= nil then d = math.min(d, offRay(ray, px, py, el.z)) end -- (its top, up at its height)
-			if d <= bestD then best, bestD = { kind = "point", i = i, s = s, x = px, y = py }, d end
+			consider({ kind = "point", i = i, s = s, x = px, y = py }, el.z, 0)
 		end
 		if best ~= nil then return best end
 		local s, d = alignment.project(c.nodes, x, y)
@@ -565,14 +637,14 @@ end
 -- The profile through the elevation points els that are not too close: from end a at its track's
 -- grade to end b (the path arrives against b's direction, so its grade there is the opposite). A
 -- ground end has no grade: the profile picks its own there (tg_profile.solve).
-local function profileWith(e : Edit, els : {Elevation}, len : number) : profiles.Profile, string
+local function profileWith(a : ends.End, b : ends.End, els : {Elevation}, len : number) : profiles.Profile, string
 	local close = closeness(els, len)
-	local pts : {profiles.Point} = { { s = 0, z = e.a.z } }
+	local pts : {profiles.Point} = { { s = 0, z = a.z } }
 	for k, el in ipairs(els) do
 		if close[k] == nil then pts[#pts + 1] = { s = el.f * len, z = el.z } end
 	end
-	pts[#pts + 1] = { s = len, z = e.b.z }
-	return profiles.solve(pts, e.a.grade, e.b.grade ~= nil and -e.b.grade or nil)
+	pts[#pts + 1] = { s = len, z = b.z }
+	return profiles.solve(pts, a.grade, b.grade ~= nil and -b.grade or nil)
 end
 
 -- e's points too close (kept until the next change).
@@ -591,7 +663,7 @@ function M.endHeights(e : Edit) : number, number
 end
 
 function M.profile(e : Edit) : profiles.Profile, string
-	return profileWith(e, e.elevations, sampled(e).len)
+	return profileWith(e.a, e.b, e.elevations, sampled(e).len)
 end
 
 -- The steepest grade of p at the chainages ss, as a magnitude, and where (the first such).
@@ -684,6 +756,18 @@ function M.insertElevation(e : Edit, s : number) : integer, string
 	return place(e, el), nil
 end
 
+-- The furthest share of the way (0..1) that fits (bisection: the steepest grade grows with the
+-- move; a share that does not fit is never taken).
+local function furthest(fits : function(number) : boolean) : number
+	if fits(1.0) then return 1.0 end
+	local good, bad = 0.0, 1.0
+	for _ = 1, 30 do
+		local mid = (good + bad) / 2
+		if fits(mid) then good = mid else bad = mid end
+	end
+	return good
+end
+
 -- Move elevation point i towards chainage s (on the path; past its neighbours too) and height z.
 -- The move stops where the steepest grade at the path's nodes would pass the limit (or, on a
 -- profile already past it, would get steeper); a point too close is not in the profile, so only
@@ -706,20 +790,10 @@ function M.moveElevation(e : Edit, i : integer, s : number, z : number, limit : 
 		for k, v in ipairs(e.elevations) do els[k] = v end
 		els[i] = moved(t)
 		sortEls(els)
-		local p = profileWith(e, els, len)
+		local p = profileWith(e.a, e.b, els, len)
 		return p ~= nil and steepestOf(p, ss) <= allowed
 	end
-	-- the furthest fitting share of the way (bisection: the steepest grade grows with the move;
-	-- a share that does not fit is never taken)
-	local t = 1.0
-	if not fits(1.0) then
-		local good, bad = 0.0, 1.0
-		for _ = 1, 30 do
-			local mid = (good + bad) / 2
-			if fits(mid) then good = mid else bad = mid end
-		end
-		t = good
-	end
+	local t = furthest(fits)
 	if t == 0 then return false, i end
 	local m = moved(t)
 	if m.f == el.f and m.z == el.z then return true, i end
@@ -736,6 +810,52 @@ function M.setHeight(e : Edit, i : integer, z : number) : boolean
 	if el.z == z then return true end
 	el.z = z
 	e.rev = e.rev + 1
+	return true
+end
+
+-- Can end i's (1 or the last) height be set? A ground end's can; a track end keeps its own.
+function M.liftableEnd(e : Edit, i : integer) : boolean
+	local en = endOf(e, i)
+	return en ~= nil and en.kind == "ground"
+end
+
+-- End i (1 or the last), a ground end, at height z.
+local function liftedTo(e : Edit, i : integer, z : number) : ends.End
+	local en = endOf(e, i)
+	return ends.groundEnd(en.x, en.y, z)
+end
+
+local function putEnd(e : Edit, i : integer, en : ends.End)
+	if i == 1 then e.a = en else e.b = en end
+	e.rev = e.rev + 1
+end
+
+-- Set end i's height to z, as asked (as setHeight does a point's). false: not an end whose
+-- height can be set.
+function M.setEndHeight(e : Edit, i : integer, z : number) : boolean
+	if not M.liftableEnd(e, i) then return false end
+	if endOf(e, i).z ~= z then putEnd(e, i, liftedTo(e, i, z)) end
+	return true
+end
+
+-- Move end i's height towards z, stopping where moveElevation would. false when it cannot move
+-- at all, or its height cannot be set.
+function M.moveEndHeight(e : Edit, i : integer, z : number, limit : number) : boolean
+	if not M.liftableEnd(e, i) then return false end
+	local c = sampled(e)
+	local z0 = endOf(e, i).z
+	local allowed = math.max(limit, M.steepest(e))
+	local function fits(t : number) : boolean
+		local a, b = e.a, e.b
+		local en = liftedTo(e, i, z0 + t * (z - z0))
+		if i == 1 then a = en else b = en end
+		local p = profileWith(a, b, e.elevations, c.len)
+		return p ~= nil and steepestOf(p, c.ss) <= allowed
+	end
+	local t = furthest(fits)
+	if t == 0 then return false end
+	local to = z0 + t * (z - z0)
+	if to ~= z0 then putEnd(e, i, liftedTo(e, i, to)) end
 	return true
 end
 

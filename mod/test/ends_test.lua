@@ -15,6 +15,7 @@ local function check(ok, what)
 end
 local function atan2(y, x) return math.atan2 and math.atan2(y, x) or math.atan(y, x) end
 local function angleDiff(a, b) return math.abs(atan2(math.sin(a - b), math.cos(a - b))) end
+local function eq(a, b) return math.abs(a - b) < 1e-9 end
 
 local function endAt(x, y, deg)
 	return { x = x, y = y, dx = math.cos(math.rad(deg)), dy = math.sin(math.rad(deg)) }
@@ -150,37 +151,159 @@ local te = E.trackEnd(7, 10, 20, 3, 0, 1, 0.01)
 check(te.kind == "track" and te.node == 7 and te.x == 10 and te.y == 20 and te.z == 3
 	and te.dx == 0 and te.dy == 1 and te.grade == 0.01, "a free track end is an end of kind track, with its node")
 
--- Which free end the mouse snaps to.
-local function fe(node, x, y) return { node = node, x = x, y = y, z = 0, dx = 1, dy = 0, grade = 0 } end
+-- Which end the mouse picks.
+local function fe(node, x, y) return { kind = "track", node = node, x = x, y = y, z = 0, dx = 1, dy = 0, grade = 0 } end
+local function ne(node, x, y) return E.nodeEnd(node, x, y, 0, { { dx = 1, dy = 0, grade = 0 }, { dx = -1, dy = 0, grade = 0 } }) end
+local function P(x, y, z) return { x = x, y = y, z = z } end
+-- a straight piece 200 m along x from node 11 at (0, 0, 10) to node 12, climbing 2 m
+local straightPiece = { edge = 40, node0 = 11, node1 = 12, p0 = P(0, 0, 10), t0 = P(200, 0, 2), p1 = P(200, 0, 12), t1 = P(200, 0, 2) }
 local near = { fe(1, 0, 0), fe(2, 30, 0), fe(3, 100, 0) }
-local got = E.snap(near, {}, 25, 0, 0)
+local got = E.snap(near, nil, 25, 0, 0)
 check(got ~= nil and got.node == 2, "snap: the nearest free end within SNAP")
-got = E.snap(near, {}, 25, 0, 0, 2)
+got = E.snap(near, nil, 25, 0, 0, fe(2, 30, 0))
 check(got ~= nil and got.node == 1, "snap: never the excluded node, the next nearest instead")
-got = E.snap(near, { [3] = true }, 25, 0, 0)
-check(got ~= nil and got.node == 2, "snap: of the qualifying ends, the nearest, hovered or not")
-got = E.snap(near, { [3] = true }, 25, 0, 0, 2)
-check(got ~= nil and got.node == 1, "snap: the hovered piece's far end does not beat a nearer one")
-got = E.snap({ fe(3, 100, 0) }, { [3] = true }, 25, 0, 0)
-check(got ~= nil and got.node == 3, "snap: an end of the hovered piece snaps beyond SNAP")
-got = E.snap({ fe(3, 100, 0) }, { [3] = true }, nil, nil, nil)
-check(got ~= nil and got.node == 3, "snap: over no ground, the hovered piece's end still snaps")
-got = E.snap({ fe(1, E.SNAP, 0) }, {}, 0, 0, 0)
+got = E.snap({ fe(1, E.SNAP, 0) }, nil, 0, 0, 0)
 check(got ~= nil and got.node == 1, "snap: exactly SNAP away still snaps")
-got = E.snap({ fe(3, 100, 0) }, {}, 25, 0, 7)
+got = E.snap({ fe(3, 100, 0) }, nil, 25, 0, 7)
 check(got ~= nil and got.kind == "ground" and got.x == 25 and got.y == 0 and got.z == 7,
-	"snap: no free end near, off track: the ground under the mouse, at its height")
-got = E.snap({ fe(2, 30, 0) }, {}, 25, 0, 7, 2)
+	"snap: no end near, off track: the ground under the mouse, at its height")
+got = E.snap({ fe(2, 30, 0) }, nil, 25, 0, 7, fe(2, 30, 0))
 check(got ~= nil and got.kind == "ground", "snap: only the excluded node near: the ground")
-local none, hint = E.snap({}, { [8] = true, [9] = true }, 25, 0, 0)
-check(none == nil and hint:find("No free track end") ~= nil, "snap: over a piece with no free end: nothing, and says so")
-none, hint = E.snap({}, {}, nil, nil, nil)
-check(none == nil and hint:find("Point at the ground") ~= nil, "snap: over no ground and no track: says where to point")
+got = E.snap({ ne(11, 0, 0), ne(12, 200, 0) }, straightPiece, 4, 1, 0)
+check(got ~= nil and got.node == 11, "snap: a node within NODE_SNAP")
+got = E.snap({ ne(11, 0, 0), ne(12, 200, 0) }, straightPiece, 8, 1, 0)
+check(got ~= nil and got.kind == "split", "snap: 8 m from a node: a cut")
+got = E.snap({ ne(11, 0, 0), ne(12, 200, 0) }, straightPiece, 4, 6, 0)
+check(got ~= nil and got.node == 11, "snap: past NODE_SNAP but too near the node to cut: the node")
+got = E.snap({ ne(11, 0, 0), ne(12, 200, 0) }, straightPiece, 15, 3, 0)
+check(got ~= nil and got.kind == "split" and got.piece.edge == 40 and math.abs(got.x - 15) < 1e-6 and eq(got.y, 0) and math.abs(got.z - 10.15) < 1e-6,
+	"snap: further from a node, on the piece: the point on it nearest the mouse, at its height")
+got = E.snap({ ne(12, 200, 0) }, straightPiece, 3, 0, 0)
+local none, hint = got, select(2, E.snap({ ne(12, 200, 0) }, straightPiece, 3, 0, 0))
+check(none == nil and hint ~= nil, "snap: a cut leaving under MIN_HALF: nothing, and why")
+got = E.snap({}, straightPiece, 100, 2, 0, E.splitEnd(straightPiece, 0.25))
+check(got == nil, "snap: never a second cut of the start's piece")
+none, hint = E.snap({}, nil, nil, nil, nil)
+check(none == nil and hint:find("Point at the ground") ~= nil, "snap: over no ground: says where to point")
+
+-- A piece cut in two: the parts meet at the cut, keep the piece's ends, and follow its curve.
+local curved = { edge = 41, node0 = 21, node1 = 22, p0 = P(0, 0, 0), t0 = P(300, 0, 3), p1 = P(200, 200, 6), t1 = P(0, 300, 3) }
+local u = E.nearestOnPiece(curved, 150, 60)
+local cp = E.pieceAt(curved, u)
+local cut = true
+for k = 0, 20 do
+	local q = E.pieceAt(curved, k / 20)
+	if (q.x - 150) ^ 2 + (q.y - 60) ^ 2 < (cp.x - 150) ^ 2 + (cp.y - 60) ^ 2 - 1e-9 then cut = false end
+end
+check(cut and u > 0 and u < 1, "piece: the nearest point on it")
+local a, b = E.halves(curved, u)
+check(a.node0 == 21 and a.node1 == nil and b.node0 == nil and b.node1 == 22 and a.p0 == curved.p0 and b.p1 == curved.p1,
+	"cut: the parts keep the piece's nodes at its ends")
+check(eq(a.p1.x, cp.x) and eq(b.p0.y, cp.y) and eq(a.p1.z, b.p0.z), "cut: the parts meet at the cut")
+local same = true
+for k = 0, 10 do
+	local s0 = k / 10
+	local qa, qb = E.pieceAt(a, s0), E.pieceAt(b, s0)
+	local ra, rb = E.pieceAt(curved, u * s0), E.pieceAt(curved, u + (1 - u) * s0)
+	same = same and math.abs(qa.x - ra.x) + math.abs(qa.y - ra.y) + math.abs(qa.z - ra.z) < 1e-9
+		and math.abs(qb.x - rb.x) + math.abs(qb.y - rb.y) + math.abs(qb.z - rb.z) < 1e-9
+end
+check(same, "cut: the parts follow the piece's own curve")
+-- (halfway along `curved` its Hermite's derivative is 1.5 (p1 - p0) - 0.25 (t0 + t1) = (225, 225, 7.5))
+local mid = E.splitEnd(curved, 0.5)
+check(math.abs(mid.x - 137.5) < 1e-9 and math.abs(mid.y - 62.5) < 1e-9 and math.abs(mid.z - 3) < 1e-9
+	and math.abs(mid.dirs[1].dx - math.sqrt(0.5)) < 1e-9 and math.abs(mid.dirs[1].dy - math.sqrt(0.5)) < 1e-9
+	and math.abs(mid.dirs[1].grade - 7.5 / (225 * math.sqrt(2))) < 1e-9
+	and mid.dirs[2].dx == -mid.dirs[1].dx and mid.dirs[2].grade == -mid.dirs[1].grade,
+	"a cut end on a curve: heading and grade from the piece's tangent there, in either sense")
+local sp = E.splitEnd(straightPiece, 0.5)
+local spAim = E.aim(sp, 300, 50)
+check(sp.kind == "split" and sp.node == nil and not E.hasHeading(sp) and eq(spAim.dx, 1) and eq(spAim.grade, 0.01)
+	and spAim.piece == straightPiece and spAim.u == 0.5, "a cut end: aimed like a node end, along the piece at its grade")
+check(E.aim(sp, -300, 50).dx == -1 and E.key(sp) ~= E.key(E.splitEnd(straightPiece, 0.6)), "a cut end: the other sense; its key is where it cuts")
 
 -- Ends for a person and for telling them apart.
 check(E.name(te) == "node 7" and E.name(E.groundEnd(120.4, -45.2, 0)) == "the ground at (120, -45)", "an end's name")
 check(E.key(te) ~= E.key(E.groundEnd(10, 20, 3)) and E.key(E.groundEnd(10, 20, 3)) == E.key(E.groundEnd(10, 20, 9))
 	and E.key(E.groundEnd(10, 20, 3)) ~= E.key(E.groundEnd(10.1, 20, 3)), "an end's key: its node, else where it is")
+
+-- Existing-node ends (a switch): a node with track through it, or a junction. Its directions are
+-- every piece's at the node, in either sense; aimed at the other end, it takes the one pointing
+-- most toward it, with that direction's grade.
+local function dir(deg, grade) return { dx = math.cos(math.rad(deg)), dy = math.sin(math.rad(deg)), grade = grade } end
+local function both(deg, grade) return dir(deg, grade), dir(deg + 180, -grade) end
+local function headingOf(e) return math.deg(atan2(e.dy, e.dx)) % 360 end
+-- through a straight line along x, climbing 1 % towards +x
+local through = E.nodeEnd(5, 0, 0, 2, { both(0, 0.01) })
+check(through.kind == "node" and through.node == 5 and not E.hasHeading(through), "a node end: its node, no heading until aimed")
+local fwd = E.aim(through, 300, 50)
+check(fwd.kind == "node" and fwd.node == 5 and eq(headingOf(fwd), 0) and eq(fwd.grade, 0.01),
+	"through node, other end ahead on the left: along the line, at its grade")
+local fwdR = E.aim(through, 300, -50)
+check(eq(headingOf(fwdR), 0) and eq(fwdR.grade, 0.01), "through node, other end ahead on the right: the same direction")
+local back = E.aim(through, -300, 50)
+check(eq(headingOf(back), 180) and eq(back.grade, -0.01), "through node, other end behind: the other sense, its grade too")
+check(eq(headingOf(E.aim(fwd, -300, -50)), 180), "an aimed node end aims again")
+check(E.key(fwd) ~= E.key(back) and E.key(fwd) == E.key(E.aim(through, 600, 10)), "a node end's key: its node and its heading")
+check(E.aim(through, 0, 0) == through, "aimed at itself: left as it is")
+-- a junction: the line along x and a branch leaving at 20 deg
+local junction = E.nodeEnd(6, 0, 0, 0, { dir(0, 0), dir(180, 0), dir(20, 0.02), dir(200, -0.02) })
+check(eq(headingOf(E.aim(junction, 500, -100)), 0), "junction, other end on the right of the line: along the line")
+local branch = E.aim(junction, 500, 300)
+check(eq(headingOf(branch), 20) and eq(branch.grade, 0.02), "junction, other end on the branch's side: along the branch")
+check(eq(headingOf(E.aim(junction, -500, 30)), 180), "junction, other end behind on the left: back along the line")
+check(eq(headingOf(E.aim(junction, -500, -300)), 200), "junction, other end behind on the right: back along the branch")
+local tr = E.trackEnd(7, 0, 0, 0, 1, 0, 0)
+check(E.aim(tr, -100, 0) == tr and E.aim(E.groundEnd(0, 0, 0), 9, 9).dx == nil, "aiming a free track end or the ground: no change")
+-- the layouts treat an aimed node end as a free track end with that heading
+-- (a corner close enough that a switch's turn may go there too)
+local other = E.trackEnd(9, 100, 400, 0, 0, -1, 0)
+local nodeL = { E.initialPis(E.aim(through, other.x, other.y), other) }
+local trackL = { E.initialPis(E.trackEnd(5, 0, 0, 2, 1, 0, 0.01), other) }
+local same = nodeL[2] == trackL[2] and #nodeL[1] == #trackL[1]
+for i, p in ipairs(nodeL[1]) do same = same and eq(p.x, trackL[1][i].x) and eq(p.y, trackL[1][i].y) end
+check(same and nodeL[2] == "corner", "layouts: an aimed node end lays out as a free track end with its heading")
+local g = E.groundEnd(-400, 100, 0)
+local toG = { E.initialPis(g, E.aim(through, g.x, g.y)) }
+check(toG[2] == "switch" and eq(toG[1][2].y, 0) and toG[1][2].x < 0, "layouts: a ground end to a node end: the turn on the node's ray")
+
+-- A switch (a node or cut end) leaves on a curve no wider than SWITCH_RADIUS: where an arc would
+-- be wider (its radius is dist^2 / (2 offset): the other end nearly ahead), the turn goes out on
+-- the ray only as far as that curve needs, t = R tan(deflection / 2). (A wider curve runs within a
+-- track's width of the existing track for hundreds of metres, and the game refuses the overlap.)
+local function deflection(a, pis)
+	local p, q = pis[2], pis[3]
+	local vx, vy = q.x - p.x, q.y - p.y
+	return math.acos((vx * a.dx + vy * a.dy) / math.sqrt(vx * vx + vy * vy))
+end
+local function aimedNode(x, y) return E.aim(E.nodeEnd(5, 0, 0, 0, { both(0, 0) }), x, y) end
+local gA = E.groundEnd(700, 300, 0) -- (an arc there: radius 967 m)
+local swPis, swHow = E.initialPis(aimedNode(gA.x, gA.y), gA)
+local t1 = swPis[2].x
+check(swHow == "switch" and eq(swPis[2].y, 0) and t1 < 414 and math.abs(t1 - E.SWITCH_RADIUS * math.tan(deflection(aimedNode(1, 0), swPis) / 2)) < 0.01,
+	"switch to the ground nearly ahead: the turn where the curve's radius is SWITCH_RADIUS (" .. tostring(t1) .. ")")
+local trPis, trHow = E.initialPis(E.trackEnd(5, 0, 0, 0, 1, 0, 0), gA)
+check(trHow == "arc" and math.abs(trPis[2].x - 580000 / 1400) < 1e-9, "a free track end there: the arc as before")
+local backPis = E.initialPis(gA, aimedNode(gA.x, gA.y))
+check(eq(backPis[#backPis - 1].x, t1) and eq(backPis[#backPis - 1].y, 0), "switch as the end: the same turn, laid backwards")
+local gB = E.groundEnd(100, 300, 0) -- (an arc there: radius 167 m)
+local besidePis, besideHow = E.initialPis(aimedNode(gB.x, gB.y), gB)
+check(besideHow == "arc" and eq(besidePis[2].x, 500), "switch to the ground beside it: the arc, already tighter")
+-- with headings at both ends: no corner far out along the switch's ray
+local tb = E.trackEnd(9, 700, 300, 0, 0, -1, 0) -- (a corner at (700, 0) for a free track end)
+local bothPis, bothHow = E.initialPis(aimedNode(tb.x, tb.y), tb)
+check(bothHow == "s-curve" and bothPis[2].x < 300 and eq(bothPis[2].y, 0), "switch to a track end: no corner far out on its ray, its turn kept near it (" .. bothHow .. ")")
+
+
+-- near pieces: the nearest within PIECE_SNAP, never the skipped one
+local function line(edge, y)
+	return { edge = edge, node0 = 1, node1 = 2, p0 = { x = 0, y = y, z = 0 }, t0 = { x = 100, y = 0, z = 0 },
+		p1 = { x = 100, y = y, z = 0 }, t1 = { x = 100, y = 0, z = 0 } }
+end
+local two = { line(31, 0), line(32, 5) }
+check(E.nearestPiece(two, 50, 3).edge == 32, "near pieces: the nearer of two")
+check(E.nearestPiece(two, 50, 3, 32).edge == 31, "near pieces: not the skipped one")
+check(E.nearestPiece(two, 50, -E.PIECE_SNAP - 0.5) == nil, "near pieces: none past PIECE_SNAP")
 
 print(failures == 0 and "all passed" or (failures .. " failed"))
 os.exit(failures == 0 and 0 or 1)
