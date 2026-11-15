@@ -1,4 +1,5 @@
--- The tool's session: which step it is at (pick the start, pick the end, edit), the picked ends,
+-- The tool's session: which step it is at (pick the start, pick the end, edit), the picked ends
+-- (each a free track end or a point on the ground: click, move, click),
 -- the edit and its mode, what is under the mouse and what is being dragged, and which click, right-
 -- click or "back" means what. The GUI turns the game's callbacks into the events below and draws
 -- from the session's fields. It reads them freely but never writes them: every change goes through
@@ -47,7 +48,24 @@ local enum MouseKind
 	"other"
 end
 
-local type TrackEnd = ends.TrackEnd
+local type End = ends.End
+
+-- What the cursor (the end under the mouse) is on, which says how it is drawn (as the game's
+-- builder draws its control point).
+local enum CursorState
+	"ground" -- picking: open ground
+	"trackEnd" -- picking: snapped to a free track end
+	"handle" -- editing: a ground end, turn or elevation point under the mouse
+	"dragging" -- editing: one of those being dragged
+end
+
+-- The cursor: where it is, and how it is drawn. z nil is the ground there.
+local record Cursor
+	x : number
+	y : number
+	z : number
+	state : CursorState
+end
 
 -- What the selected point's height can be matched to (the mode window's list): the start, another
 -- point or the end, labelled with its height (only: where along the track read as a second
@@ -81,29 +99,30 @@ end
 local record World
 	terrX : number -- the ground under the mouse (nil when it is over none)
 	terrY : number
+	terrZ : number -- (its height)
 	ray : edits.Ray -- the mouse's view ray, eye to that ground point (nil when unknown): picks the track up on its profile, over the ground
 	hovered : integer -- the entity under the mouse
 	grab : number -- grab radius for handles (m)
 	cameraDist : number -- the camera's distance (m), for a Shift-drag's height; nil when unknown
 	shift : function() : boolean -- is Shift held (asked at a press)
 	gradeLimit : function() : number -- the steepest grade the track type may be laid at
-	snap : function(x : number, y : number, hovered : integer, exclude : integer) : TrackEnd, string -- the free end near (x, y), or nil and why
-	endFree : function(node : integer) : boolean -- is this node still a free track end
+	snap : function(x : number, y : number, z : number, hovered : integer, exclude : integer) : End, string -- what the mouse at (x, y, z) picks (tg_ends.snap), or nil and why
+	endThere : function(e : End) : boolean -- is this end still there (a free track end still free)
 end
 
 local record Session
 	phase : Phase
 	mode : Mode -- while editing (kept when the session starts over)
-	from : TrackEnd
-	to : TrackEnd
-	hover : TrackEnd -- end the mouse snaps to (while picking)
-	hoverMsg : string -- why it snaps to none
+	from : End
+	to : End
+	hover : End -- end the mouse snaps to (while picking)
+	hoverMsg : string -- why it snaps to none, or why the last click could not end the track there
 	mouseX : number -- where the last snap looked
 	mouseY : number
 	edit : edits.Edit -- the alignment being edited (both ends picked)
 	grab : number -- grab radius as of the last event (m)
 	hit : edits.Hit -- what is under the mouse while editing (tg_edit.hit)
-	drag : edits.Hit -- the turn or bracket being dragged
+	drag : edits.Hit -- the turn, bracket or ground end being dragged
 	dragEl : ElevationDrag -- the elevation point being dragged
 	selected : integer -- the selected elevation point (the mode window sets its height)
 	mouseSY : number -- the mouse's screen y, from its last event (px)
@@ -123,7 +142,8 @@ local record SessionMod
 	Mode : Mode
 	Request : Request
 	MouseKind : MouseKind
-	TrackEnd : TrackEnd
+	CursorState : CursorState
+	Cursor : Cursor
 	ElevationDrag : ElevationDrag
 	Selection : Selection
 	MatchSource : MatchSource
@@ -153,6 +173,7 @@ local record SessionMod
 	dragging : function(s : Session) : boolean
 	handleName : function(h : edits.Hit) : string
 	hint : function(s : Session) : string
+	cursor : function(s : Session) : Cursor
 end
 
 local M : SessionMod = {}
@@ -179,6 +200,7 @@ function M.dragging(s : Session) : boolean
 end
 
 function M.handleName(h : edits.Hit) : string
+	if h.kind == "end" then return h.i == 1 and "start" or "end" end
 	if h.kind == "pi" then return "turn " .. tostring(h.i - 1) end
 	return (h.kind == "entry" and "start" or "end") .. " of the curve at turn " .. tostring(h.i - 1)
 end
@@ -256,7 +278,15 @@ local function askBuild(s : Session, w : World) : {Request}
 	return { "askBuild" }
 end
 
--- A left click: pick the end the mouse snaps to; with both picked, ask to build.
+-- An end for the log: what it is, where, and its heading when it has one.
+local function describe(e : End) : string
+	local out = string.format("%s (%.4f, %.4f, %.2f)", ends.name(e), e.x, e.y, e.z)
+	if not ends.hasHeading(e) then return out end
+	return out .. string.format(" heading %.6f deg (%.9f, %.9f)", math.deg(atan2(e.dy, e.dx)), e.dx, e.dy)
+end
+
+-- A left click: pick the end the mouse snaps to; with both picked, ask to build. Ends too close
+-- for an alignment are refused (why in hoverMsg, until the mouse moves on).
 function M.click(s : Session, w : World) : {Request}
 	if not s.live() or s.confirmOpen then return {} end
 	if s.phase == "done" then return askBuild(s, w) end
@@ -269,17 +299,19 @@ function M.click(s : Session, w : World) : {Request}
 	local reqs : {Request} = {}
 	if s.phase == "from" then
 		s.from, s.phase = e, "to"
-		s.log(string.format("tool: start at node %d (%.4f, %.4f, %.2f) heading %.6f deg (%.9f, %.9f)", e.node, e.x, e.y, e.z,
-			math.deg(atan2(e.dy, e.dx)), e.dx, e.dy))
+		s.log("tool: start at " .. describe(e))
 	else
-		s.to, s.phase = e, "done"
-		local how : string
-		s.edit, how = edits.new(s.from as ends.End, e as ends.End)
-		s.log("tool: laid as " .. tostring(how))
+		local edit, how = edits.new(s.from, e)
+		if edit == nil then
+			s.hoverMsg = "Cannot end the track here: " .. how .. "."
+			s.log("tool: cannot end at " .. describe(e) .. ": " .. how)
+			return {}
+		end
+		s.to, s.phase, s.edit = e, "done", edit
+		s.log("tool: laid as " .. how)
 		s.mode = s.mode or "horizontal"
 		reqs[1] = "openMode"
-		s.log(string.format("tool: end at node %d (%.4f, %.4f, %.2f) heading %.6f deg (%.9f, %.9f)", e.node, e.x, e.y, e.z,
-			math.deg(atan2(e.dy, e.dx)), e.dx, e.dy))
+		s.log("tool: end at " .. describe(e))
 	end
 	s.hover, s.mouseX = nil, nil
 	return reqs
@@ -386,7 +418,7 @@ local function release(s : Session) : {Request}
 	local h = s.drag
 	s.drag = nil
 	if e ~= nil then
-		if h.kind == "pi" then
+		if h.kind == "pi" or h.kind == "end" then
 			local p = edits.polyline(e)[h.i]
 			s.log(string.format("edit: %s at (%.1f, %.1f)", M.handleName(h), p.x, p.y))
 		else
@@ -426,6 +458,17 @@ local function remove(s : Session, w : World) : boolean
 	return true
 end
 
+-- The end a ground end dragged to the mouse becomes: the ground there (not yet track there).
+local function endUnder(w : World) : End
+	return ends.groundEnd(w.terrX, w.terrY, w.terrZ)
+end
+
+-- A ground end dragged: its edit's end moves, and so does the picked end the ghost is made from.
+local function dragEnd(s : Session, w : World, i : integer)
+	if w.terrZ == nil or not edits.moveEnd(s.edit, i, endUnder(w)) then return end
+	s.from, s.to = edits.ends(s.edit)
+end
+
 -- While dragging: move what is grabbed to the mouse.
 local function dragTick(s : Session, w : World)
 	local e = s.edit
@@ -451,6 +494,7 @@ local function dragTick(s : Session, w : World)
 	local h, x, y = s.drag, w.terrX, w.terrY
 	if h == nil or x == nil then return end
 	if h.kind == "pi" then edits.movePi(e, h.i, x, y)
+	elseif h.kind == "end" then dragEnd(s, w, h.i)
 	else edits.dragBracket(e, h.i, h.kind == "entry", x, y) end
 end
 
@@ -514,9 +558,8 @@ end
 -- before it, so a "back" within RIGHT_TICKS of a right-click is that click. The game sends "back"
 -- only for a click, not after a right-drag of the camera (and the tool never sees the right press),
 -- so that "back" is the click. While editing, it removes the turn under the mouse and only Esc
--- steps back. While picking ends, right-click steps back and Esc closes the tool (as in Track
--- Connector). One input acts once, however many times its "back" arrives (selector, input action,
--- onBack).
+-- steps back. After the first click, either drops the start; before it, Esc closes the tool. One
+-- input acts once, however many times its "back" arrives (selector, input action, onBack).
 local function rightRecent(s : Session) : boolean
 	return s.rightTick ~= nil and s.ticks - s.rightTick <= M.RIGHT_TICKS
 end
@@ -527,11 +570,11 @@ end
 -- Is a "back" now the tool's own (else it closes the tool, or the confirm window takes it)?
 function M.backIsOurs(s : Session) : boolean
 	if s.confirmOpen then return false end -- (the window takes it)
-	return backRecent(s) or (M.canGoBack(s) and (rightRecent(s) or s.phase == "done"))
+	return backRecent(s) or M.canGoBack(s)
 end
 
 -- The "back" input: Esc steps back; a right-click removes the turn under it while editing, and
--- steps back while picking ends.
+-- else steps back.
 function M.back(s : Session, w : World) : {Request}
 	if backRecent(s) or not M.canGoBack(s) then return {} end
 	s.backTick = s.ticks
@@ -578,15 +621,21 @@ function M.mouse(s : Session, w : World, button : integer, kind : MouseKind, y :
 	return true, M.click(s, w)
 end
 
--- The controls for what is under the mouse while editing, as one line for the tooltip; nil while
--- dragging (or not editing). Read off the same hit a press and a right-click act on (press, remove).
+-- The controls for what is under the mouse, as one line for the tooltip: while picking, the click
+-- on the end the mouse snaps to; while editing, what the handle there does. nil while dragging, or
+-- while picking over no end. Read off the same hit a press and a right-click act on (press, remove).
 function M.hint(s : Session) : string
-	if s.phase ~= "done" or s.edit == nil or M.dragging(s) then return nil end
+	if s.phase ~= "done" then
+		if s.hover == nil then return nil end
+		return s.phase == "from" and "Click: start here" or "Click: end here"
+	end
+	if s.edit == nil or M.dragging(s) then return nil end
 	local h = s.hit
 	if h == nil then return "Click: build · Esc: back" end
 	if h.kind == "point" then return "Click: select · Drag: slide · Shift+drag: height · Right-click: remove" end
 	if h.kind == "track" then return "Click: add point" end
 	if h.kind == "leg" then return "Click: add turn" end
+	if h.kind == "end" then return "Drag: move the " .. M.handleName(h) end
 	if h.kind == "pi" then
 		if h.mobility == "fixed" then return "Fixed until another turn is added" end
 		if h.mobility == "ray" then return "Drag: slide along the end" end
@@ -595,17 +644,43 @@ function M.hint(s : Session) : string
 	return "Drag: curve size" -- (a bracket)
 end
 
+-- The cursor: while picking, on the end the mouse snaps to; while editing, on the ground end, turn
+-- or elevation point under the mouse or dragged (where it is now). nil on anything else (a
+-- bracket, a leg, the track, nothing): those have gizmos of their own.
+function M.cursor(s : Session) : Cursor
+	if s.phase ~= "done" then
+		local h = s.hover
+		if h == nil then return nil end
+		return { x = h.x, y = h.y, z = h.z, state = h.kind == "track" and "trackEnd" or "ground" }
+	end
+	local e = s.edit
+	if e == nil then return nil end
+	local state : CursorState = M.dragging(s) and "dragging" or "handle"
+	local hit = s.hit
+	local onPoint = s.drag == nil and hit ~= nil and hit.kind == "point"
+	if s.dragEl ~= nil or onPoint then
+		local pt = edits.points(e)[s.dragEl ~= nil and s.dragEl.i or hit.i]
+		if pt == nil then return nil end
+		return { x = pt.x, y = pt.y, state = state }
+	end
+	local handle = s.drag or hit
+	if handle == nil or (handle.kind ~= "pi" and handle.kind ~= "end") then return nil end
+	local p = edits.polyline(e)[handle.i]
+	return { x = p.x, y = p.y, state = state }
+end
+
 -- Every 50 ms while the tool is open: a picked end that is gone undoes its pick; while editing,
--- move what is dragged and find what is under the mouse; while picking, snap to the end there.
+-- move what is dragged and find what is under the mouse; while picking, snap to the end there
+-- (so after the first click the ghost follows the mouse).
 function M.tick(s : Session, w : World) : {Request}
 	s.ticks = s.ticks + 1
 	s.grab = w.grab or s.grab or 10.0
 	local reqs : {Request} = {}
-	if s.from ~= nil and not w.endFree(s.from.node) then
+	if s.from ~= nil and not w.endThere(s.from) then
 		s.log("tool: the start end is gone")
 		M.reset(s)
 		reqs = { "closeConfirm", "closeMode", "restart" }
-	elseif s.to ~= nil and not w.endFree(s.to.node) then
+	elseif s.to ~= nil and not w.endThere(s.to) then
 		s.log("tool: the end is gone")
 		leaveEditing(s)
 		reqs = { "closeConfirm", "closeMode" }
@@ -619,7 +694,7 @@ function M.tick(s : Session, w : World) : {Request}
 		local moved = x == nil or s.mouseX == nil or math.abs(x - s.mouseX) + math.abs(y - s.mouseY) > 1.0
 		if moved or s.hover == nil then
 			s.mouseX, s.mouseY = x, y
-			s.hover, s.hoverMsg = w.snap(x, y, w.hovered, s.phase == "to" and s.from.node or nil)
+			s.hover, s.hoverMsg = w.snap(x, y, w.terrZ, w.hovered, s.phase == "to" and s.from.node or nil)
 		end
 	end
 	return reqs

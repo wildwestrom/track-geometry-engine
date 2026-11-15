@@ -1,13 +1,19 @@
 -- The alignment being edited between two picked ends: its turns (PIs; the first and last sit on the
 -- ends), each with the curve size (tangent budget) the player set by dragging a bracket. The edits:
---   move a turn   : free turns go anywhere; the turn next to an end only slides along that end's
---                   ray, so the new track always leaves and arrives along the ends' headings. A turn
---                   next to both ends (the corner layout) cannot move until another is added.
---   add a turn    : on a leg, at the point nearest the mouse. On the straight layout (no turns) it
---                   adds three, so the middle one is free to move. On the corner layout it splits
---                   the leg in place: both turns then slide on their rays and the track does not
---                   move (unless the turn lands inside the curve, which then shrinks to fit).
+--   move a turn   : free turns go anywhere; the turn next to an end with a heading (a track end)
+--                   only slides along that end's ray, so the new track always leaves and arrives
+--                   along the ends' headings. A turn next to two such ends (the corner layout)
+--                   cannot move until another is added. A ground end holds no turn.
+--   add a turn    : on a leg, at the point nearest the mouse. On the straight layout between two
+--                   track ends it adds three, so the middle one is free to move (between two ground
+--                   ends, one, free already). On the corner layout it splits the leg in place:
+--                   both turns then slide on their rays and the track does not move (unless the
+--                   turn lands inside the curve, which then shrinks to fit).
 --   remove a turn : free turns only (removing one next to an end would kink the join).
+--   move an end   : a ground end only, anywhere (at least MIN_GAP from its neighbouring turn);
+--                   the turns stay, so the turn next to it still slides on the other end's ray,
+--                   and the curve sizes stay with their turns. Other kinds of end stay. It takes
+--                   the end it is dropped on, so a drop that changes its kind is one call.
 --   resize a curve: drag the bracket where it starts or ends; sets that turn's curve size, up to
 --                   the room the neighbouring curves leave (tg_geometry.cornerLayouts).
 -- And the vertical profile (tg_profile) through elevation points between the ends, each kept as a
@@ -89,6 +95,7 @@ local record Edit
 end
 
 local enum HitKind
+	"end" -- end i (1 or the last), a ground end: it can be dragged
 	"pi" -- a turn
 	"entry" -- the bracket where turn i's curve starts
 	"exit" -- ...or ends
@@ -101,7 +108,7 @@ end
 local record Hit
 	kind : HitKind
 	i : integer
-	x : number -- turns and brackets: where they are
+	x : number -- turns, ends and brackets: where they are
 	y : number
 	mobility : string -- turns only: "free", "ray" or "fixed"
 	s : number -- elevation points and the track: the chainage (m)
@@ -152,6 +159,9 @@ local record EditMod
 	insertOnLeg : function(e : Edit, leg : integer, x : number, y : number) : integer, string
 	removePi : function(e : Edit, i : integer) : boolean, string
 	dragBracket : function(e : Edit, i : integer, isEntry : boolean, x : number, y : number) : boolean
+	ends : function(e : Edit) : ends.End, ends.End
+	draggableEnd : function(e : Edit, i : integer) : boolean
+	moveEnd : function(e : Edit, i : integer, to : ends.End) : boolean
 	-- the path
 	path : function(e : Edit) : {geometry.Segment}
 	nodes : function(e : Edit) : {alignment.Sample}
@@ -230,12 +240,14 @@ function M.corners(e : Edit) : {integer : geometry.CornerLayout}
 	return geometry.cornerLayouts(pts, e.dp, budgets)
 end
 
--- "end" (the picked ends), "fixed" (next to both ends), "ray" (next to one end) or "free".
+-- "end" (the picked ends), "fixed" (next to two ends with headings), "ray" (next to one) or
+-- "free".
 function M.mobility(e : Edit, i : integer) : string
 	local n = #e.turns
 	if i <= 1 or i >= n then return "end" end
-	if i == 2 and i == n - 1 then return "fixed" end
-	if i == 2 or i == n - 1 then return "ray" end
+	local byA, byB = i == 2 and ends.hasHeading(e.a), i == n - 1 and ends.hasHeading(e.b)
+	if byA and byB then return "fixed" end
+	if byA or byB then return "ray" end
 	return "free"
 end
 
@@ -245,9 +257,10 @@ function M.turn(e : Edit, i : integer) : Hit
 	return { kind = "pi", i = i, x = p.x, y = p.y, mobility = M.mobility(e, i) }
 end
 
--- The ray a "ray" turn slides on: from the end, along its direction out of the existing track.
+-- The ray a "ray" turn slides on: from the end with a heading next to it, along its direction out
+-- of the existing track.
 local function rayOf(e : Edit, i : integer) : ends.End
-	if i == 2 then return e.a end
+	if i == 2 and ends.hasHeading(e.a) then return e.a end
 	return e.b
 end
 
@@ -285,14 +298,15 @@ function M.insertOnLeg(e : Edit, leg : integer, x : number, y : number) : intege
 	local p, q = e.turns[leg].pos, e.turns[leg + 1].pos
 	local lx, ly = q.x - p.x, q.y - p.y
 	local len = math.sqrt(lx * lx + ly * ly)
-	local fits = n == 2 and 4 * M.MIN_GAP or 2 * M.MIN_GAP
+	local straightBetweenTrackEnds = n == 2 and ends.hasHeading(e.a) and ends.hasHeading(e.b)
+	local fits = straightBetweenTrackEnds and 4 * M.MIN_GAP or 2 * M.MIN_GAP
 	if len < fits then return nil, "the leg is too short" end
 	local ux, uy = lx / len, ly / len
 	local lo, hi = M.MIN_GAP, len - M.MIN_GAP
-	if n == 2 then lo, hi = 2 * M.MIN_GAP, len - 2 * M.MIN_GAP end
+	if straightBetweenTrackEnds then lo, hi = 2 * M.MIN_GAP, len - 2 * M.MIN_GAP end
 	local t = math.max(lo, math.min(hi, (x - p.x) * ux + (y - p.y) * uy))
 	local function at(s : number) : Turn return { pos = geometry.vec(p.x + s * ux, p.y + s * uy, 0) } end
-	if n == 2 then
+	if straightBetweenTrackEnds then
 		-- the straight layout: a turn next to each end (on the line, sliding along it; ends.LEAD out
 		-- when the room allows) and a free one
 		e.turns = { e.turns[1], at(math.min(ends.LEAD, t / 2)), at(t), at(len - math.min(ends.LEAD, (len - t) / 2)), e.turns[2] }
@@ -315,7 +329,7 @@ end
 function M.removePi(e : Edit, i : integer) : boolean, string
 	local mob = M.mobility(e, i)
 	if mob == "end" then return false, "the ends stay" end
-	if mob ~= "free" then return false, "a turn next to an end cannot be removed" end
+	if mob ~= "free" then return false, "a turn next to a track end cannot be removed" end
 	table.remove(e.turns, i)
 	bumpH(e)
 	return true, nil
@@ -338,10 +352,52 @@ function M.dragBracket(e : Edit, i : integer, isEntry : boolean, x : number, y :
 	return true
 end
 
--- The turns (not the ends) and the brackets of every curve.
+-- The end at turn index i (1 or the last), or nil.
+local function endOf(e : Edit, i : integer) : ends.End
+	if i == 1 then return e.a end
+	if i == #e.turns then return e.b end
+	return nil
+end
+
+-- The start and the end, as they are now (a ground end moves).
+function M.ends(e : Edit) : ends.End, ends.End
+	return e.a, e.b
+end
+
+-- Can end i (1 or the last) be dragged? A ground end can.
+function M.draggableEnd(e : Edit, i : integer) : boolean
+	local en = endOf(e, i)
+	return en ~= nil and en.kind == "ground"
+end
+
+-- Move end i (1 or the last), a ground end, to the end `to`. Only onto the ground for now (onto
+-- track, the turn next to it would need that end's ray). false when it cannot go there:
+-- not a ground end, onto track, within MIN_GAP of its neighbouring turn, or closer to the other
+-- end than ends too close to pick (tg_ends.initialPis).
+function M.moveEnd(e : Edit, i : integer, to : ends.End) : boolean
+	if not M.draggableEnd(e, i) or to.kind ~= "ground" then return false end
+	local q = e.turns[i == 1 and 2 or i - 1].pos
+	if d2(to.x, to.y, q.x, q.y) < M.MIN_GAP * M.MIN_GAP then return false end
+	local o = endOf(e, i == 1 and #e.turns or 1)
+	if d2(to.x, to.y, o.x, o.y) < (2 * ends.MIN_LEG) ^ 2 then return false end
+	local cur = endOf(e, i)
+	if cur.x == to.x and cur.y == to.y and cur.z == to.z then return true end
+	if i == 1 then e.a = to else e.b = to end
+	e.turns[i].pos = geometry.vec(to.x, to.y, 0)
+	bumpH(e)
+	return true
+end
+
+-- The ends that can be dragged, the turns and the brackets of every curve.
 function M.handles(e : Edit) : {Hit}
 	local hs : {Hit} = {}
 	local ls = M.corners(e)
+	for _, i in ipairs({ 1, #e.turns }) do
+		if M.draggableEnd(e, i) then
+			local p = e.turns[i].pos
+			hs[#hs + 1] = { kind = "end", i = i, x = p.x, y = p.y }
+		end
+	end
 	for i = 2, #e.turns - 1 do
 		hs[#hs + 1] = M.turn(e, i)
 		local l = ls[i]
@@ -435,9 +491,10 @@ function M.chainageOnRay(e : Edit, ray : Ray) : number, number
 	return best, bestD
 end
 
--- What is at (x, y) within r. Horizontal: a turn or a bracket, else a leg (or the track along it,
--- which leaves the legs at the curves). Vertical: an elevation point, else the track, both also up
--- at their heights along ray (the mouse's view ray), when it is given. nil: nothing.
+-- What is at (x, y) within r. Horizontal: a ground end, else a turn or a bracket, else a leg (or
+-- the track along it, which leaves the legs at the curves). Vertical: an elevation point, else the
+-- track, both also up at their heights along ray (the mouse's view ray), when it is given. nil:
+-- nothing.
 function M.hit(e : Edit, vertical : boolean, x : number, y : number, r : number, ray ?: Ray) : Hit
 	local c = sampled(e)
 	if vertical then
@@ -463,6 +520,9 @@ function M.hit(e : Edit, vertical : boolean, x : number, y : number, r : number,
 	local bestD = r * r
 	for _, h in ipairs(M.handles(e)) do
 		local d = d2(x, y, h.x, h.y)
+		-- (a ground end a hair ahead: an end curve that fills its leg has its bracket on the end,
+		-- and its other bracket still resizes it)
+		if h.kind == "end" then d = d - 1e-6 end
 		if d <= bestD then best, bestD = h, d end
 	end
 	if best ~= nil then return best end
@@ -503,7 +563,8 @@ local function closeness(els : {Elevation}, len : number) : {integer : Closeness
 end
 
 -- The profile through the elevation points els that are not too close: from end a at its track's
--- grade to end b (the path arrives against b's direction, so its grade there is the opposite).
+-- grade to end b (the path arrives against b's direction, so its grade there is the opposite). A
+-- ground end has no grade: the profile picks its own there (tg_profile.solve).
 local function profileWith(e : Edit, els : {Elevation}, len : number) : profiles.Profile, string
 	local close = closeness(els, len)
 	local pts : {profiles.Point} = { { s = 0, z = e.a.z } }
@@ -511,7 +572,7 @@ local function profileWith(e : Edit, els : {Elevation}, len : number) : profiles
 		if close[k] == nil then pts[#pts + 1] = { s = el.f * len, z = el.z } end
 	end
 	pts[#pts + 1] = { s = len, z = e.b.z }
-	return profiles.solve(pts, e.a.grade, -e.b.grade)
+	return profiles.solve(pts, e.a.grade, e.b.grade ~= nil and -e.b.grade or nil)
 end
 
 -- e's points too close (kept until the next change).

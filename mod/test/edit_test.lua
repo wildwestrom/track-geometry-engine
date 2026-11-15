@@ -218,6 +218,97 @@ local th = hitAt(c, nd.x, nd.y, off * 0.8)
 check(off > 5 and th ~= nil and th.kind == "leg" and th.i ~= nil and math.abs(th.s - nd.s) < 1e-6,
 	"the track where it leaves the legs is hit, on the nearest leg: " .. string.format("%.1f m off", off))
 
+-- Ground ends: no heading of their own, so a turn next to one is held only by the other end.
+local function gnd(x, y, z) return { kind = "ground", x = x, y = y, z = z or 0 } end
+-- The path starts and ends on the ends, along the heading of each end that has one.
+local function keepsHeadings(e, what)
+	local nodes = E.nodes(e)
+	local first, last = nodes[1], nodes[#nodes]
+	local ok = math.abs(first.x - e.a.x) + math.abs(first.y - e.a.y) < 1e-6
+		and math.abs(last.x - e.b.x) + math.abs(last.y - e.b.y) < 1e-6
+	if e.a.dx ~= nil then ok = ok and angleDiff(first.heading, atan2(e.a.dy, e.a.dx)) < 1e-6 end
+	if e.b.dx ~= nil then ok = ok and angleDiff(last.heading, atan2(-e.b.dy, -e.b.dx)) < 1e-6 end
+	check(ok, what .. ": on both ends, along the track end's heading")
+end
+local tg = assert(E.new(endAt(0, 0, 0), gnd(300, 200)))
+check(E.turnCount(tg) == 1 and E.mobility(tg, 2) == "ray", "track to ground: one turn, sliding on the track end's ray")
+local leg1, leg2 = dist(E.polyline(tg)[1], E.polyline(tg)[2]), dist(E.polyline(tg)[2], E.polyline(tg)[3])
+check(math.abs(E.corners(tg)[2].budget - leg1) < 1e-6 and math.abs(leg1 - leg2) < 1e-6,
+	"track to ground: the curve takes all of both legs")
+check(E.movePi(tg, 2, 500, 80) and math.abs(E.polyline(tg)[2].y) < 1e-9 and math.abs(E.polyline(tg)[2].x - 500) < 1e-9,
+	"track to ground: the turn slides along the ray")
+keepsHeadings(tg, "track to ground, turn slid")
+noOverlap(tg, "track to ground, turn slid")
+check(not E.removePi(tg, 2), "track to ground: the turn next to the track end cannot be removed")
+local gi = E.insertOnLeg(tg, 2, 400, 150)
+check(gi == 3 and E.mobility(tg, 2) == "ray" and E.mobility(tg, 3) == "free",
+	"track to ground: a turn added next to the ground end is free")
+check(E.movePi(tg, 3, 380, 260) and math.abs(E.polyline(tg)[3].x - 380) + math.abs(E.polyline(tg)[3].y - 260) < 1e-9,
+	"track to ground: the turn next to the ground end goes anywhere")
+keepsHeadings(tg, "track to ground, free turn moved")
+noOverlap(tg, "track to ground, free turn moved")
+check(E.removePi(tg, 3) and E.turnCount(tg) == 1, "track to ground: and can be removed")
+
+local gt = assert(E.new(gnd(200, 400), endAt(500, 100, 90)))
+check(E.turnCount(gt) == 1 and E.mobility(gt, 2) == "ray", "ground to track: one turn, sliding on the track end's ray")
+check(E.movePi(gt, 2, 450, 300) and math.abs(E.polyline(gt)[2].x - 500) < 1e-9 and math.abs(E.polyline(gt)[2].y - 300) < 1e-9,
+	"ground to track: the turn slides along the end's ray")
+keepsHeadings(gt, "ground to track, turn slid")
+
+local gg = assert(E.new(gnd(0, 0), gnd(600, 0)))
+check(E.turnCount(gg) == 0, "ground to ground: no turns")
+gi = E.insertOnLeg(gg, 1, 250, 30)
+check(gi == 2 and E.turnCount(gg) == 1 and E.mobility(gg, 2) == "free" and math.abs(E.polyline(gg)[2].x - 250) < 1e-9,
+	"ground to ground: adding a turn adds one, free, on the leg")
+check(E.movePi(gg, 2, 300, 150) and E.removePi(gg, 2) and E.turnCount(gg) == 0, "ground to ground: it moves and is removed")
+
+-- dragging a ground end: a handle in horizontal mode; the alignment follows it
+local function endHandles(e)
+	local out = {}
+	for _, h in ipairs(E.handles(e)) do if h.kind == "end" then out[#out + 1] = h.i end end
+	return out
+end
+local dg = assert(E.new(endAt(0, 0, 0), gnd(300, 200)))
+local eh = endHandles(dg)
+check(#eh == 1 and eh[1] == 3, "drag end: only the ground end is a handle")
+local eHit = E.hit(dg, false, 302, 199, 10)
+check(eHit ~= nil and eHit.kind == "end" and eHit.i == 3, "drag end: a press near the ground end hits it")
+check(E.dragBracket(dg, 2, true, E.polyline(dg)[2].x - 120, 0), "drag end: set the curve's size first")
+local set = E.budget(dg, 2)
+local rayX, rev0 = E.polyline(dg)[2].x, dg.rev
+check(E.moveEnd(dg, 3, gnd(450, 380, 7)) and dg.b.x == 450 and dg.b.y == 380 and dg.b.z == 7 and dg.b.kind == "ground"
+	and dg.rev > rev0, "drag end: the ground end moves, with its height")
+local pd = E.polyline(dg)
+check(math.abs(pd[3].x - 450) + math.abs(pd[3].y - 380) < 1e-9 and pd[2].x == rayX and pd[2].y == 0
+	and E.mobility(dg, 2) == "ray" and E.budget(dg, 2) == set, "drag end: the turn stays on its ray, with its curve size")
+keepsHeadings(dg, "drag end")
+noOverlap(dg, "drag end")
+check(E.moveEnd(dg, 3, gnd(rayX + 30, 40)) and E.budget(dg, 2) == set, "drag end: close to the turn, the curve size holds")
+noOverlap(dg, "drag end, close to the turn")
+keepsHeadings(dg, "drag end, close to the turn")
+check(not E.moveEnd(dg, 3, gnd(rayX + 2, 1)) and dg.b.x == rayX + 30, "drag end: not onto its neighbouring turn")
+check(not E.moveEnd(dg, 1, gnd(-50, -50)) and dg.a.x == 0, "drag end: a track end stays")
+check(not E.moveEnd(dg, 3, endAt(500, 300, 90)) and dg.b.kind == "ground", "drag end: not onto track yet")
+local dgg = assert(E.new(gnd(0, 0), gnd(600, 0)))
+check(#endHandles(dgg) == 2 and E.moveEnd(dgg, 1, gnd(-100, 200)) and dgg.a.x == -100 and E.polyline(dgg)[1].y == 200,
+	"drag end: ground to ground, both ends move")
+check(not E.moveEnd(dgg, 1, gnd(580, 10)) and dgg.a.x == -100, "drag end: not onto the other end")
+local fi = E.insertOnLeg(dgg, 1, 250, 100)
+check(E.movePi(dgg, fi, 250, 300), "drag end: bend the free turn")
+check(E.dragBracket(dgg, fi, true, E.polyline(dgg)[fi].x - 60, E.polyline(dgg)[fi].y), "drag end: size a free turn's curve")
+local fset = E.budget(dgg, fi)
+check(E.moveEnd(dgg, 3, gnd(700, 300)) and E.budget(dgg, fi) == fset, "drag end: a free turn's curve size holds")
+noOverlap(dgg, "drag end, free turn")
+local eh2 = E.hit(dg, false, E.polyline(dg)[2].x, E.polyline(dg)[2].y, 10)
+check(eh2 ~= nil and eh2.kind == "pi", "drag end: a press on the turn next to a ground end grabs the turn")
+
+-- a ground end's height is where the profile starts (or ends)
+local gz = assert(E.new(gnd(0, 0, 12), { kind = "track", x = 600, y = 0, dx = -1, dy = 0, z = 2, grade = 0 }))
+local gza, gzb = E.endHeights(gz)
+local gp = E.profile(gz)
+check(gza == 12 and gzb == 2 and gp ~= nil and math.abs(require("westrom_track_geometry::/track_geometry/tg_profile.script.tl")
+	.heightAt(gp, 0) - 12) < 1e-9, "a ground end: the profile starts at its height")
+
 -- The vertical profile: elevation points between the ends.
 local function vend(x, y, deg, z, grade)
 	local e = endAt(x, y, deg)

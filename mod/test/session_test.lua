@@ -6,6 +6,7 @@ tl.loader()
 package.path = ".tlpath/?.tl;" .. package.path
 local S = require("westrom_track_geometry::/track_geometry/tg_session.script.tl")
 local E = require("westrom_track_geometry::/track_geometry/tg_edit.script.tl")
+local Ends = require("westrom_track_geometry::/track_geometry/tg_ends.script.tl")
 
 local failures = 0
 local LIMIT = 0.085 -- the made-up track type's grade limit
@@ -15,24 +16,27 @@ local function check(ok, what)
 end
 
 -- Two free ends: the new track leaves a going +x and arrives at b going +y.
-local endA = { node = 1, x = 0, y = 0, dx = 1, dy = 0, z = 0, grade = 0 }
-local endB = { node = 2, x = 1500, y = 800, dx = 0, dy = -1, z = 0, grade = 0 }
+local endA = Ends.trackEnd(1, 0, 0, 0, 1, 0, 0)
+local endB = Ends.trackEnd(2, 1500, 800, 0, 0, -1, 0)
 
--- A tool on a made-up world: the session, the world it is shown, and every request it made.
+-- A tool on a made-up world: the session, the world it is shown, and every request it made. The
+-- free ends are a and b while t.free says so; t.onTrack puts the mouse over a track piece with no
+-- free end; the ground is at height t.groundZ.
 local function newTool(a, b)
 	a, b = a or endA, b or endB
-	local t = { live = true, free = { [1] = true, [2] = true }, shift = false, asked = {} }
+	local t = { live = true, free = { [1] = true, [2] = true }, shift = false, asked = {}, groundZ = 0 }
 	t.w = {
 		grab = 10, cameraDist = 1000,
 		shift = function() return t.shift end,
 		gradeLimit = function() return LIMIT end,
-		snap = function(x, y, _, exclude)
+		snap = function(x, y, z, _, exclude)
+			local near = {}
 			for _, e in ipairs({ a, b }) do
-				if x ~= nil and e.node ~= exclude and t.free[e.node] and (e.x - x) ^ 2 + (e.y - y) ^ 2 <= 40 ^ 2 then return e end
+				if x ~= nil and t.free[e.node] then near[#near + 1] = e end -- (over no ground: none near)
 			end
-			return nil, "Point at the end of a track."
+			return Ends.snap(near, t.onTrack and { [98] = true, [99] = true } or {}, x, y, z, exclude)
 		end,
-		endFree = function(n) return t.free[n] == true end,
+		endThere = function(e) return e.node == nil or t.free[e.node] == true end,
 	}
 	t.s = S.new(function() end, function() return t.live end)
 	return t
@@ -53,7 +57,7 @@ local function tick(t, n)
 	for _ = 1, n or 1 do note(t, S.tick(t.s, t.w)) end
 end
 local function moveTo(t, x, y)
-	t.w.terrX, t.w.terrY = x, y
+	t.w.terrX, t.w.terrY, t.w.terrZ = x, y, x ~= nil and t.groundZ or nil
 	tick(t)
 end
 local function mouse(t, button, kind, y)
@@ -89,16 +93,20 @@ local FAR_X, FAR_Y = 200, 3000
 
 ------------------------------------------------------------------ picking the ends
 local t = newTool()
+t.onTrack = true
 moveTo(t, 700, 700)
-check(t.s.phase == "from" and t.s.hover == nil and t.s.hoverMsg ~= nil, "picking: nothing near, nothing snapped, and why")
+check(t.s.phase == "from" and t.s.hover == nil and t.s.hoverMsg ~= nil, "picking: over track with no free end, nothing, and why")
 click(t)
 check(t.s.phase == "from" and t.s.from == nil, "picking: a click on nothing picks nothing")
+t.onTrack = nil
+moveTo(t, nil, nil)
+check(t.s.hover == nil and t.s.hoverMsg ~= nil, "picking: over no ground, nothing, and why")
 moveTo(t, 5, 5)
 check(t.s.hover == endA, "picking: the mouse snaps to the end near it")
 click(t)
 check(t.s.phase == "to" and t.s.from == endA and t.s.hover == nil and asked(t, "openMode") == 0, "picking: a click picks the start")
 moveTo(t, 5, 5)
-check(t.s.hover == nil, "picking: the start is not offered as the end")
+check(t.s.hover ~= endA and t.s.hover.kind == "ground", "picking: the start is not offered as the end")
 moveTo(t, 1495, 795); click(t)
 check(t.s.phase == "done" and t.s.to == endB and t.s.edit ~= nil and t.s.mode == "horizontal" and asked(t, "openMode") == 1,
 	"picking: the second click picks the end, starts the edit and opens the mode window once")
@@ -116,6 +124,74 @@ click(t)
 check(asked(t, "askBuild") == 1, "build: a later click asks again")
 S.refuse(t.s, "Cannot build: the game is still checking it.")
 check(t.s.editMsg ~= nil, "build: a refusal is kept for the tooltip")
+
+------------------------------------------------------------------ ground ends
+-- the ground: either click may land on open ground, a ground end at the terrain's height there
+t = newTool()
+t.groundZ = 12
+moveTo(t, 700, 700)
+local h = t.s.hover
+check(h ~= nil and h.kind == "ground" and h.x == 700 and h.y == 700 and h.z == 12 and t.s.hoverMsg == nil,
+	"ground: off track, the mouse is on a ground end at the terrain's height")
+click(t)
+check(t.s.phase == "to" and t.s.from == h, "ground: a click there starts the track")
+tick(t, 5)
+check(t.s.phase == "to" and t.s.from == h, "ground: a ground start stays (there is no node to lose)")
+moveTo(t, 900, 700)
+local h1 = t.s.hover
+moveTo(t, 900.5, 700)
+check(t.s.hover == h1, "ground: a move under a metre keeps the end the mouse is on")
+moveTo(t, 950, 720)
+check(t.s.hover ~= h1 and t.s.hover.kind == "ground" and t.s.hover.x == 950, "ground: further, the end follows the mouse")
+moveTo(t, 720, 710)
+click(t)
+check(t.s.phase == "to" and t.s.edit == nil and asked(t, "openMode") == 0 and t.s.hoverMsg ~= nil
+	and t.s.hoverMsg:find("too close") ~= nil, "ground: ends under 40 m apart are refused, and why: " .. tostring(t.s.hoverMsg))
+moveTo(t, 950, 720)
+check(t.s.hoverMsg == nil, "ground: moving on, the refusal is gone")
+click(t)
+check(t.s.phase == "done" and t.s.to.kind == "ground" and t.s.edit ~= nil and E.turnCount(t.s.edit) == 0
+	and asked(t, "openMode") == 1, "ground: the second click enters editing, ground to ground straight")
+-- track to ground, ground to track
+t = editing(endA, Ends.groundEnd(300, 200, 0))
+check(t.s.phase == "done" and t.s.from == endA and t.s.to.kind == "ground" and E.turnCount(t.s.edit) == 1
+	and E.mobility(t.s.edit, 2) == "ray", "ground: track to ground, one turn sliding on the track end's ray")
+t = newTool()
+moveTo(t, 1200, 300); click(t)
+moveTo(t, 1495, 795); click(t)
+check(t.s.phase == "done" and t.s.from.kind == "ground" and t.s.to == endB and E.turnCount(t.s.edit) == 1,
+	"ground: ground to track, one turn")
+-- right-click or Esc after the first click drops the start; before it, Esc is not the tool's
+t = newTool()
+moveTo(t, 700, 700)
+check(not S.backIsOurs(t.s), "ground: before the first click, Esc is not the tool's (it closes the tool)")
+click(t)
+check(S.backIsOurs(t.s), "ground: after the first click, Esc is the tool's")
+esc(t)
+check(t.s.phase == "from" and t.s.from == nil, "ground: Esc drops the start")
+tick(t, S.RIGHT_TICKS + 1)
+moveTo(t, 700, 700); click(t)
+rightClick(t)
+check(t.s.phase == "from" and t.s.from == nil, "ground: so does a right-click")
+
+------------------------------------------------------------------ dragging a ground end
+t = editing(endA, Ends.groundEnd(300, 200, 0))
+moveTo(t, 301, 201)
+check(t.s.hit ~= nil and t.s.hit.kind == "end" and S.hint(t.s) ~= nil and S.hint(t.s):find("Drag") ~= nil,
+	"drag end: the hint names the drag")
+check(press(t) == true and t.s.drag ~= nil and t.s.drag.kind == "end", "drag end: a press on a ground end grabs it")
+t.groundZ = 6
+moveTo(t, 420, 350)
+check(t.s.to.kind == "ground" and t.s.to.x == 420 and t.s.to.y == 350 and t.s.to.z == 6 and t.s.edit.b == t.s.to
+	and t.s.from == endA, "drag end: the end follows the mouse, at the ground's height")
+letGo(t)
+check(t.s.drag == nil and t.s.to.x == 420 and asked(t, "ghostNow") == 1 and asked(t, "askBuild") == 0,
+	"drag end: the drop leaves it there, and does not ask to build")
+moveTo(t, 3, 2)
+check(t.s.hit == nil or t.s.hit.kind ~= "end", "drag end: a track end is no handle")
+press(t)
+check(t.s.drag == nil or t.s.drag.kind ~= "end", "drag end: a press on a track end does not grab it")
+letGo(t)
 
 ------------------------------------------------------------------ editing the horizontal alignment
 t = editing()
@@ -150,16 +226,14 @@ tick(t, S.RIGHT_TICKS + 1)
 rightClick(t)
 check(E.turnCount(e) == turns and t.s.phase == "done", "back: a right-click on nothing does nothing")
 
--- Esc steps back, once per input; while picking, only a right-click is the tool's
+-- Esc steps back, once per input, while editing and while picking the end
 tick(t, S.RIGHT_TICKS + 1)
 check(S.backIsOurs(t.s), "back: while editing, Esc is the tool's")
 esc(t); esc(t); esc(t)
 check(t.s.phase == "to" and t.s.edit == nil and t.s.to == nil and t.s.from == endA and asked(t, "closeMode") == 1,
 	"back: Esc leaves the edit, once, however often it arrives, and closes the mode window")
 tick(t, S.RIGHT_TICKS + 1)
-check(not S.backIsOurs(t.s), "back: while picking the end, Esc is not the tool's (it closes the tool)")
-mouse(t, 2, "released")
-check(S.backIsOurs(t.s), "back: while picking the end, a right-click is the tool's")
+check(S.backIsOurs(t.s), "back: while picking the end, Esc is the tool's")
 esc(t)
 check(t.s.phase == "from" and t.s.from == nil, "back: it steps back to picking the start")
 tick(t, S.RIGHT_TICKS + 1)
@@ -520,6 +594,62 @@ rightClick(t)
 check(says(hint, "Right-click: remove") and #E.points(e) == 0, "hint: a point's right-click removes it")
 moveTo(t, FAR_X, FAR_Y)
 check(S.hint(t.s) == "Click: build · Esc: back", "hint: over nothing (vertical)")
+
+------------------------------------------------------------------ the cursor
+-- the end under the mouse, drawn the way the game's builder draws it: where it is, and how
+t = newTool()
+moveTo(t, nil, nil)
+check(S.cursor(t.s) == nil and S.hint(t.s) == nil, "cursor: over no ground, none and no hint")
+t.groundZ = 3
+moveTo(t, 600, 400)
+local c = S.cursor(t.s)
+check(c ~= nil and c.x == 600 and c.y == 400 and c.z == 3 and c.state == "ground",
+	"cursor: before the first click, on the ground under the mouse")
+check(S.hint(t.s) == "Click: start here", "cursor: before the first click, the hint: " .. tostring(S.hint(t.s)))
+moveTo(t, endA.x + 5, endA.y + 5)
+c = S.cursor(t.s)
+check(c ~= nil and c.x == endA.x and c.y == endA.y and c.state == "trackEnd", "cursor: on a free track end, it snaps there")
+click(t)
+moveTo(t, 900, 300)
+c = S.cursor(t.s)
+check(c ~= nil and c.x == 900 and c.state == "ground" and S.hint(t.s) == "Click: end here",
+	"cursor: after the first click, it follows the mouse to the end: " .. tostring(S.hint(t.s)))
+-- while editing: on the end, turn or point under the mouse, and the ring while it is dragged
+t = editing(endA, Ends.groundEnd(300, 200, 0))
+moveTo(t, 301, 201)
+c = S.cursor(t.s)
+check(c ~= nil and c.x == t.s.to.x and c.y == t.s.to.y and c.state == "handle", "cursor: on a ground end under the mouse")
+press(t)
+moveTo(t, 420, 350)
+c = S.cursor(t.s)
+check(c ~= nil and c.x == 420 and c.y == 350 and c.state == "dragging", "cursor: dragging a ground end, it follows the end")
+letGo(t)
+moveTo(t, FAR_X, FAR_Y)
+check(S.cursor(t.s) == nil, "cursor: while editing, over nothing, none")
+t = editing()
+e = t.s.edit
+moveTo(t, onLeg(e))
+check(S.cursor(t.s) == nil, "cursor: over a leg, none (it adds a turn)")
+press(t)
+local gi = t.s.drag.i
+moveTo(t, 700, 100)
+c = S.cursor(t.s)
+check(c ~= nil and c.state == "dragging" and math.abs(c.x - E.polyline(e)[gi].x) < 1e-9
+	and math.abs(c.y - E.polyline(e)[gi].y) < 1e-9, "cursor: dragging a turn, on the turn")
+letGo(t)
+S.setMode(t.s, "vertical")
+tick(t)
+nodes = E.nodes(e)
+mid = nodes[math.floor(#nodes / 2)]
+moveTo(t, mid.x, mid.y)
+press(t)
+local on = nodes[math.floor(#nodes / 2) + 10]
+moveTo(t, on.x, on.y)
+c = S.cursor(t.s)
+local pt = E.points(e)[t.s.dragEl.i]
+check(c ~= nil and c.state == "dragging" and c.x == pt.x and c.y == pt.y and c.z == nil,
+	"cursor: dragging an elevation point, on the ground under it")
+letGo(t)
 
 ------------------------------------------------------------------ odd moments
 -- a press right after the second pick, before any tick of the edit and with no grab radius known

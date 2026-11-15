@@ -51,8 +51,6 @@ lakefile.lean, flake.nix    Build config
 
 Enter the dev shell first (Nix + direnv): `direnv allow`, or `nix develop`.
 
-This project uses Jujutsu (`jj`) for version control. Prefer `jj` over git.
-
 ```shell
 lake exe track             # build vendored raylib + Lean exe `track`, then launch the window
 lake build track           # build the `track` executable only
@@ -70,51 +68,14 @@ work. `raylibBindings` is deliberately *not* part of the default build (Lake
 resolves the Lean module graph before custom targets run); regenerate the
 bindings by hand only after bumping the vendored raylib.
 
-UI controls:
-- **F1** instructions overlay (all keybindings)
-- **F3** toggle FPS
-- **F4** toggle design-cant frame ticks
-- **F5** toggle always-on PI coordinate labels
-- **left-click** place / continue line, or grab a PI / curve end / gizmo axis
-- **endpoint click** resume building from that end
-- **drag point** move a PI on the ground plane
-- **drag X/Y/Z handle** move a PI along one world axis (Z = elevation)
-- **drag curve end** resize that corner
-- **L** cycle an interior PI through short / left-loop / right-loop winding
-- **right-click / Esc** finish or cancel active line
-- **scroll** dolly (zoom)
-- **middle-drag** orbit the camera
-- **Shift + middle-drag** pan the camera
-- **Ctrl+Z** undo
-- **Ctrl+Shift+Z** redo
-- **[ ]** switch redo branch (history tree, top-right)
-- **1 / 2** segment-type / speed view
-- Cant HUD (bottom-left): peak design / equilibrium / deficiency in mm
+UI controls: press **F1** in the app for all keybindings.
 
 ## Troubleshooting
 
-**`EGL: Failed to get EGL display: Success` / window won't open.** This is a
-glibc version skew, not a raylib or Wayland bug. Each Lean toolchain bakes a
-specific glibc in as the ELF interpreter for everything `leanc` links. If that
-glibc is *older* than the one the system Mesa driver was built against, Mesa's
-EGL vendor (`libgallium`) fails to load at runtime — it needs the symbol version
-`GLIBC_ABI_GNU2_TLS`, added in **glibc 2.41** — so EGL finds no driver and
-window creation dies with the misleading "Failed to get EGL display".
-
-Concretely: Lean `v4.30.0` bakes in glibc 2.40 (too old for Mesa ≥ 26), while
-`v4.31.0`+ bake in glibc 2.42. **The fix is to keep `lean-toolchain` at
-`v4.31.0` or newer** (this project is on `v4.32.0-rc1`); the binary then links
-against a glibc new enough for the system driver and a plain `lake exe track`
-just works. If you ever must stay on an older toolchain, the escape hatch is to
-`patchelf --set-interpreter`/`--set-rpath` the built binary at a system glibc
-≥ 2.41 (and `/run/opengl-driver/lib`), but bumping the toolchain is far cleaner.
+**`EGL: Failed to get EGL display: Success` / window won't open.** glibc skew: each Lean
+toolchain bakes in its own glibc, and Mesa ≥ 26 needs glibc ≥ 2.41 (`GLIBC_ABI_GNU2_TLS`).
+Keep `lean-toolchain` at `v4.31.0` or newer (v4.30.0 ships glibc 2.40).
 
 ## Where to look
 
-- New to the project → `TrackGeometry/Lib.lean` (barrel) then `Path.lean` / `Segment.lean`.
-- How a curve is sampled → `clothoidPoint`, `Segment.pointAt`, `AlignmentPath.pointAt`.
-- How corners become arcs → `solveCorner`, `buildPath` in `Path.lean`.
-- Design cant → `Cant.lean`; UI sampling in `UI/State.lean` (`sampleCurve`).
-- How the UI uses it → `Main.lean` frame loop + `TrackGeometry/UI/*`.
-- Need new Raylib functions? Edit `vendor/raylib/tools/rlparser/rlparser.c`, then
-  `lake build raylibBindings`.
+New to the code: start at `TrackGeometry/Lib.lean`, then `Path.lean` (`solveCorner`, `buildPath`) and `Segment.lean`.

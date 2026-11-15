@@ -34,6 +34,13 @@ local GHOST_WAIT = 20 -- ...and only once the game has checked the last one, or 
 local GRAB = 0.02 -- grab radius for handles, as a share of the camera's distance
 local LEG_STEP = 10.0 -- gizmo legs follow the ground in pieces this long (m)...
 local MAX_LEG_PIECES = 60 -- ...or this many per leg, on long legs
+local RAIL_CURSOR = 1024 -- the track builder's mouse cursor ("Rail" in the game's gui_react_util.tl)
+-- Draw the cursor (the end under the mouse) as the ProposalViewer's control point, the game
+-- builder's white dot and blue drag ring; false draws it as gizmo circles instead. A switch, as
+-- well as the fallback when making the control point fails: a control point that is made but
+-- draws nothing cannot be noticed from here.
+local VANILLA_CURSOR = true
+local DEFAULT_GRAB = 10.0 -- grab radius before the first tick knows the camera (m)
 
 -- the game runs Lua 5.2: two-argument atan is math.atan2 there
 local atan2 : function(number, number) : number = (math as {string : any}).atan2 as function(number, number) : number
@@ -44,8 +51,6 @@ local function say(msg : string)
 end
 
 ------------------------------------------------------------------ tool state
-
-local type TrackEnd = sessions.TrackEnd
 
 -- The ghost's plan (tg_plan), waiting for the game's proposal data: its curve speed limits.
 local record Pending
@@ -86,6 +91,7 @@ local record ToolState
 	vbadges : {readout.Badge} -- the profile's badges (vertical mode)
 	modeOpen : boolean -- the mode window is open
 	gizmoErr : string -- last gizmo error logged
+	cursorErr : string -- last cursor (control point) error logged
 	cost : integer
 	errors : string
 	critical : boolean -- the game refuses the ghost
@@ -165,18 +171,19 @@ end
 -- What the ghost shows now: the path from the start to the end (picked, or under the mouse), or
 -- a stub at the start or the end under the mouse. Remade only when its ends change.
 local function updateGhost()
-	local a, b : TrackEnd, TrackEnd = nil, nil
+	local a, b : ends.End, ends.End = nil, nil
 	if sess.phase == "from" then a = sess.hover
 	elseif sess.phase == "to" then a, b = sess.from, sess.hover
 	else a, b = sess.from, sess.to end
 	-- (the phase too: picking the hovered end makes it again once, which logs the path)
-	local key = sess.phase .. ":" .. (a ~= nil and tostring(a.node) or "-") .. ":" .. (b ~= nil and tostring(b.node) or "-")
+	local key = sess.phase .. ":" .. (a ~= nil and ends.key(a) or "-") .. ":" .. (b ~= nil and ends.key(b) or "-")
 	if sess.phase == "done" and sess.edit ~= nil then key = key .. ":" .. tostring(sess.edit.rev) end
 	key = key .. ":" .. trackTemplate()
 	if key == tool.ghostKey then return end
-	-- while dragging, the ghost lags behind the handles: the game's check of each ghost (cost,
-	-- collisions) is what makes a drag stutter, so a new one waits until the last is checked
-	if (sess.drag ~= nil or sess.dragEl ~= nil) and tool.ghostTick ~= nil then
+	-- while dragging (or moving the mouse to the end, after the first click), the ghost lags behind:
+	-- the game's check of each ghost (cost, collisions) is what makes a drag stutter, so a new one
+	-- waits until the last is checked
+	if (sess.drag ~= nil or sess.dragEl ~= nil or sess.phase == "to") and tool.ghostTick ~= nil then
 		local since = (sess.ticks or 0) - tool.ghostTick
 		if since < GHOST_TICKS then return end
 		if tool.ghost ~= nil and tool.dataKey ~= tool.ghostKey and since < GHOST_WAIT then return end
@@ -186,7 +193,7 @@ local function updateGhost()
 	tool.critical, tool.hasErrors, tool.dataKey = nil, nil, nil
 	tool.pending = nil
 	if a == nil or b == nil then tool.line = nil end -- (a path's line stays until the next one is read out)
-	if a == nil then return end
+	if a == nil or (b == nil and not ends.hasHeading(a)) then return end -- (no stub on the ground)
 	-- bridges and tunnels where the track is far off the ground: their types first (without them,
 	-- or when the ground cannot be read, the plan has none)
 	local tt = trackType()
@@ -194,13 +201,13 @@ local function updateGhost()
 	local bridgeType, tunnelType = tt.bridgeType, tt.tunnelType
 	if tt.structuresWhy ~= nil then ground, water = nil, nil end -- (tg_world logged why)
 	local plan, pwhy : plans.Plan, string
-	if b == nil then plan = plans.stub(a as ends.End, ground, water)
-	else plan, pwhy = plans.path(a as ends.End, b as ends.End, sess.phase == "done" and sess.edit or nil, ground, water) end
+	if b == nil then plan = plans.stub(a, ground, water)
+	else plan, pwhy = plans.path(a, b, sess.phase == "done" and sess.edit or nil, ground, water) end
 	if plan == nil then tool.ghostWhy = pwhy; tool.line = nil; return end
 	if plan.note ~= nil then say("ghost: no structures: " .. plan.note) end
 	local nodes, grades = plan.built.nodes, plan.grades
 	local ok, p, why = pcall(proposals.make, nodes, { template = trackTemplate(), z = plan.built.z, grades = grades,
-		startNode = a.node, endNode = b ~= nil and b.node or nil,
+		from = a, to = b,
 		kinds = plan.kinds, bridgeType = bridgeType, tunnelType = tunnelType })
 	if not ok then tool.ghostWhy = "error: " .. tostring(p); say("ghost: " .. tool.ghostWhy); return end
 	if p == nil then tool.ghostWhy = why; return end
@@ -209,10 +216,12 @@ local function updateGhost()
 		tool.pending = { key = key, plan = plan }
 		tool.ghostInfo = plan.structures ~= nil and (plan.info .. "; " .. plan.structures) or plan.info
 		if sess.phase == "done" and sess.drag == nil then
-			say(string.format("tool: path %s: from node %d (%.1f, %.1f) leaving %.2f deg, to node %d (%.1f, %.1f) arriving %.2f deg, %d pieces, grade %+.1f ‰ to %+.1f ‰",
-				plan.info, a.node, a.x, a.y, math.deg(nodes[1].heading), b.node, b.x, b.y, math.deg(nodes[#nodes].heading), #nodes - 1, grades[1] * 1000, grades[#grades] * 1000))
-			say(string.format("tool: end headings: start %.2f deg, end %.2f deg (the ends' own directions)",
-				math.deg(atan2(a.dy, a.dx)), math.deg(atan2(-b.dy, -b.dx))))
+			say(string.format("tool: path %s: from %s (%.1f, %.1f) leaving %.2f deg, to %s (%.1f, %.1f) arriving %.2f deg, %d pieces, grade %+.1f ‰ to %+.1f ‰",
+				plan.info, ends.name(a), a.x, a.y, math.deg(nodes[1].heading), ends.name(b), b.x, b.y, math.deg(nodes[#nodes].heading), #nodes - 1, grades[1] * 1000, grades[#grades] * 1000))
+			local function own(e : ends.End, sign : number) : string
+				return ends.hasHeading(e) and string.format("%.2f deg", math.deg(atan2(sign * e.dy, sign * e.dx))) or "none (ground)"
+			end
+			say("tool: end headings: start " .. own(a, 1) .. ", end " .. own(b, -1) .. " (the ends' own directions)")
 		end
 	end
 end
@@ -231,7 +240,7 @@ local function cannotBuild() : string
 	if tool.dataKey ~= tool.ghostKey or tool.cost == nil then return "the game is still checking it" end
 	if tool.critical then return "the game refuses it" end
 	if tool.hasErrors then return "the game reports errors on it" end
-	if not (world.joinable(sess.from.node) and world.joinable(sess.to.node)) then return "an end is gone or no longer free" end
+	if not (world.joinable(sess.from) and world.joinable(sess.to)) then return "an end is gone or no longer free" end
 	local ok, bal = pcall(function() : integer return api.engine.util.finance.getPlayersBalance(api.engine.util.getPlayer()) end)
 	-- (the game itself lets the account go negative)
 	if ok and bal ~= nil and tool.cost > (bal as integer) then return "not enough money" end
@@ -447,7 +456,7 @@ end
 
 -- What the confirm window says: the path, its readout, what the game warns about, and the cost.
 local function confirmText(cost : integer) : string
-	local lines : {string} = { string.format("New track from node %d to node %d", sess.from.node, sess.to.node),
+	local lines : {string} = { "New track from " .. ends.name(sess.from) .. " to " .. ends.name(sess.to),
 		"Track: " .. trackType().name }
 	if tool.ghostInfo ~= nil then lines[#lines + 1] = "Path: " .. tool.ghostInfo end
 	local l = tool.line
@@ -474,7 +483,7 @@ local function openConfirm()
 		return
 	end
 	local p, info, cost = tool.ghost, tool.ghostInfo, tool.cost
-	local from, to = sess.from.node, sess.to.node
+	local from, to = sess.from, sess.to
 	local wa = windowApi()
 	local ok, err = pcall(function() : string
 		wa.addSingletonWindow(dialog_react_util.DialogWindow, {
@@ -561,12 +570,9 @@ end
 
 ------------------------------------------------------------------ the session's adapter
 
-local function snapEnd(x : number, y : number, hovered : integer, exclude : integer) : TrackEnd, string
-	local near, onHovered, sawTrack = world.endsNear(x, y, hovered)
-	return ends.snap(near, onHovered, sawTrack, x, y, exclude)
-end
-local function endFree(n : integer) : boolean
-	return world.freeEnd(n) ~= nil
+local function snapEnd(x : number, y : number, z : number, hovered : integer, exclude : integer) : ends.End, string
+	local near, onHovered = world.endsNear(x, y, hovered)
+	return ends.snap(near, onHovered, x, y, z, exclude)
 end
 local function shiftHeld() : boolean
 	return api.gui.inputAction.modifierOnlyActionIsActive("IA_PRECISION_MODE")
@@ -584,8 +590,8 @@ local function worldNow(fresh : boolean) : sessions.World
 	if eye ~= nil and tool.terrX ~= nil and tool.terrZ ~= nil then
 		ray = { ex = eye.x, ey = eye.y, ez = eye.z, gx = tool.terrX, gy = tool.terrY, gz = tool.terrZ }
 	end
-	return { terrX = tool.terrX, terrY = tool.terrY, ray = ray, hovered = tool.hovered, grab = tool.grabNow, cameraDist = tool.camDist,
-		shift = shiftHeld, gradeLimit = gradeLimit, snap = snapEnd, endFree = endFree }
+	return { terrX = tool.terrX, terrY = tool.terrY, terrZ = tool.terrZ, ray = ray, hovered = tool.hovered, grab = tool.grabNow,
+		cameraDist = tool.camDist, shift = shiftHeld, gradeLimit = gradeLimit, snap = snapEnd, endThere = world.joinable }
 end
 
 -- Carry out what the session asks for.
@@ -608,6 +614,13 @@ local function backAction()
 	run(sessions.back(sess, worldNow(false)))
 end
 
+-- Where the cursor is and how it is drawn, so the tool draws again when it moves.
+local function cursorKey() : string
+	local c = sessions.cursor(sess)
+	if c == nil then return "-" end
+	return string.format("%.1f,%.1f,%s", c.x, c.y, c.state)
+end
+
 -- Every 50 ms while the tool is open: the session's tick, then keep the ghost up to date.
 -- Returns a key that changes whenever the tool must draw again.
 local function toolTick() : string
@@ -620,7 +633,7 @@ local function toolTick() : string
 	return table.concat({ tostring(tool.opens or 0), sess.phase, tool.ghostKey or "-", tool.screenKey or "-", sess.hoverMsg or "", tostring(tool.cost), tool.errors or "",
 		sess.edit ~= nil and tostring(sess.edit.rev) or "-", u ~= nil and (u.kind .. u.i) or "-", h ~= nil and (h.kind .. tostring(h.i)) or "-",
 		tostring(sess.drag ~= nil), string.format("%.0f", sess.grab or 0), sess.editMsg or "",
-		sess.mode as string or "-", tostring(sess.dragEl ~= nil) }, "|")
+		sess.mode as string or "-", tostring(sess.dragEl ~= nil), cursorKey() }, "|")
 end
 
 local function tooltip() : Builtin.ActionTooltipParam<any>
@@ -653,21 +666,22 @@ local function tooltip() : Builtin.ActionTooltipParam<any>
 	end
 	if sess.phase == "from" then
 		if sess.hover ~= nil then
-			lines[1], good = "Start the new track here. Then click where it should end.", true
+			lines[1], good = "The new track starts here; then click where it should end.", true
 		else
-			lines[1] = "Track Geometry: click the end of a track to start."
+			lines[1] = "Track Geometry: click the ground or the end of a track to start."
 			if sess.hoverMsg ~= nil then lines[2] = sess.hoverMsg end
 		end
 		if tool.buildMsg ~= nil then lines[#lines + 1] = tool.buildMsg; bad = true end
 	elseif sess.phase == "to" then
 		if sess.hover ~= nil then
-			lines[1], good = "Click to end the new track here.", true
+			lines[1], good = "The new track ends here.", true
 			path()
+			if sess.hoverMsg ~= nil then lines[#lines + 1] = sess.hoverMsg; bad = true end -- (the last click, refused)
 		else
-			lines[1] = "Now click the end of another track."
+			lines[1] = "Now click where the track should end."
 			if sess.hoverMsg ~= nil then lines[2] = sess.hoverMsg end
 		end
-		lines[#lines + 1] = "Right-click to go back."
+		lines[#lines + 1] = "Right-click or Esc to go back."
 	elseif vertical() then
 		local d, h = sess.dragEl, sess.hit
 		if d ~= nil then
@@ -684,7 +698,7 @@ local function tooltip() : Builtin.ActionTooltipParam<any>
 		if sess.drag ~= nil then
 			lines[1] = "Dragging the " .. sessions.handleName(h) .. "."
 		elseif h == nil then
-			lines[1] = "Drag a turn or a curve's bracket. Press on the track to add a turn."
+			lines[1] = "Drag a turn, a curve's bracket or a ground end. Press on the track to add a turn."
 		end
 		if sess.editMsg ~= nil then lines[#lines + 1] = sess.editMsg; bad = true end
 		path()
@@ -869,7 +883,9 @@ local COLORS : {string : {number}} = {
 	ray = { 0.3, 0.8, 1.0, 1.0 },
 	fixed = { 0.6, 0.6, 0.6, 1.0 },
 	bracket = { 0.3, 1.0, 0.4, 1.0 },
+	groundEnd = { 1.0, 0.75, 0.1, 1.0 }, -- a ground end: it moves anywhere, like a free turn
 	hot = { 1.0, 1.0, 1.0, 1.0 }, -- under the mouse or dragged
+	ring = { 0.2, 0.55, 1.0, 1.0 }, -- the cursor's ring while dragging (gizmo fallback)
 	selected = { 1.0, 1.0, 0.1, 1.0 }, -- the selected elevation point (the mode window sets its height)
 	tooClose = { 1.0, 0.15, 0.15, 0.4 }, -- an elevation point too close to a neighbour or an end
 }
@@ -941,6 +957,8 @@ local function editEdges() : {Builtin.Type.EdgeRenderable.Edge}
 		local z = zAt(h.x, h.y)
 		if h.kind == "pi" then
 			edges[#edges + 1] = circleEdge(h.x, h.y, z, r, isHot(h) and COLORS.hot or COLORS[h.mobility], w)
+		elseif h.kind == "end" then
+			edges[#edges + 1] = circleEdge(h.x, h.y, z, r, isHot(h) and COLORS.hot or COLORS.groundEnd, w)
 		else
 			-- across the leg the bracket sits on
 			local p, q = pis[h.i], h.kind == "entry" and pis[h.i - 1] or pis[h.i + 1]
@@ -986,7 +1004,35 @@ local function verticalEdges() : {Builtin.Type.EdgeRenderable.Edge}
 	return edges
 end
 
--- The tool in the world: the selector (clicks), the ghost and the tooltip.
+-- The cursor's height (its own, else the ground there) and size (the grab radius).
+local function cursorAt(c : sessions.Cursor) : number, number
+	return c.z or zAt(c.x, c.y), sess.grab or DEFAULT_GRAB
+end
+
+-- The cursor as the game's track builder draws its control point (a ProposalViewer holds one): a
+-- white dot on ground, a blue dot over a track end, a white dot ringed blue while dragging. Idle
+-- and IdleOverEdge shrink their dot as the radius grows on screen, so radius 0 keeps it whole (NOTES).
+local function controlPoint(c : sessions.Cursor) : Builtin.Type.ControlPointInfo
+	local S = builtin.type.ControlPointInfo.State
+	local states : {sessions.CursorState : Builtin.Type.ControlPointInfo.State} = {
+		ground = S.Idle, trackEnd = S.IdleOverEdge, handle = S.Hover, dragging = S.Dragging,
+	}
+	local state = states[c.state]
+	local z = cursorAt(c)
+	return builtin.type.ControlPointInfo.new(api.type.Vec3f.new(c.x, c.y, z), 1.0, 0.0, state)
+end
+
+-- The cursor as gizmo circles (when the control point is off or fails): a white dot, and a blue
+-- ring around it while dragging.
+local function cursorEdges(c : sessions.Cursor) : {Builtin.Type.EdgeRenderable.Edge}
+	local z, r = cursorAt(c)
+	local w = math.max(0.5, r / 8)
+	local edges = { circleEdge(c.x, c.y, z, r / 4, COLORS.hot, 2 * w) }
+	if c.state == "dragging" then edges[2] = circleEdge(c.x, c.y, z, 2 * r, COLORS.ring, w) end
+	return edges
+end
+
+-- The tool in the world: the selector (clicks), the ghost, the gizmos, the cursor and the tooltip.
 local function toolAction(abort : function()) : TreeNodeId
 	tool.active = true
 	react.onMount(function(_ : any) tool.active = true end)
@@ -1032,12 +1078,24 @@ local function toolAction(abort : function()) : TreeNodeId
 	-- never hand the game a ghost that names a node that is gone or no longer a free end (on
 	-- reopening, the first render comes before the tick that drops such an end); only one
 	-- ProposalViewer at a time
+	local cur = fresh and sessions.cursor(sess) or nil
+	local cp : Builtin.Type.ControlPointInfo = nil
+	if cur ~= nil and VANILLA_CURSOR then
+		local ok, v = pcall(controlPoint, cur)
+		if ok then cp = v as Builtin.Type.ControlPointInfo
+		elseif tool.cursorErr ~= tostring(v) then
+			tool.cursorErr = tostring(v)
+			say("cursor: " .. tool.cursorErr)
+		end
+	end
 	local g = tool.ghost
-	if fresh and g ~= nil and (sess.from == nil or world.joinable(sess.from.node)) and (sess.to == nil or world.joinable(sess.to.node))
-		and (sess.hover == nil or world.joinable(sess.hover.node)) then
+	local viewer = false
+	if fresh and g ~= nil and world.joinable(sess.from) and world.joinable(sess.to) and world.joinable(sess.hover) then
 		local gk = tool.ghostKey
+		viewer = true
 		children[#children + 1] = builtin.ProposalViewer{
 			simpleProposal = g,
+			controlPointInfo = cp,
 			onCreateProposalData = function(data : ProposalData, _p : Proposal)
 				if data == nil or tool.ghostKey ~= gk then return end
 				tool.cost = data.costs
@@ -1067,20 +1125,39 @@ local function toolAction(abort : function()) : TreeNodeId
 			proposalId = "westrom_track_geometry_ghost_" .. gk,
 		}
 	end
+	-- no ghost: an empty proposal holds the control point
+	if cp ~= nil and not viewer then
+		children[#children + 1] = builtin.ProposalViewer{
+			simpleProposal = api.type.SimpleProposal.new(),
+			controlPointInfo = cp,
+			proposalId = "westrom_track_geometry_cursor",
+		}
+	end
+	local edges : {Builtin.Type.EdgeRenderable.Edge} = {}
 	if fresh and sess.phase == "done" and sess.edit ~= nil then
-		local ok, edges = pcall(vertical() and verticalEdges or editEdges)
-		if ok then
-			children[#children + 1] = builtin.EdgeRenderable{ edges = edges as {Builtin.Type.EdgeRenderable.Edge}, ignoreDepth = true }
-		elseif tool.gizmoErr ~= tostring(edges) then
-			tool.gizmoErr = tostring(edges)
+		local ok, es = pcall(vertical() and verticalEdges or editEdges)
+		if ok then edges = es as {Builtin.Type.EdgeRenderable.Edge}
+		elseif tool.gizmoErr ~= tostring(es) then
+			tool.gizmoErr = tostring(es)
 			say("gizmo: " .. tool.gizmoErr)
 		end
+	end
+	if cur ~= nil and cp == nil then
+		local ok, es = pcall(cursorEdges, cur)
+		if ok then for _, ed in ipairs(es as {Builtin.Type.EdgeRenderable.Edge}) do edges[#edges + 1] = ed end
+		elseif tool.cursorErr ~= tostring(es) then
+			tool.cursorErr = tostring(es)
+			say("cursor: " .. tool.cursorErr)
+		end
+	end
+	if #edges > 0 then
+		children[#children + 1] = builtin.EdgeRenderable{ edges = edges, ignoreDepth = true }
 	end
 	if fresh and tool.screen ~= nil and #tool.screen > 0 then
 		children[#children + 1] = builtin.FullScreenComponent{ recipe = TgBadges as Recipe<any>, param = { items = tool.screen } as BadgesParam }
 	end
 	if fresh then children[#children + 1] = builtin.ActionTooltip(tooltip()) end
-	return builtin.ActionDescriptor{
+	local param : Builtin.ActionDescriptorParam = {
 		tool = "construction",
 		onBack = function()
 			if sess.confirmOpen then return end -- (the window takes Esc itself: Cancel)
@@ -1089,6 +1166,9 @@ local function toolAction(abort : function()) : TreeNodeId
 		terrainCirclePolicy = "Never",
 		children = children,
 	}
+	-- (mouseCursor is missing from the game's ActionDescriptorParam def; its own tools pass it)
+	;(param as {string : any}).mouseCursor = RAIL_CURSOR
+	return builtin.ActionDescriptor(param)
 end
 
 -- An input action that is not ours must say Disabled (a plain false keeps the key and does nothing).

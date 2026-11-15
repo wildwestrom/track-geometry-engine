@@ -37,10 +37,10 @@ local record WorldMod
 	water : function(x : number, y : number) : boolean
 	-- track ends
 	nodeAlive : function(n : integer) : boolean
-	freeEnd : function(n : integer) : ends.TrackEnd
-	joinable : function(n : integer) : boolean
+	freeEnd : function(n : integer) : ends.End
+	joinable : function(e : ends.End) : boolean
 	isTrackEdge : function(e : integer) : boolean
-	endsNear : function(x : number, y : number, hovered : integer) : {ends.TrackEnd}, {integer : boolean}, boolean
+	endsNear : function(x : number, y : number, hovered : integer) : {ends.End}, {integer : boolean}
 end
 
 local M : WorldMod = {}
@@ -181,11 +181,11 @@ local function segmentsAt(n : integer, tracks : boolean) : {integer}
 end
 
 -- The free track end at node n (a node with a single track piece and no street), or nil.
-function M.freeEnd(n : integer) : ends.TrackEnd
+function M.freeEnd(n : integer) : ends.End
 	if n == nil or n < 0 or not M.nodeAlive(n) then return nil end
 	local segs = segmentsAt(n, true)
 	if #segs ~= 1 or #segmentsAt(n, false) > 0 then return nil end -- (no level crossings)
-	local ok, e = pcall(function() : ends.TrackEnd
+	local ok, e = pcall(function() : ends.End
 		local be = api.engine.getComponent(segs[1], api.type.ComponentType.BASE_EDGE) as Engine.Component.BaseEdge
 		local node = api.engine.getComponent(n, api.type.ComponentType.BASE_NODE) as Engine.Component.BaseNode
 		if be == nil or node == nil or be.roadType ~= api.type["enum"].RoadType.TRACK then return nil end
@@ -197,15 +197,16 @@ function M.freeEnd(n : integer) : ends.TrackEnd
 		end
 		local len = math.sqrt(tx * tx + ty * ty)
 		if len < 1e-6 then return nil end
-		return { node = n, x = node.position.x, y = node.position.y, z = node.position.z, dx = tx / len, dy = ty / len, grade = tz / len }
+		return ends.trackEnd(n, node.position.x, node.position.y, node.position.z, tx / len, ty / len, tz / len)
 	end)
-	return ok and e as ends.TrackEnd or nil
+	return ok and e as ends.End or nil
 end
 
--- Can a proposal still join node n? Only while it is a free end: once track is built on it (or
--- it is gone) a proposal naming it is wrong or kills the game. (nil or negative: no node.)
-function M.joinable(n : integer) : boolean
-	return n == nil or n < 0 or M.freeEnd(n) ~= nil
+-- Can a proposal still join end e? A free track end only while it is free: once track is built on
+-- it (or it is gone) a proposal naming its node is wrong or kills the game. A ground end names no
+-- node. (nil: no end, nothing to join.)
+function M.joinable(e : ends.End) : boolean
+	return e == nil or e.kind ~= "track" or M.freeEnd(e.node) ~= nil
 end
 
 -- Is e a track piece?
@@ -219,17 +220,14 @@ function M.isTrackEdge(e : integer) : boolean
 end
 
 -- The free ends of the piece `hovered` and of the track pieces within ends.SNAP of (x, y) (x nil:
--- only the hovered piece's), which of them are the hovered piece's, and whether any track piece
--- was there at all.
-function M.endsNear(x : number, y : number, hovered : integer) : {ends.TrackEnd}, {integer : boolean}, boolean
+-- only the hovered piece's), and the nodes of the hovered piece, when it is a track piece.
+function M.endsNear(x : number, y : number, hovered : integer) : {ends.End}, {integer : boolean}
 	local CT = api.type.ComponentType
 	local nodes : {integer : boolean} = {}
 	local onHovered : {integer : boolean} = {}
-	local sawTrack = false
 	local function addEdge(e : integer, hov : boolean)
 		local be = api.engine.getComponent(e, CT.BASE_EDGE) as Engine.Component.BaseEdge
 		if be ~= nil and be.roadType == api.type["enum"].RoadType.TRACK then
-			sawTrack = true
 			nodes[be.node0], nodes[be.node1] = true, true
 			if hov then onHovered[be.node0], onHovered[be.node1] = true, true end
 		end
@@ -246,12 +244,12 @@ function M.endsNear(x : number, y : number, hovered : integer) : {ends.TrackEnd}
 			end)
 		end)
 	end
-	local out : {ends.TrackEnd} = {}
+	local out : {ends.End} = {}
 	for n in pairs(nodes) do
 		local e = M.freeEnd(n)
 		if e ~= nil then out[#out + 1] = e end
 	end
-	return out, onHovered, sawTrack
+	return out, onHovered
 end
 
 return M

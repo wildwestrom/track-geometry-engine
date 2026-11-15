@@ -1,17 +1,18 @@
 -- Turns sampled nodes (tg_alignment) into a proposal: one Hermite track piece between each pair of
 -- neighbouring nodes. Used by the tool's ghost, which is also what it builds (GUI).
 -- New entities are numbered as the game wants: edges -1..-m, then nodes -(m+1)..-(m+n). The first
--- and last node can be existing track nodes instead (the picked ends), which joins the new track to
--- them; those are not added, and their positions must be the nodes' own.
+-- and last node can be the picked ends' existing nodes instead, which joins the new track to them;
+-- those are not added, and their positions must be the nodes' own.
 
 local alignment = require("westrom_track_geometry::/track_geometry/tg_alignment.script.tl")
+local ends = require("westrom_track_geometry::/track_geometry/tg_ends.script.tl")
 
 local record Options
 	template : string -- track template name (tg_world.templateFor)
 	z : {number} -- height at each node
 	grades : {number} -- grade at each node, for the tangents' z (z must follow it)
-	startNode : integer -- existing node at the first sample, or nil
-	endNode : integer -- existing node at the last sample, or nil
+	from : ends.End -- the end at the first sample: the new track joins its node, if it has one
+	to : ends.End -- the end at the last sample, likewise; nil: none (a stub)
 	kinds : {string} -- each piece "ground", "bridge" or "tunnel" (tg_structures); nil: all ground
 	bridgeType : integer -- api.res.bridgeTypeRep id for the bridges (none: they stay on the ground)
 	tunnelType : integer -- api.res.tunnelTypeRep id for the tunnels
@@ -59,8 +60,8 @@ function M.make(nodes : {alignment.Sample}, o : Options) : SimpleProposal, strin
 	local nodesToAdd : {Proposal.NodeAndEntity} = {}
 	local edgesToAdd : {Proposal.SegmentAndEntity} = {}
 	local function nodeId(i : integer) : integer
-		if i == 1 and o.startNode ~= nil then return o.startNode end
-		if i == n and o.endNode ~= nil then return o.endNode end
+		if i == 1 and o.from ~= nil and o.from.node ~= nil then return o.from.node end
+		if i == n and o.to ~= nil and o.to.node ~= nil then return o.to.node end
 		return -(m + i)
 	end
 	for i, nd in ipairs(nodes) do
