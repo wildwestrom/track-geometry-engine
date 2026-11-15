@@ -5,6 +5,7 @@
 -- A turned layout puts a lead PI out on each end's ray (it slides there) and a free PI halfway
 -- between the leads, so the middle leg runs near the straight line between the ends and the player
 -- can drag the alignment from the start.
+-- Also which free end the mouse snaps to (snap), from the ends tg_world finds near it.
 -- No game API here, so test/ends_test.lua runs it outside the game.
 
 local geometry = require("westrom_track_geometry::/track_geometry/tg_geometry.script.tl")
@@ -18,12 +19,28 @@ local record End
 	grade : number -- the existing track's grade, going out along (dx, dy)
 end
 
+-- A free track end: an existing node with a single track piece, and the unit direction pointing
+-- out of that piece. (An End with its node.)
+local record TrackEnd
+	node : integer
+	x : number
+	y : number
+	z : number
+	dx : number
+	dy : number
+	grade : number -- the existing track's grade at the node, going out along (dx, dy)
+end
+
 local record Ends
 	End : End
+	TrackEnd : TrackEnd
+	SNAP : number
 	MIN_LEG : number
 	MAX_REACH : number
 	LEAD : number
 	initialPis : function(a : End, b : End) : {geometry.Vec}, string
+	snap : function(near : {TrackEnd}, onHovered : {integer : boolean}, sawTrack : boolean, x : number, y : number,
+		exclude : integer) : TrackEnd, string
 end
 
 local M : Ends = {}
@@ -35,6 +52,8 @@ M.MIN_LEG = 20.0
 M.MAX_REACH = 3.0
 -- How far out of each end its lead PI goes (m), when the room allows.
 M.LEAD = 200.0
+-- A free end this close to the mouse snaps to it (m).
+M.SNAP = 40.0
 
 -- a, a lead la out on a's ray, the middle PI halfway between the leads, a lead lb out on b's ray, b.
 local function leads(a : End, b : End, la : number, lb : number) : {geometry.Vec}
@@ -71,6 +90,25 @@ function M.initialPis(a : End, b : End) : {geometry.Vec}, string
 	end
 	local L = math.min(M.LEAD, dist / 3)
 	return leads(a, b, L, L), "s-curve"
+end
+
+-- The end the mouse at (x, y) snaps to, from the free ends near it (onHovered: those of the piece
+-- under the mouse; sawTrack: any track piece was there). An end of the piece under the mouse
+-- snaps however far; any other within SNAP; of those, the nearest. Never the node exclude. (x
+-- nil: the mouse is over no ground; only the hovered piece's ends.) nil and a hint when none.
+function M.snap(near : {TrackEnd}, onHovered : {integer : boolean}, sawTrack : boolean, x : number, y : number,
+	exclude : integer) : TrackEnd, string
+	local best : TrackEnd = nil
+	local bestD = math.huge
+	for _, e in ipairs(near) do
+		if e.node ~= exclude then
+			local d = x ~= nil and math.sqrt((e.x - x) ^ 2 + (e.y - y) ^ 2) or 0.0
+			if (d <= M.SNAP or onHovered[e.node]) and d < bestD then best, bestD = e, d end
+		end
+	end
+	if best ~= nil then return best, nil end
+	if sawTrack then return nil, "No free track end here. Point at the last piece of a line, near its end." end
+	return nil, "Point at the end of a track."
 end
 
 return M

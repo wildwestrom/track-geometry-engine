@@ -28,9 +28,10 @@ end
 
 local M : Alignment = {}
 
--- Shortest piece between two nodes (m). A boundary node closer than this to the previous node is
--- dropped, so short segments (e.g. a zero-length straight between two corners) never make the
--- tiny pieces that crash the game (< 0.1 m).
+-- Shortest piece between two nodes (m). A node closer than this to the previous node is dropped,
+-- so short segments (e.g. a zero-length straight between two corners) never make the tiny pieces
+-- that crash the game (< 0.1 m). A break is kept all the same: the previous node moves onto it,
+-- unless that one is the first node or a break itself (of two breaks this close, the first stays).
 M.MIN_PIECE = 1.0
 -- Segments this short or shorter count as zero-length (m).
 local ZERO = 1e-6
@@ -57,6 +58,7 @@ function M.sample(path : {geometry.Segment}, step : number, maxTurn ?: number, b
 	for _, b in ipairs(breaks or {}) do bs[#bs + 1] = b end
 	table.sort(bs)
 	local nodes : {Sample} = { node(segs[1], 0, 0) }
+	local onBreak = false -- whether the last node is at a break
 	local s0 = 0.0
 	for i, seg in ipairs(segs) do
 		local len = geometry.length(seg)
@@ -77,10 +79,14 @@ function M.sample(path : {geometry.Segment}, step : number, maxTurn ?: number, b
 				local t = t0 + (t1 - t0) * j / n
 				local nd = node(seg, t, s0 + t)
 				local last = i == #segs and c == #cuts and j == n
+				local atBreak = j == n and c < #cuts
 				if nd.s - nodes[#nodes].s >= M.MIN_PIECE then
 					nodes[#nodes + 1] = nd
-				elseif last and #nodes > 1 then
-					nodes[#nodes] = nd -- the path's end is fixed: move the previous node there instead
+					onBreak = atBreak
+				elseif (last or (atBreak and not onBreak)) and #nodes > 1 then
+					-- the path's end is fixed, and a break needs its node: move the previous node there
+					nodes[#nodes] = nd
+					onBreak = atBreak
 				end
 			end
 		end

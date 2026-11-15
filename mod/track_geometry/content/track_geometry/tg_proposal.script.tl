@@ -5,10 +5,9 @@
 -- them; those are not added, and their positions must be the nodes' own.
 
 local alignment = require("westrom_track_geometry::/track_geometry/tg_alignment.script.tl")
-local structures = require("westrom_track_geometry::/track_geometry/tg_structures.script.tl")
 
 local record Options
-	template : string -- track template name
+	template : string -- track template name (tg_world.templateFor)
 	z : {number} -- height at each node
 	grades : {number} -- grade at each node, for the tangents' z (z must follow it)
 	startNode : integer -- existing node at the first sample, or nil
@@ -20,87 +19,14 @@ end
 
 local record ProposalMod
 	Options : Options
-	BASE_TEMPLATE : string
 	finite : function(number) : boolean
 	make : function(nodes : {alignment.Sample}, o : Options) : SimpleProposal, string
-	trackSpeed : function(template : string) : number
-	maxGrade : function(template : string) : number
-	structureTypes : function(template : string) : integer, integer
-	ground : function(x : number, y : number) : number
-	water : function(x : number, y : number) : boolean
-	structuresFor : function(nodes : {alignment.Sample}, z : {number}, template : string) : {string}, integer, integer, string
 end
 
 local M : ProposalMod = {}
 
-M.BASE_TEMPLATE = "::/infrastructure/track/standard/standard.street_template"
-
 function M.finite(v : number) : boolean
 	return v ~= nil and v == v and v ~= math.huge and v ~= -math.huge
-end
-
--- The bridge and tunnel types for a track template, as the game's menu would auto-select them: on
--- offer this year, carrying rail, the speed limit closest above the track's (else the fastest).
--- Either can be nil when none is on offer.
-local function offers(rep : ResTypeRep<integer, BridgeType>, year : integer) : {structures.Offer}
-	local list : {structures.Offer} = {}
-	for id, _ in pairs(rep.getAll()) do
-		local r = rep.get(id) as {string : any}
-		local menu = r.menuCategory as ModelMetadata.MenuCategory
-		local av = r.availability as ModelMetadata.Availability
-		local from, to = av ~= nil and av.yearFrom or 0, av ~= nil and av.yearTo or 0
-		local rail = false
-		for _, c in ipairs((r.carriers or {}) as {Carrier}) do
-			if c == api.type["enum"].Carrier.RAIL then rail = true end
-		end
-		if rail and menu ~= nil and #menu.categories > 0 and (from == 0 or from <= year) and (to == 0 or year < to) then
-			list[#list + 1] = { id = id, speedLimit = (r.speedLimit as number) or 0,
-				autoSelectable = r.isAutoSelectable == nil or r.isAutoSelectable as boolean }
-		end
-	end
-	return list
-end
-
--- The track's top speed (m/s): the fastest of its lanes.
-function M.trackSpeed(template : string) : number
-	local tpl = api.res.streetTemplateRep.get(api.res.streetTemplateRep.find(template or M.BASE_TEMPLATE))
-	local speed = 0.0
-	for _, lc in ipairs(tpl.laneConfigs or {}) do speed = math.max(speed, lc.speed) end
-	return speed
-end
-
--- The steepest grade the track may be laid at: the template's maxSlopeBuild (the limit of the
--- game's own incline slider; grade mods such as Realistic Track Gradients set it). The game's
--- default when it is missing.
-function M.maxGrade(template : string) : number
-	local tpl = api.res.streetTemplateRep.get(api.res.streetTemplateRep.find(template or M.BASE_TEMPLATE))
-	local v = (tpl as {string : any}).maxSlopeBuild as number
-	if v == nil or not (v > 0) then return 0.085 end
-	return v
-end
-
-function M.structureTypes(template : string) : integer, integer
-	local speed = M.trackSpeed(template)
-	local year = 0
-	pcall(function() year = ((api.engine.util as {string : any}).getYear as function() : integer)() end)
-	return structures.pickType(offers(api.res.bridgeTypeRep, year), speed),
-		structures.pickType(offers(api.res.tunnelTypeRep, year), speed)
-end
-
-function M.ground(x : number, y : number) : number
-	return api.engine.terrain.getHeightAt(api.type.Vec2f.new(x, y))
-end
-
-function M.water(x : number, y : number) : boolean
-	return api.engine.terrain.isOnWater(api.type.Vec2f.new(x, y))
-end
-
--- Where the track at heights z needs bridges and tunnels, the types to build them with, and a
--- summary for the player ("1 bridge (300 m)", or nil).
-function M.structuresFor(nodes : {alignment.Sample}, z : {number}, template : string) : {string}, integer, integer, string
-	local kinds = structures.classify(nodes, z, M.ground, M.water, structures.DEFAULT)
-	local bridgeType, tunnelType = M.structureTypes(template)
-	return kinds, bridgeType, tunnelType, structures.summary(nodes, kinds)
 end
 
 -- The proposal, or nil and why not. Checks for what crashes the game: NaN, pieces under 0.1 m.
@@ -118,7 +44,7 @@ function M.make(nodes : {alignment.Sample}, o : Options) : SimpleProposal, strin
 		end
 	end
 
-	local tplName = o.template or M.BASE_TEMPLATE
+	local tplName = o.template
 	local template = api.res.streetTemplateRep.get(api.res.streetTemplateRep.find(tplName))
 	local trackDistance = 0.0
 	pcall(function() trackDistance = (template as {string : any}).trackDistance as number or 0.0 end)

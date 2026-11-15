@@ -80,5 +80,27 @@ leadsAt("short s-curve", endAt(0, 0, 0), endAt(60, 20, 180), short / 3, short / 
 local pis, why = E.initialPis(endAt(0, 0, 0), endAt(30, 0, 180))
 check(pis == nil and why ~= nil, "ends 30 m apart refused: " .. tostring(why))
 
+-- Which free end the mouse snaps to.
+local function fe(node, x, y) return { node = node, x = x, y = y, z = 0, dx = 1, dy = 0, grade = 0 } end
+local near = { fe(1, 0, 0), fe(2, 30, 0), fe(3, 100, 0) }
+local got = E.snap(near, {}, true, 25, 0)
+check(got ~= nil and got.node == 2, "snap: the nearest free end within SNAP")
+got = E.snap(near, {}, true, 25, 0, 2)
+check(got ~= nil and got.node == 1, "snap: never the excluded node, the next nearest instead")
+got = E.snap(near, { [3] = true }, true, 25, 0)
+check(got ~= nil and got.node == 2, "snap: of the qualifying ends, the nearest, hovered or not")
+got = E.snap(near, { [3] = true }, true, 25, 0, 2)
+check(got ~= nil and got.node == 1, "snap: the hovered piece's far end does not beat a nearer one")
+got = E.snap({ fe(3, 100, 0) }, { [3] = true }, true, 25, 0)
+check(got ~= nil and got.node == 3, "snap: an end of the hovered piece snaps beyond SNAP")
+got = E.snap({ fe(3, 100, 0) }, { [3] = true }, true, nil, nil)
+check(got ~= nil and got.node == 3, "snap: over no ground, the hovered piece's end still snaps")
+local none, hint = E.snap({ fe(3, 100, 0) }, {}, true, 25, 0)
+check(none == nil and hint:find("No free track end") ~= nil, "snap: track there but no free end near: says so")
+none, hint = E.snap({}, {}, false, 25, 0)
+check(none == nil and hint:find("Point at the end of a track") ~= nil, "snap: no track at all: says to point at one")
+got = E.snap({ fe(1, E.SNAP, 0) }, {}, true, 0, 0)
+check(got ~= nil, "snap: exactly SNAP away still snaps")
+
 print(failures == 0 and "all passed" or (failures .. " failed"))
 os.exit(failures == 0 and 0 or 1)

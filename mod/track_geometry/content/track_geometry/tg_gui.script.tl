@@ -18,29 +18,22 @@ local engine_react_util = ug_require "::/gui/main/engine_react_util.tl" as Engin
 local construction_react_util = ug_require "::/gui/construction/construction_react_util.tl" as ConstructionReactUtil
 local dialog_react_util = ug_require "::/gui/menu/dialog_react_util.tl" as DialogReactUtil
 local menu_category_util = ug_require "::/gui/main/menu_category_util.tl" as MenuCategoryUtil
-local geometry = require("westrom_track_geometry::/track_geometry/tg_geometry.script.tl")
 local alignment = require("westrom_track_geometry::/track_geometry/tg_alignment.script.tl")
 local ends = require("westrom_track_geometry::/track_geometry/tg_ends.script.tl")
 local edits = require("westrom_track_geometry::/track_geometry/tg_edit.script.tl")
 local proposals = require("westrom_track_geometry::/track_geometry/tg_proposal.script.tl")
 local readout = require("westrom_track_geometry::/track_geometry/tg_readout.script.tl")
 local profiles = require("westrom_track_geometry::/track_geometry/tg_profile.script.tl")
-local structures = require("westrom_track_geometry::/track_geometry/tg_structures.script.tl")
+local plans = require("westrom_track_geometry::/track_geometry/tg_plan.script.tl")
+local sessions = require("westrom_track_geometry::/track_geometry/tg_session.script.tl")
+local world = require("westrom_track_geometry::/track_geometry/tg_world.script.tl")
 
 local TAG = "[westrom_track_geometry] "
-local SNAP = 40.0 -- a free track end this close to the mouse snaps to it (m)
-local STUB = 30.0 -- length of the ghost stub that marks a hovered or picked end (m)
-local STEP = 10.0 -- the path is read this finely (m): for the ground under it, the readout, picking...
-local MAX_TURN = math.rad(15) -- ...but built in pieces turning at most this much (straights: one piece)
-local RIGHT_TICKS = 8 -- a "back" input this many tool ticks (50 ms) after a right-click is that click
 local GHOST_TICKS = 4 -- while dragging, remake the ghost at most every this many tool ticks (50 ms)...
 local GHOST_WAIT = 20 -- ...and only once the game has checked the last one, or this many ticks have passed
 local GRAB = 0.02 -- grab radius for handles, as a share of the camera's distance
 local LEG_STEP = 10.0 -- gizmo legs follow the ground in pieces this long (m)...
 local MAX_LEG_PIECES = 60 -- ...or this many per leg, on long legs
-local DP = geometry.DEFAULT_PARAMS
-local BADGE_EVERY = 50.0 -- a speed or grade badge this often along the path (m), where there is room on the screen
-local HEIGHT_PER_PX = 0.001 -- a Shift-drag raises an elevation point this share of the camera's distance per pixel
 
 -- the game runs Lua 5.2: two-argument atan is math.atan2 there
 local atan2 : function(number, number) : number = (math as {string : any}).atan2 as function(number, number) : number
@@ -52,29 +45,18 @@ end
 
 ------------------------------------------------------------------ tool state
 
--- A free track end: an existing node with a single track piece, and the unit direction pointing
--- out of that piece.
-local record TrackEnd
-	node : integer
-	x : number
-	y : number
-	z : number
-	dx : number
-	dy : number
-	grade : number -- the existing track's grade at the node, going out along (dx, dy)
+local type TrackEnd = sessions.TrackEnd
+
+-- The ghost's plan (tg_plan), waiting for the game's proposal data: its curve speed limits.
+local record Pending
+	key : string -- ghost key
+	plan : plans.Plan
 end
 
--- The ghost's path with what the readout needs; speeds (m/s per piece, the game's curve limits)
--- arrive with the ghost's proposal data.
-local record PathLine
+-- The plan read out with those speeds.
+local record PlanLine
 	key : string -- ghost key
-	pieces : {alignment.Sample} -- the ghost's nodes, as built
-	nodes : {alignment.Sample} -- the path every STEP, and its heights: what the readout reads
-	z : {number}
-	minRadius : number
-	curves : {readout.Curve}
-	speeds : {number}
-	badges : {readout.Badge}
+	readout : plans.Readout
 end
 
 -- A curve badge on the screen: where it sits, as a share of the screen's width and height.
@@ -84,200 +66,65 @@ local record ScreenBadge
 	badge : readout.Badge
 end
 
--- An elevation point being dragged: along the path, or (Shift held at the press) up and down.
-local record ElevationDrag
-	i : integer
-	height : boolean
-	pressY : number -- the mouse's screen y at the press (px)
-	pressZ : number -- the point's height at the press
-end
-
--- The edited path, sampled, for the vertical editing: its nodes, length and the nodes' chainages.
-local record VPath
-	nodes : {alignment.Sample}
-	len : number
-	ss : {number}
-	edit : edits.Edit -- the alignment it was made from...
-	hrev : integer -- ...at this horizontal revision
-end
-
 local record ToolState
-	phase : string -- "from": pick the start, "to": pick the end, "done": both picked
-	mode : string -- while editing: "horizontal" (turns and curves) or "vertical" (elevation points)
 	active : boolean
-	lastTick : number
+	ticked : boolean -- the tool has ticked since it opened (until then its state is the last opening's)
+	opens : integer -- how often the tool has closed: in the redraw key, so the first tick always redraws
+	frame : integer -- frames drawn so far (counted by TgProbe, every frame)
+	tickFrame : integer -- the frame of the tool's last tick
 	hovered : integer -- entity under the mouse (Selector)
 	terrX : number -- ground under the mouse (read every frame by TgProbe)
 	terrY : number
-	mouseX : number -- where the last snap looked
-	mouseY : number
-	hover : TrackEnd -- end the mouse snaps to
-	hoverMsg : string
-	from : TrackEnd
-	to : TrackEnd
 	ghost : SimpleProposal
 	ghostKey : string
 	ghostInfo : string -- the ghost's path: length and layout
 	ghostWhy : string -- why there is no ghost
 	ghostTick : integer -- tick the ghost was last made
-	edit : edits.Edit -- the alignment being edited (both ends picked)
-	grab : number -- grab radius now (m)
-	under : edits.Handle -- handle under the mouse
-	underLeg : integer -- else the leg under the mouse, where a press adds a turn
-	drag : edits.Handle -- handle being dragged
-	underEl : integer -- vertical mode: the elevation point under the mouse
-	underS : number -- else the chainage of the track under the mouse, where a press adds one
-	dragEl : ElevationDrag -- the elevation point being dragged
-	vpath : VPath -- the path the vertical editing works on (vertical mode)
 	vbadges : {readout.Badge} -- the profile's badges (vertical mode)
-	mouseSY : number -- the mouse's screen y, from its last event (px)
 	modeOpen : boolean -- the mode window is open
-	editMsg : string -- why the last edit did not happen
 	gizmoErr : string -- last gizmo error logged
 	cost : integer
 	errors : string
 	critical : boolean -- the game refuses the ghost
 	hasErrors : boolean -- the game reports errors on the ghost (warnings do not count)
 	dataKey : string -- ghost key whose data (cost, errors) came last
-	pressGrabbed : boolean -- the last left press grabbed a handle or added a turn (its click must not build)
 	buildMsg : string -- how the last build went (kept when the tool starts over)
 	gameCtx : GameContext -- for the confirm window
 	getParams : function() : {string : number} -- the menu entry's settings (track type, electric)
 	template : string -- the track template to build, from the settings (read every tick)
-	confirmOpen : boolean
-	closedTick : integer -- tick the confirm window closed (the click that closed it must not open it again)
 	errorsLogged : string -- ghost key whose problems were last logged
-	pending : PathLine -- the ghost's path, until the game's data for it comes
-	line : PathLine -- the path as last read out: badges at its curves, summed up in the tooltip
+	pending : Pending -- the ghost's plan, until the game's data for it comes
+	line : PlanLine -- the plan as last read out: badges at its curves, summed up in the tooltip
 	screen : {ScreenBadge} -- the line's badges on the screen (placed by TgProbe every frame)
 	screenKey : string -- changes when the badges move on the screen
 	badgeErr : string -- last error placing them (logged once)
 	speedsLogged : boolean
-	ticks : integer -- tool ticks so far (os.clock is CPU time over all threads: no use as a timer)
-	rightTick : integer -- tick of the last right-button event
-	backTick : integer -- tick of the last step back (one input's "back" arrives more than once)
+	grabNow : number -- grab radius at the last tick (m)
+	camDist : number -- the camera's distance at the last tick (m); nil when unknown
 end
 
-local tool : ToolState = { phase = "from" }
+local tool : ToolState = {}
 
+-- The tool counts as ticking while its last tick was at most this many frames ago. Its timer
+-- ticks every 50 ms, a few frames apart; counted in frames, not os.clock() (CPU time, see GUI
+-- pitfalls in NOTES.md).
+local LIVE_FRAMES = 60
+
+-- Is the tool open and ticking?
+local function toolLive() : boolean
+	return tool.active == true and tool.tickFrame ~= nil and (tool.frame or 0) - tool.tickFrame <= LIVE_FRAMES
+end
+
+-- Which step the tool is at, the picked ends, the edit, what is under the mouse and what is
+-- dragged (tg_session). Read here, changed only through its events.
+local sess = sessions.new(say, toolLive)
+
+-- Drop the ghost and what was read out (the session starts over by itself).
 local function resetTool()
-	tool = { phase = "from", active = tool.active, terrX = tool.terrX, terrY = tool.terrY, buildMsg = tool.buildMsg,
-		gameCtx = tool.gameCtx, getParams = tool.getParams, template = tool.template, mode = tool.mode, modeOpen = tool.modeOpen }
-end
-
------------------------------------------------------------------- the world
-
--- Is n still a node? A proposal that names a node that is gone kills the game (no pcall helps).
-local function nodeAlive(n : integer) : boolean
-	if n == nil or n < 0 then return true end
-	local ok, res = pcall(function() : boolean
-		return api.engine.entityExists(n) and api.engine.getComponent(n, api.type.ComponentType.BASE_NODE) ~= nil
-	end)
-	return ok and res == true
-end
-
--- The pieces at a node; asking about an entity that is not a node crashes the game.
-local function segmentsAt(n : integer, tracks : boolean) : {integer}
-	if not nodeAlive(n) then return {} end
-	local sys = api.engine.system.streetSystem
-	local ok, segs = pcall(tracks and sys.getNodeTrackSegments or sys.getNodeStreetSegments, n)
-	if ok and segs ~= nil then return segs as {integer} end
-	return {}
-end
-
--- The free track end at node n, or nil.
-local function freeEndAt(n : integer) : TrackEnd
-	if n == nil or n < 0 or not nodeAlive(n) then return nil end
-	local segs = segmentsAt(n, true)
-	if #segs ~= 1 or #segmentsAt(n, false) > 0 then return nil end -- (no level crossings)
-	local be = api.engine.getComponent(segs[1], api.type.ComponentType.BASE_EDGE) as Engine.Component.BaseEdge
-	local node = api.engine.getComponent(n, api.type.ComponentType.BASE_NODE) as Engine.Component.BaseNode
-	if be == nil or node == nil or be.roadType ~= api.type["enum"].RoadType.TRACK then return nil end
-	local tx, ty, tz : number, number, number
-	if be.node0 == n then
-		tx, ty, tz = -be.tangent0.x, -be.tangent0.y, -be.tangent0.z
-	else
-		tx, ty, tz = be.tangent1.x, be.tangent1.y, be.tangent1.z
-	end
-	local len = math.sqrt(tx * tx + ty * ty)
-	if len < 1e-6 then return nil end
-	return { node = n, x = node.position.x, y = node.position.y, z = node.position.z, dx = tx / len, dy = ty / len, grade = tz / len }
-end
-
--- The free end the mouse snaps to: an end of the piece under the mouse, else the nearest within
--- SNAP of (x, y). Never the node `exclude`. nil and a hint when there is none.
-local function snapNear(x : number, y : number, hovered : integer, exclude : integer) : TrackEnd, string
-	local CT = api.type.ComponentType
-	local nodes : {integer : boolean} = {}
-	local preferred : {integer : boolean} = {}
-	local sawTrack = false
-	local function addEdge(e : integer, pref : boolean)
-		local be = api.engine.getComponent(e, CT.BASE_EDGE) as Engine.Component.BaseEdge
-		if be ~= nil and be.roadType == api.type["enum"].RoadType.TRACK then
-			sawTrack = true
-			nodes[be.node0], nodes[be.node1] = true, true
-			if pref then preferred[be.node0], preferred[be.node1] = true, true end
-		end
-	end
-	if hovered ~= nil and hovered > 0 and api.engine.entityExists(hovered) then addEdge(hovered, true) end
-	if x ~= nil then
-		local box = api.type.Box3.new(api.type.Vec3f.new(x - SNAP, y - SNAP, -2000), api.type.Vec3f.new(x + SNAP, y + SNAP, 6000))
-		pcall(function()
-			api.engine.system.octreeSystem.findIntersectingEntities(box, function(e : Engine.Entity, _bv : Engine.Component.BoundingVolume)
-				addEdge(e, false)
-			end)
-		end)
-	end
-	local best : TrackEnd = nil
-	local bestD = math.huge
-	for n in pairs(nodes) do
-		if n ~= exclude then
-			local e = freeEndAt(n)
-			if e ~= nil then
-				local d = x ~= nil and math.sqrt((e.x - x) ^ 2 + (e.y - y) ^ 2) or 0.0
-				if (d <= SNAP or preferred[n]) and d < bestD then best, bestD = e, d end
-			end
-		end
-	end
-	if best ~= nil then return best, nil end
-	if sawTrack then return nil, "No free track end here. Point at the last piece of a line, near its end." end
-	return nil, "Point at the end of a track."
-end
-
------------------------------------------------------------------- the ghost
-
--- A short straight stub out of end e, marking it.
-local function stubNodes(e : TrackEnd) : {alignment.Sample}, string
-	local h = atan2(e.dy, e.dx)
-	return { { x = e.x, y = e.y, heading = h, s = 0, k = 0 },
-		{ x = e.x + STUB * e.dx, y = e.y + STUB * e.dy, heading = h, s = STUB, k = 0 } }, nil
-end
-
--- The end nodes moved exactly onto the existing nodes, so the ghost joins them.
-local function pinEnds(nodes : {alignment.Sample}, a : TrackEnd, b : TrackEnd)
-	nodes[1].x, nodes[1].y = a.x, a.y
-	nodes[#nodes].x, nodes[#nodes].y = b.x, b.y
-end
-
--- The new track from a to b (the edited alignment, else the starting one): its nodes every STEP,
--- its length and number of turns, its smallest radius, its curves and the path itself.
-local function pathNodes(a : TrackEnd, b : TrackEnd, e : edits.Edit) : {alignment.Sample}, string, number, {readout.Curve}, {geometry.Segment}
-	local how : string
-	if e == nil then
-		e, how = edits.new(a as ends.End, b as ends.End)
-		if e == nil then return nil, how end
-	else
-		how = string.format("%d turn%s", #e.pis - 2, #e.pis == 3 and "" or "s")
-	end
-	local path = edits.path(e, DP)
-	local nodes = alignment.sample(path, STEP)
-	if #nodes < 2 then return nil, "the path is too short" end
-	pinEnds(nodes, a, b)
-	local minRadius = math.huge
-	for _, s in ipairs(path) do
-		if s.kind == "arc" and geometry.length(s) > 1e-6 then minRadius = math.min(minRadius, s.radius) end
-	end
-	return nodes, string.format("%.0f m, %s", nodes[#nodes].s, how), minRadius, readout.curves(path), path
+	tool = { active = tool.active, terrX = tool.terrX, terrY = tool.terrY, buildMsg = tool.buildMsg,
+		gameCtx = tool.gameCtx, getParams = tool.getParams, template = tool.template, modeOpen = tool.modeOpen,
+		grabNow = tool.grabNow, camDist = tool.camDist, frame = tool.frame, tickFrame = tool.tickFrame, ticked = tool.ticked,
+		opens = tool.opens }
 end
 
 ------------------------------------------------------------------ track type
@@ -286,128 +133,80 @@ end
 -- on (the type's wired version, its catenaryAdd). Read every tick: the settings can change while
 -- the tool is open, and the ghost (its key holds the template) is then made again.
 local function trackTemplate() : string
-	return tool.template or proposals.BASE_TEMPLATE
+	return tool.template or world.BASE_TEMPLATE
+end
+
+-- What the tool knows about that template (tg_world caches it).
+local function trackType() : world.TrackType
+	return world.trackType(trackTemplate())
 end
 
 local function readTemplate()
 	if tool.getParams == nil then return end
 	local ok, raw = pcall(tool.getParams)
 	if not ok or raw == nil then return end
-	local tr, el = raw["tg_trackType"], raw["tg_electric"]
-	local name = proposals.BASE_TEMPLATE
-	if tr ~= nil and tr >= 0 then
-		local id = math.floor(tr + 0.5)
-		local okN, n = pcall(api.res.streetTemplateRep.getName, id)
-		if okN and n ~= nil and n ~= "" then name = n as string end
-	end
-	if el ~= nil and math.floor(el + 0.5) == 2 then
-		local okT, t = pcall(function() : table return api.res.streetTemplateRep.get(api.res.streetTemplateRep.find(name)) as table end)
-		local wired = okT and t ~= nil and t.catenaryAdd as string or nil
-		if wired ~= nil and wired ~= "" then name = wired end
-	end
+	local el = raw["tg_electric"]
+	-- (the Electric switch's values count from 1: 1 Off, 2 On)
+	local name = world.templateFor(raw["tg_trackType"], el ~= nil and math.floor(el + 0.5) == 2)
 	if name ~= tool.template then
 		say("track type: " .. name)
 		tool.template = name
 	end
 end
 
--- The template's name in the menu (its file name if it has none).
-local function templateName(name : string) : string
-	local ok, n = pcall(function() : string
-		return (api.res.streetTemplateRep.get(api.res.streetTemplateRep.find(name)) as table).name as string
-	end)
-	if ok and n ~= nil and n ~= "" then return n end
-	return name:match("([^/]+)%.street_template$") or name
-end
-
 -- What the ghost shows now: the path from the start to the end (picked, or under the mouse), or
 -- a stub at the start or the end under the mouse. Remade only when its ends change.
 local function updateGhost()
 	local a, b : TrackEnd, TrackEnd = nil, nil
-	if tool.phase == "from" then a = tool.hover
-	elseif tool.phase == "to" then a, b = tool.from, tool.hover
-	else a, b = tool.from, tool.to end
+	if sess.phase == "from" then a = sess.hover
+	elseif sess.phase == "to" then a, b = sess.from, sess.hover
+	else a, b = sess.from, sess.to end
 	-- (the phase too: picking the hovered end makes it again once, which logs the path)
-	local key = tool.phase .. ":" .. (a ~= nil and tostring(a.node) or "-") .. ":" .. (b ~= nil and tostring(b.node) or "-")
-	if tool.phase == "done" and tool.edit ~= nil then key = key .. ":" .. tostring(tool.edit.rev) end
+	local key = sess.phase .. ":" .. (a ~= nil and tostring(a.node) or "-") .. ":" .. (b ~= nil and tostring(b.node) or "-")
+	if sess.phase == "done" and sess.edit ~= nil then key = key .. ":" .. tostring(sess.edit.rev) end
 	key = key .. ":" .. trackTemplate()
 	if key == tool.ghostKey then return end
 	-- while dragging, the ghost lags behind the handles: the game's check of each ghost (cost,
 	-- collisions) is what makes a drag stutter, so a new one waits until the last is checked
-	if (tool.drag ~= nil or tool.dragEl ~= nil) and tool.ghostTick ~= nil then
-		local since = (tool.ticks or 0) - tool.ghostTick
+	if (sess.drag ~= nil or sess.dragEl ~= nil) and tool.ghostTick ~= nil then
+		local since = (sess.ticks or 0) - tool.ghostTick
 		if since < GHOST_TICKS then return end
 		if tool.ghost ~= nil and tool.dataKey ~= tool.ghostKey and since < GHOST_WAIT then return end
 	end
-	tool.ghostTick = tool.ticks or 0
+	tool.ghostTick = sess.ticks or 0
 	tool.ghostKey, tool.ghost, tool.ghostInfo, tool.ghostWhy, tool.cost, tool.errors = key, nil, nil, nil, nil, nil
 	tool.critical, tool.hasErrors, tool.dataKey = nil, nil, nil
 	tool.pending = nil
 	if a == nil or b == nil then tool.line = nil end -- (a path's line stays until the next one is read out)
 	if a == nil then return end
-	local nodes, info, minRadius, curves, path : {alignment.Sample}, string, number, {readout.Curve}, {geometry.Segment}
-	if b == nil then nodes, info = stubNodes(a)
-	else nodes, info, minRadius, curves, path = pathNodes(a, b, tool.phase == "done" and tool.edit or nil) end
-	if nodes == nil then tool.ghostWhy = info; tool.line = nil; return end
-	-- the vertical profile: from each end at its existing track's grade (the path arrives at b
-	-- going against b's direction, so its grade there is the opposite of b's)
-	local len = nodes[#nodes].s
-	local ss : {number} = {}
-	for i, nd in ipairs(nodes) do ss[i] = nd.s end
-	local z, grades : {number}, {number}
-	local prof : profiles.Profile
-	if b == nil then
-		z, grades = {}, {}
-		for i, s in ipairs(ss) do z[i], grades[i] = a.z + a.grade * s, a.grade end
-	else
-		local pwhy : string
-		if tool.phase == "done" and tool.edit ~= nil then prof, pwhy = edits.profile(tool.edit, len)
-		else prof, pwhy = profiles.solve({ { s = 0, z = a.z }, { s = len, z = b.z } }, a.grade, -b.grade) end
-		if prof == nil then tool.ghostWhy = pwhy; tool.line = nil; return end
-		z, grades = profiles.sample(prof, ss)
-	end
-	-- bridges and tunnels where the track is far off the ground (without them, nothing on failure)
-	local sok, kinds, bridgeType, tunnelType, structs = pcall(proposals.structuresFor, nodes, z, trackTemplate())
-	if not sok then
-		say("ghost: no structures: " .. tostring(kinds))
-		kinds, bridgeType, tunnelType, structs = nil, nil, nil, nil
-	end
-	-- the pieces to build: long, with a node wherever the track changes (a bridge or tunnel starts
-	-- or ends, an elevation point), so each piece is one kind and one span of the profile; the
-	-- readout stays on the dense nodes, which follow the profile
-	local dense, denseZ = nodes, z
-	if path ~= nil then
-		local breaks = kinds ~= nil and structures.changes(nodes, kinds as {string}) or {}
-		for _, pt in ipairs(prof.points) do breaks[#breaks + 1] = pt.s end
-		local long = alignment.sample(path, math.huge, MAX_TURN, breaks)
-		pinEnds(long, a, b)
-		if kinds ~= nil then kinds = alignment.carry(nodes, kinds as {string}, long) end
-		nodes, ss = long, {}
-		for i, nd in ipairs(nodes) do ss[i] = nd.s end
-		z, grades = profiles.sample(prof, ss)
-	end
-	local ok, p, why = pcall(proposals.make, nodes, { template = trackTemplate(), z = z, grades = grades,
+	-- bridges and tunnels where the track is far off the ground: their types first (without them,
+	-- or when the ground cannot be read, the plan has none)
+	local tt = trackType()
+	local ground, water = world.ground, world.water
+	local bridgeType, tunnelType = tt.bridgeType, tt.tunnelType
+	if tt.structuresWhy ~= nil then ground, water = nil, nil end -- (tg_world logged why)
+	local plan, pwhy : plans.Plan, string
+	if b == nil then plan = plans.stub(a as ends.End, ground, water)
+	else plan, pwhy = plans.path(a as ends.End, b as ends.End, sess.phase == "done" and sess.edit or nil, ground, water) end
+	if plan == nil then tool.ghostWhy = pwhy; tool.line = nil; return end
+	if plan.note ~= nil then say("ghost: no structures: " .. plan.note) end
+	local nodes, grades = plan.built.nodes, plan.grades
+	local ok, p, why = pcall(proposals.make, nodes, { template = trackTemplate(), z = plan.built.z, grades = grades,
 		startNode = a.node, endNode = b ~= nil and b.node or nil,
-		kinds = kinds as {string}, bridgeType = bridgeType as integer, tunnelType = tunnelType as integer })
+		kinds = plan.kinds, bridgeType = bridgeType, tunnelType = tunnelType })
 	if not ok then tool.ghostWhy = "error: " .. tostring(p); say("ghost: " .. tool.ghostWhy); return end
 	if p == nil then tool.ghostWhy = why; return end
 	tool.ghost = p as SimpleProposal
 	if b ~= nil then
-		tool.pending = { key = key, pieces = nodes, nodes = dense, z = denseZ, minRadius = minRadius, curves = curves }
-		tool.ghostInfo = structs ~= nil and (info .. "; " .. (structs as string)) or info
-		if tool.phase == "done" and tool.drag == nil then
+		tool.pending = { key = key, plan = plan }
+		tool.ghostInfo = plan.structures ~= nil and (plan.info .. "; " .. plan.structures) or plan.info
+		if sess.phase == "done" and sess.drag == nil then
 			say(string.format("tool: path %s: from node %d (%.1f, %.1f) leaving %.2f deg, to node %d (%.1f, %.1f) arriving %.2f deg, %d pieces, grade %+.1f ‰ to %+.1f ‰",
-				info, a.node, a.x, a.y, math.deg(nodes[1].heading), b.node, b.x, b.y, math.deg(nodes[#nodes].heading), #nodes - 1, grades[1] * 1000, grades[#grades] * 1000))
+				plan.info, a.node, a.x, a.y, math.deg(nodes[1].heading), b.node, b.x, b.y, math.deg(nodes[#nodes].heading), #nodes - 1, grades[1] * 1000, grades[#grades] * 1000))
 			say(string.format("tool: end headings: start %.2f deg, end %.2f deg (the ends' own directions)",
 				math.deg(atan2(a.dy, a.dx)), math.deg(atan2(-b.dy, -b.dx))))
 		end
 	end
-end
-
------------------------------------------------------------------- the tool's steps
-
-local function toolLive() : boolean
-	return tool.active == true and tool.lastTick ~= nil and os.clock() - tool.lastTick <= 3
 end
 
 local function makeContext() : Context
@@ -424,7 +223,7 @@ local function cannotBuild() : string
 	if tool.dataKey ~= tool.ghostKey or tool.cost == nil then return "the game is still checking it" end
 	if tool.critical then return "the game refuses it" end
 	if tool.hasErrors then return "the game reports errors on it" end
-	if not (nodeAlive(tool.from.node) and nodeAlive(tool.to.node)) then return "an end is gone" end
+	if not (world.joinable(sess.from.node) and world.joinable(sess.to.node)) then return "an end is gone or no longer free" end
 	local ok, bal = pcall(function() : integer return api.engine.util.finance.getPlayersBalance(api.engine.util.getPlayer()) end)
 	-- (the game itself lets the account go negative)
 	if ok and bal ~= nil and tool.cost > (bal as integer) then return "not enough money" end
@@ -448,12 +247,13 @@ local function build(p : SimpleProposal, info : string, cost : integer)
 		end)
 	end)
 	if not ok then
-		tool.editMsg = "Cannot build: " .. tostring(err)
+		sessions.refuse(sess, "Cannot build: " .. tostring(err))
 		say("build: " .. tostring(err))
 		return
 	end
 	say(string.format("build: sent %s, cost %s", info or "?", tostring(cost)))
 	closeModeWindow()
+	sessions.reset(sess)
 	resetTool()
 end
 
@@ -486,24 +286,15 @@ local function windowApi() : Builtin.WindowAPI
 end
 
 local function closeConfirm()
-	if not tool.confirmOpen then return end
-	tool.confirmOpen = false
-	tool.closedTick = tool.ticks or 0
+	if not sess.confirmOpen then return end
+	sessions.confirmClosed(sess)
 	local wa = windowApi()
 	if wa ~= nil then pcall(function() : string wa.removeAllWindows(dialog_react_util.DialogWindow); return nil end) end
 end
 
 ------------------------------------------------------------------ the mode window
 
-local MODES = { "horizontal", "vertical" }
-
-local function setMode(m : string)
-	if tool.mode == m then return end
-	tool.mode = m
-	tool.drag, tool.under, tool.underLeg, tool.dragEl, tool.underEl, tool.underS = nil, nil, nil, nil, nil, nil
-	tool.editMsg = nil
-	say("edit: " .. m .. " alignment")
-end
+local MODES : {sessions.Mode} = { "horizontal", "vertical" }
 
 local record ModeParam
 	selected : integer
@@ -533,7 +324,7 @@ local TgModeWindow = react.RegisterWrapperRecipe("TgModeWindow", builtin.Window,
 			-- (1-based, as the game's own toggle groups)
 			onValueChange = function(index : integer)
 				say(string.format("mode window: button %d", index))
-				if MODES[index] ~= nil then setMode(MODES[index]) end
+				if MODES[index] ~= nil then sessions.setMode(sess, MODES[index]) end
 			end,
 		},
 	}
@@ -550,7 +341,7 @@ local function openModeWindow()
 	if tool.modeOpen then return end
 	local wa = windowApi()
 	local ok, err = pcall(function() : string
-		wa.addSingletonWindow(TgModeWindow, { selected = tool.mode == "vertical" and 2 or 1 } as ModeParam)
+		wa.addSingletonWindow(TgModeWindow, { selected = sess.mode == "vertical" and 2 or 1 } as ModeParam)
 		return nil
 	end)
 	if ok and wa ~= nil then
@@ -561,24 +352,14 @@ local function openModeWindow()
 	end
 end
 
--- The track's top speed (m/s), 0 when unknown.
-local trackSpeedNow, trackSpeedOf : number, string = nil, nil
-local function trackSpeed() : number
-	if trackSpeedOf ~= trackTemplate() then
-		local ok, v = pcall(proposals.trackSpeed, trackTemplate())
-		trackSpeedNow, trackSpeedOf = ok and v as number or 0.0, trackTemplate()
-	end
-	return trackSpeedNow
-end
-
 -- What the confirm window says: the path, its readout, what the game warns about, and the cost.
 local function confirmText(cost : integer) : string
-	local lines : {string} = { string.format("New track from node %d to node %d", tool.from.node, tool.to.node),
-		"Track: " .. templateName(trackTemplate()) }
+	local lines : {string} = { string.format("New track from node %d to node %d", sess.from.node, sess.to.node),
+		"Track: " .. trackType().name }
 	if tool.ghostInfo ~= nil then lines[#lines + 1] = "Path: " .. tool.ghostInfo end
 	local l = tool.line
 	if l ~= nil and l.key == tool.ghostKey then
-		local ok, more = pcall(readout.summary, l.nodes, l.z, l.speeds, trackSpeed(), l.minRadius)
+		local ok, more = pcall(plans.summary, l.readout, trackType().speed)
 		if ok then for _, m in ipairs(more as {string}) do lines[#lines + 1] = m end end
 	end
 	if tool.errors ~= nil then
@@ -590,19 +371,17 @@ local function confirmText(cost : integer) : string
 	return wrapText(table.concat(lines, "\n"), 80)
 end
 
--- A click while editing that grabbed nothing: a window shows what would be built and asks first.
+-- The session asks to build (a click while editing that grabbed nothing): a window shows what
+-- would be built and asks first.
 local function openConfirm()
-	if tool.phase ~= "done" or tool.drag ~= nil or tool.dragEl ~= nil or tool.pressGrabbed or tool.confirmOpen then return end
-	-- (the click outside that just closed the window must not open it again)
-	if tool.closedTick ~= nil and (tool.ticks or 0) - tool.closedTick <= 2 then return end
 	local why = cannotBuild()
 	if why ~= nil then
-		tool.editMsg = "Cannot build: " .. why .. "."
+		sessions.refuse(sess, "Cannot build: " .. why .. ".")
 		say("build: not sent: " .. why)
 		return
 	end
 	local p, info, cost = tool.ghost, tool.ghostInfo, tool.cost
-	local from, to = tool.from.node, tool.to.node
+	local from, to = sess.from.node, sess.to.node
 	local wa = windowApi()
 	local ok, err = pcall(function() : string
 		wa.addSingletonWindow(dialog_react_util.DialogWindow, {
@@ -617,10 +396,10 @@ local function openConfirm()
 					text = "Build",
 					onClick = function()
 						closeConfirm()
-						-- (an end may have gone while the window was open; a proposal naming it kills the game)
-						if not (nodeAlive(from) and nodeAlive(to)) then
-							tool.editMsg = "Cannot build: an end is gone."
-							say("build: not sent: an end is gone")
+						-- (an end may have gone, or been built on, while the window was open)
+						if not (world.joinable(from) and world.joinable(to)) then
+							sessions.refuse(sess, "Cannot build: an end is gone or no longer free.")
+							say("build: not sent: an end is gone or no longer free")
 							return
 						end
 						build(p, info, cost)
@@ -640,71 +419,13 @@ local function openConfirm()
 		return nil
 	end)
 	if ok and wa ~= nil then
-		tool.confirmOpen = true
+		sessions.confirmOpened(sess)
 		say(string.format("build: asking to confirm %s, cost %s", info or "?", tostring(cost)))
 	else
 		-- no window could be shown: never build without asking
 		say("build: confirm window failed: " .. tostring(wa == nil and "no window container" or err))
-		tool.editMsg = "The confirm window could not be opened, so nothing was built."
+		sessions.refuse(sess, "The confirm window could not be opened, so nothing was built.")
 	end
-end
-
-local function applyClick()
-	if not toolLive() or tool.confirmOpen then return end
-	if tool.phase == "done" then openConfirm(); return end
-	if tool.hover == nil then
-		say(string.format("tool: nothing to pick at %s: %s",
-			tool.mouseX ~= nil and string.format("%.0f, %.0f", tool.mouseX, tool.mouseY) or "?", tool.hoverMsg or ""))
-		return
-	end
-	local e = tool.hover
-	if tool.phase == "from" then
-		tool.from, tool.phase = e, "to"
-		say(string.format("tool: start at node %d (%.1f, %.1f, %.1f) heading %.2f deg", e.node, e.x, e.y, e.z, math.deg(atan2(e.dy, e.dx))))
-	else
-		tool.to, tool.phase = e, "done"
-		tool.edit = edits.new(tool.from as ends.End, e as ends.End)
-		tool.mode = tool.mode or "horizontal"
-		openModeWindow()
-		say(string.format("tool: end at node %d (%.1f, %.1f, %.1f) heading %.2f deg", e.node, e.x, e.y, e.z, math.deg(atan2(e.dy, e.dx))))
-	end
-	tool.hover, tool.mouseX = nil, nil
-end
-
-local function canGoBack() : boolean
-	return toolLive() and tool.phase ~= "from"
-end
-
-local function stepBack()
-	if tool.phase == "done" then
-		tool.phase, tool.to, tool.edit, tool.drag, tool.under, tool.underLeg = "to", nil, nil, nil, nil, nil
-		tool.dragEl, tool.underEl, tool.underS, tool.vpath, tool.vbadges = nil, nil, nil, nil, nil
-		closeModeWindow()
-	elseif tool.phase == "to" then
-		tool.phase, tool.from = "from", nil
-	else
-		return
-	end
-	tool.hover, tool.mouseX = nil, nil
-	say("tool: back to picking the " .. (tool.phase == "to" and "end" or "start"))
-end
-
--- Right-click and Esc are the same "back" input. The right button shows up as a mouse event just
--- before it, so a "back" within RIGHT_TICKS of a right-click is that click. The game sends "back"
--- only for a click, not after a right-drag of the camera (and the tool never sees the right press),
--- so that "back" is the click. While editing, it removes the turn under the mouse (removeAt) and
--- only Esc steps back. While picking ends, right-click steps back and Esc closes the tool (as in Track
--- Connector). One input steps back once, however many times its "back" arrives (selector, input
--- action, onBack).
-local function rightRecent() : boolean
-	return tool.rightTick ~= nil and (tool.ticks or 0) - tool.rightTick <= RIGHT_TICKS
-end
-local function backRecent() : boolean
-	return tool.backTick ~= nil and (tool.ticks or 0) - tool.backTick <= RIGHT_TICKS
-end
-local function backIsOurs() : boolean
-	if tool.confirmOpen then return false end -- (the window takes it)
-	return backRecent() or (canGoBack() and (rightRecent() or tool.phase == "done"))
 end
 
 ------------------------------------------------------------------ editing
@@ -713,9 +434,9 @@ end
 -- at (handles are picked by where the mouse meets the ground). Else the ends' heights, blended
 -- along the line between them.
 local function zAt(x : number, y : number) : number
-	local ok, z = pcall(function() : number return api.engine.terrain.getHeightAt(api.type.Vec2f.new(x, y)) end)
-	if ok and z ~= nil and z == z then return z end
-	local a, b = tool.from, tool.to
+	local z = world.ground(x, y)
+	if z ~= nil then return z end
+	local a, b = sess.from, sess.to
 	if a == nil or b == nil then return 0 end
 	local lx, ly = b.x - a.x, b.y - a.y
 	local l2 = lx * lx + ly * ly
@@ -730,267 +451,82 @@ local function grabRadius() : number
 	return math.max(3.0, GRAB * (d as number))
 end
 
-local function handleName(h : edits.Handle) : string
-	if h.kind == "pi" then return "turn " .. tostring(h.i - 1) end
-	return (h.kind == "entry" and "start" or "end") .. " of the curve at turn " .. tostring(h.i - 1)
-end
-
 ---------------------------------------------------- editing the vertical alignment
 
 local function vertical() : boolean
-	return tool.mode == "vertical"
+	return sessions.vertical(sess)
 end
 
--- The edited path, every STEP (made again in vertical mode only when the turns or
--- curves change: sampling a long path takes milliseconds, too long for every tick of a drag).
-local function makeVPath() : VPath
-	local vp = tool.vpath
-	if vp ~= nil and vp.edit == tool.edit and vp.hrev == tool.edit.hrev then return vp end
-	local nodes = alignment.sample(edits.path(tool.edit, DP), STEP)
-	if #nodes < 2 then return nil end
-	local ss : {number} = {}
-	for i, nd in ipairs(nodes) do ss[i] = nd.s end
-	return { nodes = nodes, len = nodes[#nodes].s, ss = ss, edit = tool.edit, hrev = tool.edit.hrev }
-end
-
-local gradeLimitNow, gradeLimitOf : number, string = nil, nil
 local function gradeLimit() : number
-	if gradeLimitOf ~= trackTemplate() then
-		local ok, v = pcall(proposals.maxGrade, trackTemplate())
-		gradeLimitNow, gradeLimitOf = ok and v as number or 0.085, trackTemplate()
-		say(string.format("edit: grade limit %.1f permille", gradeLimitNow * 1000))
-	end
-	return gradeLimitNow
-end
-
--- Where elevation point i is on the ground.
-local function elevationXY(i : integer) : number, number
-	local vp = tool.vpath
-	return alignment.pointAt(vp.nodes, tool.edit.elevations[i].f * vp.len)
-end
-
--- What is under the mouse in vertical mode: an elevation point, else the track (where a press adds one).
-local function findUnderV()
-	tool.underEl, tool.underS = nil, nil
-	local x, y, vp = tool.terrX, tool.terrY, tool.vpath
-	if x == nil or vp == nil then return end
-	local best = tool.grab * tool.grab
-	for i = 1, #tool.edit.elevations do
-		local ex, ey = elevationXY(i)
-		local d = (ex - x) ^ 2 + (ey - y) ^ 2
-		if d <= best then tool.underEl, best = i, d end
-	end
-	if tool.underEl ~= nil then return end
-	local s, d = alignment.project(vp.nodes, x, y)
-	if d <= tool.grab then tool.underS = s end
-end
-
-local function pressAtV() : boolean
-	local e, vp = tool.edit, tool.vpath
-	if vp == nil then return false end
-	findUnderV()
-	tool.editMsg = nil
-	local i = tool.underEl
-	if i == nil and tool.underS ~= nil then
-		local why : string
-		i, why = edits.insertElevation(e, tool.underS, vp.len)
-		if i == nil then tool.editMsg = "Cannot add an elevation point here: " .. why; return true end
-		say(string.format("edit: add elevation point %d at %.0f m (%d points)", i, tool.underS, #e.elevations))
-	end
-	if i == nil then return false end
-	local height = api.gui.inputAction.modifierOnlyActionIsActive("IA_PRECISION_MODE")
-	tool.dragEl = { i = i, height = height, pressY = tool.mouseSY, pressZ = e.elevations[i].z }
-	say(string.format("edit: grab elevation point %d%s", i, height and " (height)" or ""))
-	return true
-end
-
-local function dragTickV()
-	local d, e, vp = tool.dragEl, tool.edit, tool.vpath
-	if d == nil or vp == nil or e.elevations[d.i] == nil then return end
-	local el = e.elevations[d.i]
-	local s, z = el.f * vp.len, el.z
-	if d.height then
-		if d.pressY == nil or tool.mouseSY == nil then return end
-		local ok, cam = pcall(function() : number return api.gui.camera.getCameraData().z end)
-		local dist = ok and cam ~= nil and cam == cam and cam as number or 500.0
-		z = d.pressZ + (d.pressY - tool.mouseSY) * HEIGHT_PER_PX * dist
-	else
-		if tool.terrX == nil then return end
-		s = alignment.project(vp.nodes, tool.terrX, tool.terrY)
-	end
-	edits.moveElevation(e, d.i, s, z, vp.len, vp.ss, gradeLimit())
-end
-
-local function releaseV()
-	local d, e = tool.dragEl, tool.edit
-	tool.dragEl = nil
-	tool.ghostTick = nil
-	if d == nil or e == nil or e.elevations[d.i] == nil or tool.vpath == nil then return end
-	local el = e.elevations[d.i]
-	say(string.format("edit: elevation point %d at %.0f m, height %.2f m; steepest %.1f permille", d.i,
-		el.f * tool.vpath.len, el.z, edits.steepest(e, tool.vpath.len, tool.vpath.ss) * 1000))
-end
-
-local function removeAtV() : boolean
-	findUnderV()
-	local i = tool.underEl
-	if i == nil then
-		say("edit: right-click on no elevation point: nothing to remove")
-		return false
-	end
-	edits.removeElevation(tool.edit, i)
-	say(string.format("edit: remove elevation point %d (%d left)", i, #tool.edit.elevations))
-	tool.underEl = nil
-	return true
+	return trackType().maxGrade
 end
 
 -- The profile's badges (grade at each point and halfway between), for the badge layer.
 local function updateVBadges()
-	local vp = tool.vpath
-	if vp == nil then tool.vbadges = nil; return end
-	local prof = edits.profile(tool.edit, vp.len)
-	tool.vbadges = prof ~= nil and readout.profileBadges(vp.nodes, prof, BADGE_EVERY) or nil
+	local e = sess.edit
+	if e == nil then tool.vbadges = nil; return end
+	local prof = edits.profile(e)
+	tool.vbadges = prof ~= nil and readout.profileBadges(edits.nodes(e), prof, plans.BADGE_EVERY) or nil
 end
 
--- What is under the mouse: a handle, else a leg (or the track along it) to add a turn on.
-local function findUnder()
-	tool.under, tool.underLeg = nil, nil
-	local e, x, y = tool.edit, tool.terrX, tool.terrY
-	if e == nil or x == nil then return end
-	tool.under = edits.pick(edits.handles(e, DP), x, y, tool.grab)
-	if tool.under ~= nil then return end
-	local leg, d = edits.nearestLeg(e, x, y)
-	if d <= tool.grab then tool.underLeg = leg; return end
-	-- (or the track itself, which leaves the legs at the curves)
-	local path = edits.path(e, DP)
-	local nodes = alignment.sample(path, math.max(2.0, tool.grab))
-	for _, nd in ipairs(nodes) do
-		if (nd.x - x) ^ 2 + (nd.y - y) ^ 2 <= tool.grab * tool.grab then
-			tool.underLeg = edits.nearestLeg(e, nd.x, nd.y)
-			return
+------------------------------------------------------------------ the session's adapter
+
+local function snapEnd(x : number, y : number, hovered : integer, exclude : integer) : TrackEnd, string
+	local near, onHovered, sawTrack = world.endsNear(x, y, hovered)
+	return ends.snap(near, onHovered, sawTrack, x, y, exclude)
+end
+local function endFree(n : integer) : boolean
+	return world.freeEnd(n) ~= nil
+end
+local function shiftHeld() : boolean
+	return api.gui.inputAction.modifierOnlyActionIsActive("IA_PRECISION_MODE")
+end
+
+-- What the session needs from the game, as of now. fresh (the tool's tick): read the camera
+-- again; else (a mouse or "back" event) as it was at the last tick.
+local function worldNow(fresh : boolean) : sessions.World
+	if fresh then
+		tool.grabNow = grabRadius()
+		local ok, cam = pcall(function() : number return api.gui.camera.getCameraData().z end)
+		tool.camDist = ok and cam ~= nil and cam == cam and cam as number or nil
+	end
+	return { terrX = tool.terrX, terrY = tool.terrY, hovered = tool.hovered, grab = tool.grabNow, cameraDist = tool.camDist,
+		shift = shiftHeld, gradeLimit = gradeLimit, snap = snapEnd, endFree = endFree }
+end
+
+-- Carry out what the session asks for.
+local function run(reqs : {sessions.Request})
+	for _, r in ipairs(reqs) do
+		if r == "openMode" then openModeWindow()
+		elseif r == "closeMode" then closeModeWindow()
+		elseif r == "closeConfirm" then closeConfirm()
+		elseif r == "askBuild" then openConfirm()
+		elseif r == "ghostNow" then tool.ghostTick = nil
+		elseif r == "restart" then resetTool()
 		end
 	end
 end
 
--- Left button down: grab the handle under the mouse, or add a turn on the leg there and grab it.
--- false when there is nothing to grab (the press is left to the game).
-local function pressAt() : boolean
-	if tool.phase ~= "done" or tool.edit == nil or not toolLive() then return false end
-	if vertical() then return pressAtV() end
-	findUnder()
-	local h, e = tool.under, tool.edit
-	tool.editMsg = nil
-	if h ~= nil then
-		if h.kind == "pi" and h.mobility == "fixed" then
-			tool.editMsg = "This turn is next to both ends, so it cannot move. Add another turn first."
-			return true
-		end
-		tool.drag = h
-		say("edit: grab " .. handleName(h))
-		return true
-	end
-	if tool.underLeg ~= nil then
-		local i, why = edits.insertOnLeg(e, tool.underLeg, tool.terrX, tool.terrY, DP)
-		if i == nil then tool.editMsg = "Cannot add a turn here: " .. why; return true end
-		tool.drag = { kind = "pi", i = i, x = e.pis[i].x, y = e.pis[i].y, mobility = edits.mobility(e, i) }
-		say(string.format("edit: add turn %d on leg %d (%d turns)", i - 1, tool.underLeg, #e.pis - 2))
-		return true
-	end
-	return false
+local function backIsOurs() : boolean
+	return sessions.backIsOurs(sess)
 end
-
-local function release()
-	if tool.dragEl ~= nil then releaseV(); return end
-	if tool.drag == nil then return end
-	local h, e = tool.drag, tool.edit
-	tool.drag = nil
-	tool.ghostTick = nil -- (make the ghost of where it ended up now)
-	if e == nil then return end
-	if h.kind == "pi" then
-		local p = e.pis[h.i]
-		say(string.format("edit: %s at (%.1f, %.1f)", handleName(h), p.x, p.y))
-	else
-		say(string.format("edit: curve at turn %d: budget %.1f m", h.i - 1, e.budgets[h.i] or -1))
-	end
-end
-
--- Right-click on a turn removes it; elsewhere it does nothing. true when it removed one (or refused).
-local function removeAt() : boolean
-	if tool.phase ~= "done" or tool.edit == nil or not toolLive() or tool.drag ~= nil or tool.dragEl ~= nil then return false end
-	if vertical() then return removeAtV() end
-	findUnder()
-	local h = tool.under
-	if h == nil or h.kind ~= "pi" then
-		say("edit: right-click on " .. (h ~= nil and handleName(h) or "no turn") .. ": nothing to remove")
-		return false
-	end
-	local ok, why = edits.removePi(tool.edit, h.i)
-	tool.editMsg = not ok and ("Cannot remove this turn: " .. why) or nil
-	if ok then say(string.format("edit: remove turn %d (%d left)", h.i - 1, #tool.edit.pis - 2))
-	else say(string.format("edit: cannot remove turn %d: %s", h.i - 1, why)) end
-	tool.under = nil
-	return true
-end
-
--- The "back" input (see backIsOurs): Esc steps back; a right-click removes the turn under it while
--- editing, and steps back while picking ends.
 local function backAction()
-	if backRecent() or not canGoBack() then return end
-	tool.backTick = tool.ticks or 0
-	if tool.phase == "done" and rightRecent() then removeAt() else stepBack() end
+	run(sessions.back(sess, worldNow(false)))
 end
 
--- While dragging: move the grabbed handle to the mouse.
-local function dragTick()
-	local h, e, x, y = tool.drag, tool.edit, tool.terrX, tool.terrY
-	if h == nil or e == nil or x == nil then return end
-	if h.kind == "pi" then edits.movePi(e, h.i, x, y)
-	else edits.dragBracket(e, h.i, h.kind == "entry", x, y, DP) end
-end
-
--- Every 50 ms while the tool is open: snap to the end under the mouse, keep the ghost up to date.
+-- Every 50 ms while the tool is open: the session's tick, then keep the ghost up to date.
 -- Returns a key that changes whenever the tool must draw again.
 local function toolTick() : string
-	tool.lastTick = os.clock()
-	tool.ticks = (tool.ticks or 0) + 1
+	tool.tickFrame, tool.ticked = tool.frame or 0, true
 	readTemplate()
-	if tool.from ~= nil and freeEndAt(tool.from.node) == nil then
-		say("tool: the start end is gone")
-		closeModeWindow()
-		resetTool()
-	elseif tool.to ~= nil and freeEndAt(tool.to.node) == nil then
-		say("tool: the end is gone")
-		closeModeWindow()
-		tool.phase, tool.to = "to", nil
-	end
-	if tool.phase == "done" and vertical() then
-		tool.grab = grabRadius()
-		tool.vpath = makeVPath()
-		dragTickV()
-		if tool.dragEl == nil then findUnderV() end
-		updateVBadges()
-	elseif tool.phase == "done" then
-		tool.grab = grabRadius()
-		tool.vpath, tool.vbadges = nil, nil
-		dragTick()
-		if tool.drag == nil then findUnder() end
-	else
-		local x, y = tool.terrX, tool.terrY
-		local moved = x == nil or tool.mouseX == nil or math.abs(x - tool.mouseX) + math.abs(y - tool.mouseY) > 1.0
-		if moved or tool.hover == nil then
-			tool.mouseX, tool.mouseY = x, y
-			local exclude = tool.phase == "to" and tool.from.node or nil
-			local ok, e, msg = pcall(snapNear, x, y, tool.hovered, exclude)
-			if not ok then e, msg = nil, "error: " .. tostring(e) end
-			tool.hover, tool.hoverMsg = e as TrackEnd, msg as string
-		end
-	end
+	run(sessions.tick(sess, worldNow(true)))
+	if sess.phase == "done" and vertical() then updateVBadges() else tool.vbadges = nil end
 	updateGhost()
-	local u = tool.drag or tool.under
-	return table.concat({ tool.phase, tool.ghostKey or "-", tool.screenKey or "-", tool.hoverMsg or "", tostring(tool.cost), tool.errors or "",
-		tool.edit ~= nil and tostring(tool.edit.rev) or "-", u ~= nil and (u.kind .. u.i) or "-", tostring(tool.underLeg),
-		tostring(tool.drag ~= nil), string.format("%.0f", tool.grab or 0), tool.editMsg or "",
-		tool.mode or "-", tostring(tool.underEl), tool.underS ~= nil and "s" or "-", tostring(tool.dragEl ~= nil) }, "|")
+	local u, h = sess.drag, sess.hit
+	return table.concat({ tostring(tool.opens or 0), sess.phase, tool.ghostKey or "-", tool.screenKey or "-", sess.hoverMsg or "", tostring(tool.cost), tool.errors or "",
+		sess.edit ~= nil and tostring(sess.edit.rev) or "-", u ~= nil and (u.kind .. u.i) or "-", h ~= nil and (h.kind .. tostring(h.i)) or "-",
+		tostring(sess.drag ~= nil), string.format("%.0f", sess.grab or 0), sess.editMsg or "",
+		sess.mode as string or "-", tostring(sess.dragEl ~= nil) }, "|")
 end
 
 local function tooltip() : Builtin.ActionTooltipParam<any>
@@ -1000,7 +536,7 @@ local function tooltip() : Builtin.ActionTooltipParam<any>
 		if tool.ghostInfo ~= nil then lines[#lines + 1] = "Path: " .. tool.ghostInfo end
 		local l = tool.line
 		if l ~= nil and tool.ghostInfo ~= nil then
-			local ok, more = pcall(readout.summary, l.nodes, l.z, l.speeds, trackSpeed(), l.minRadius)
+			local ok, more = pcall(plans.summary, l.readout, trackType().speed)
 			if ok then for _, m in ipairs(more as {string}) do lines[#lines + 1] = m end end
 		end
 		if tool.ghostWhy ~= nil then lines[#lines + 1] = "No path: " .. tool.ghostWhy; bad = true end
@@ -1009,55 +545,55 @@ local function tooltip() : Builtin.ActionTooltipParam<any>
 			bad = true
 		end
 	end
-	if tool.phase == "from" then
-		if tool.hover ~= nil then
+	if sess.phase == "from" then
+		if sess.hover ~= nil then
 			lines[1], good = "Start the new track here. Then click where it should end.", true
 		else
 			lines[1] = "Track Geometry: click the end of a track to start."
-			if tool.hoverMsg ~= nil then lines[2] = tool.hoverMsg end
+			if sess.hoverMsg ~= nil then lines[2] = sess.hoverMsg end
 		end
 		if tool.buildMsg ~= nil then lines[#lines + 1] = tool.buildMsg; bad = true end
-	elseif tool.phase == "to" then
-		if tool.hover ~= nil then
+	elseif sess.phase == "to" then
+		if sess.hover ~= nil then
 			lines[1], good = "Click to end the new track here.", true
 			path()
 		else
 			lines[1] = "Now click the end of another track."
-			if tool.hoverMsg ~= nil then lines[2] = tool.hoverMsg end
+			if sess.hoverMsg ~= nil then lines[2] = sess.hoverMsg end
 		end
 		lines[#lines + 1] = "Right-click to go back."
 	elseif vertical() then
-		local d = tool.dragEl
+		local d, h = sess.dragEl, sess.hit
 		if d ~= nil then
 			lines[1] = d.height and "Raising or lowering the elevation point (move the mouse up or down)."
 				or "Sliding the elevation point along the track."
-		elseif tool.underEl ~= nil then
+		elseif h ~= nil and h.kind == "point" then
 			lines[1] = "Drag to slide this elevation point along the track; Shift-drag to raise or lower it. Right-click to remove it."
-		elseif tool.underS ~= nil then
+		elseif h ~= nil and h.kind == "track" then
 			lines[1] = "Press to add an elevation point here (and drag it; Shift for its height)."
 		else
 			lines[1] = "Press on the track to add an elevation point. Drag a point to slide it; Shift-drag for its height."
 		end
 		lines[#lines + 1] = string.format("Grade limit: %.0f ‰ (the editor keeps within it)", gradeLimit() * 1000)
-		if tool.editMsg ~= nil then lines[#lines + 1] = tool.editMsg; bad = true end
+		if sess.editMsg ~= nil then lines[#lines + 1] = sess.editMsg; bad = true end
 		path()
 		lines[#lines + 1] = "Click elsewhere to build. Esc to go back."
 	else
-		local h = tool.drag or tool.under
-		if tool.drag ~= nil then
-			lines[1] = "Dragging the " .. handleName(h) .. "."
+		local h = sess.drag or sess.hit
+		if sess.drag ~= nil then
+			lines[1] = "Dragging the " .. sessions.handleName(h) .. "."
 		elseif h ~= nil and h.kind == "pi" then
 			if h.mobility == "fixed" then lines[1] = "This turn is next to both ends and cannot move. Add another turn first."
 			elseif h.mobility == "ray" then lines[1] = "Drag to slide this turn along its end's line. (Next to an end: it stays.)"
 			else lines[1] = "Drag to move this turn. Right-click to remove it." end
+		elseif h ~= nil and h.kind ~= "leg" then
+			lines[1] = "Drag to resize the curve (the " .. sessions.handleName(h) .. ")."
 		elseif h ~= nil then
-			lines[1] = "Drag to resize the curve (the " .. handleName(h) .. ")."
-		elseif tool.underLeg ~= nil then
 			lines[1] = "Press and drag to add a turn here."
 		else
 			lines[1] = "Drag a turn or a curve's bracket. Press on the track to add a turn."
 		end
-		if tool.editMsg ~= nil then lines[#lines + 1] = tool.editMsg; bad = true end
+		if sess.editMsg ~= nil then lines[#lines + 1] = sess.editMsg; bad = true end
 		path()
 		lines[#lines + 1] = "Click elsewhere to build. Esc to go back."
 	end
@@ -1066,12 +602,6 @@ local function tooltip() : Builtin.ActionTooltipParam<any>
 		cost = tool.cost,
 	}
 	return { recipe = construction_react_util.SimpleTooltipRecipe as Recipe<any>, param = param }
-end
-
-local function isTrackEdge(entity : Engine.Entity) : boolean
-	if entity == nil or not api.engine.entityExists(entity) then return false end
-	local be = api.engine.getComponent(entity, api.type.ComponentType.BASE_EDGE) as Engine.Component.BaseEdge
-	return be ~= nil and be.roadType == api.type["enum"].RoadType.TRACK
 end
 
 -- What the game says is wrong with the ghost: its errors and warnings, and what it runs into.
@@ -1132,7 +662,7 @@ local function slopeIcon(g : number) : string
 	local n = math.floor(math.abs(g) * 100 + 0.5)
 	if n == 0 and math.abs(g) >= 0.001 then n = 1 end
 	n = math.min(4, n)
-	if g < 0 then n = -n end
+	if g < 0 and n > 0 then n = -n end -- (never -0: Lua 5.2 prints it "-0", and there's no such icon)
 	return ICONS .. "symbol_slope_" .. tostring(n) .. "_20.tga"
 end
 
@@ -1153,7 +683,7 @@ local function badgeRows(b : readout.Badge) : {TreeNodeId}
 	if b.kind == "point" then return { builtin.TextView{ meta = { styleSheet = styleutil.makeStyle{ color = BADGE_TEXT } }, text = string.format("%.1f m", b.z) }, grade } end
 	if b.kind == "span" or b.kind == "grade" then return { grade } end
 	-- (the game's curve limit, but no faster than the track itself)
-	local top = trackSpeed()
+	local top = trackType().speed
 	local v = b.speed ~= nil and top > 0 and math.min(b.speed, top) or b.speed
 	return { badgeRow(ICONS .. "symbol_speed_16.tga", v ~= nil and string.format("%.0f", v * 3.6) or "..."), grade }
 end
@@ -1194,10 +724,10 @@ local badgesLogged = false
 local function placeBadges()
 	local l = tool.line
 	local list, key : {readout.Badge}, string
-	if vertical() and tool.phase == "done" then
-		list, key = tool.vbadges, "v" .. (tool.edit ~= nil and tostring(tool.edit.rev) or "-")
+	if vertical() and sess.phase == "done" then
+		list, key = tool.vbadges, "v" .. (sess.edit ~= nil and tostring(sess.edit.rev) or "-")
 	elseif l ~= nil and tool.ghostInfo ~= nil then
-		list, key = l.badges, l.key
+		list, key = l.readout.badges, l.key
 	end
 	if list == nil or #list == 0 then
 		tool.screen, tool.screenKey = nil, nil
@@ -1288,15 +818,15 @@ end
 -- The gizmos of the edit: the PI polyline, a circle at each turn (coloured by how it can move)
 -- and a tick across the leg at each curve's start and end (its brackets).
 local function editEdges() : {Builtin.Type.EdgeRenderable.Edge}
-	local e, r = tool.edit, tool.grab or 10.0
+	local e, r = sess.edit, sess.grab or 10.0
 	local w = math.max(0.5, r / 8)
-	local hot = tool.drag or tool.under
-	local function isHot(h : edits.Handle) : boolean return hot ~= nil and hot.kind == h.kind and hot.i == h.i end
+	local hot = sess.drag or sess.hit
+	local function isHot(h : edits.Hit) : boolean return hot ~= nil and hot.kind == h.kind and hot.i == h.i end
 	local edges : {Builtin.Type.EdgeRenderable.Edge} = {}
-	local pis = e.pis
+	local pis = edits.polyline(e)
 	for i = 1, #pis - 1 do
 		local a, b = pis[i], pis[i + 1]
-		local c = (tool.drag == nil and tool.under == nil and tool.underLeg == i) and COLORS.hot or COLORS.leg
+		local c = (sess.drag == nil and hot ~= nil and hot.kind == "leg" and hot.i == i) and COLORS.hot or COLORS.leg
 		-- in pieces at most LEG_STEP long (more on very long legs), each over the ground
 		local len = math.sqrt((b.x - a.x) ^ 2 + (b.y - a.y) ^ 2)
 		local n = math.max(1, math.ceil(len / math.max(LEG_STEP, len / MAX_LEG_PIECES)))
@@ -1309,7 +839,7 @@ local function editEdges() : {Builtin.Type.EdgeRenderable.Edge}
 			px, py, pz = qx, qy, qz
 		end
 	end
-	for _, h in ipairs(edits.handles(e, DP)) do
+	for _, h in ipairs(edits.handles(e)) do
 		local z = zAt(h.x, h.y)
 		if h.kind == "pi" then
 			edges[#edges + 1] = circleEdge(h.x, h.y, z, r, isHot(h) and COLORS.hot or COLORS[h.mobility], w)
@@ -1331,14 +861,15 @@ end
 -- The vertical gizmos: at each end and elevation point a circle on the ground (where the mouse
 -- grabs it) and a post from the ground up to the track; grey at the ends, white under the mouse.
 local function verticalEdges() : {Builtin.Type.EdgeRenderable.Edge}
-	local e, vp, r = tool.edit, tool.vpath, tool.grab or 10.0
+	local e, r = sess.edit, sess.grab or 10.0
 	local edges : {Builtin.Type.EdgeRenderable.Edge} = {}
-	if vp == nil then return edges end
+	if e == nil then return edges end
 	local w = math.max(0.5, r / 8)
-	local prof = edits.profile(e, vp.len)
+	local prof = edits.profile(e)
 	if prof == nil then return edges end
+	local nodes = edits.nodes(e)
 	local function post(s : number, c : {number})
-		local x, y = alignment.pointAt(vp.nodes, s)
+		local x, y = alignment.pointAt(nodes, s)
 		local g, z = zAt(x, y), profiles.heightAt(prof, s)
 		edges[#edges + 1] = circleEdge(x, y, g, r, c, w)
 		if math.abs(z - g) > 0.1 then
@@ -1347,9 +878,10 @@ local function verticalEdges() : {Builtin.Type.EdgeRenderable.Edge}
 		end
 	end
 	post(0, COLORS.fixed)
-	post(vp.len, COLORS.fixed)
-	local hot = tool.dragEl ~= nil and tool.dragEl.i or tool.underEl
-	for i, el in ipairs(e.elevations) do post(el.f * vp.len, i == hot and COLORS.hot or COLORS.ray) end
+	post(edits.length(e), COLORS.fixed)
+	local h = sess.hit
+	local hot = sess.dragEl ~= nil and sess.dragEl.i or (h ~= nil and h.kind == "point" and h.i or nil)
+	for i, pt in ipairs(edits.points(e)) do post(pt.s, i == hot and COLORS.hot or COLORS.ray) end
 	return edges
 end
 
@@ -1360,8 +892,8 @@ local function toolAction(abort : function()) : TreeNodeId
 	react.onUnmount(function(_ : any)
 		closeConfirm()
 		closeModeWindow()
-		tool.active = false
-		tool.hover, tool.mouseX = nil, nil
+		tool.active, tool.ticked, tool.opens = false, false, (tool.opens or 0) + 1
+		sessions.blur(sess)
 	end)
 	local key = engine_react_util.useStepStateTimer(toolTick, 0.05)
 	local _ = key:old()
@@ -1372,51 +904,36 @@ local function toolAction(abort : function()) : TreeNodeId
 			end,
 			onSelect = function(entity : Engine.Entity, _i : {integer}, _d : Gui.SelectionDetails) : boolean
 				tool.hovered = entity
-				applyClick()
+				run(sessions.click(sess))
 				return true
 			end,
 			onSelectSecondary = function(_e : Engine.Entity, _i : {integer}, _d : Gui.SelectionDetails) : boolean
-				if tool.phase == "done" and toolLive() then return true end -- (its "back" removes the turn)
-				if not canGoBack() then return false end
+				if sess.phase == "done" and toolLive() then return true end -- (its "back" removes the turn)
+				if not sessions.canGoBack(sess) then return false end
 				backAction()
 				return true
 			end,
-			filter = isTrackEdge,
+			filter = world.isTrackEdge,
 			-- a left click anywhere counts (the selector alone only reports clicks on a track piece)
 			onProcessMouseEvent = function(evt : Gui.Mouse.Event) : boolean
 				local T = api.gui.mouse.Event.Type
-				if evt.y ~= nil then tool.mouseSY = evt.y end -- (for a Shift-drag's height)
-				if evt.button == 2 then
-					-- (only marks the "back" that follows as a right-click; the camera keeps the button)
-					if evt.type ~= T.Moved then tool.rightTick = tool.ticks or 0 end
-					return false
-				end
-				if evt.button ~= 0 or not toolLive() then return false end
-				-- (the confirm window takes the mouse; the click that closes it must do nothing here)
-				if tool.confirmOpen or (tool.closedTick ~= nil and (tool.ticks or 0) - tool.closedTick <= 2) then return false end
-				if tool.phase == "done" then
-					if evt.type == T.Pressed then
-						tool.pressGrabbed = pressAt()
-						return tool.pressGrabbed
-					end
-					if evt.type == T.Released or evt.type == T.Clicked then
-						local had = tool.drag ~= nil or tool.dragEl ~= nil or tool.pressGrabbed
-						release()
-						if evt.type == T.Clicked and not had then openConfirm(); return true end
-						return had
-					end
-					return false
-				end
-				if evt.type ~= T.Clicked then return false end
-				applyClick()
-				return true
+				local kind : sessions.MouseKind = evt.type == T.Pressed and "pressed" or evt.type == T.Released and "released"
+					or evt.type == T.Clicked and "clicked" or evt.type == T.Moved and "moved" or "other"
+				local took, reqs = sessions.mouse(sess, worldNow(false), evt.button, kind, evt.y)
+				run(reqs)
+				return took
 			end,
 		},
 	}
-	-- never hand the game a ghost that names a node that is gone; only one ProposalViewer at a time
+	-- until the first tick, what the tool holds is from when it was last open: draw none of it
+	-- (no ghost, gizmos, badges or tooltip for that one frame)
+	local fresh = tool.ticked == true
+	-- never hand the game a ghost that names a node that is gone or no longer a free end (on
+	-- reopening, the first render comes before the tick that drops such an end); only one
+	-- ProposalViewer at a time
 	local g = tool.ghost
-	if g ~= nil and (tool.from == nil or nodeAlive(tool.from.node)) and (tool.to == nil or nodeAlive(tool.to.node))
-		and (tool.hover == nil or nodeAlive(tool.hover.node)) then
+	if fresh and g ~= nil and (sess.from == nil or world.joinable(sess.from.node)) and (sess.to == nil or world.joinable(sess.to.node))
+		and (sess.hover == nil or world.joinable(sess.hover.node)) then
 		local gk = tool.ghostKey
 		children[#children + 1] = builtin.ProposalViewer{
 			simpleProposal = g,
@@ -1429,24 +946,18 @@ local function toolAction(abort : function()) : TreeNodeId
 				tool.dataKey = gk
 				local l = tool.pending
 				if l ~= nil and l.key == gk then
-					local found : integer
-					l.speeds, found = curveSpeeds(data, #l.pieces - 1)
-					l.speeds = alignment.carry(l.pieces, l.speeds, l.nodes)
-					local bok, bs = pcall(function() : {readout.Badge}
-						local out = readout.badges(l.nodes, l.z, l.speeds, l.curves)
-						for _, b in ipairs(readout.alongBadges(l.nodes, l.z, l.speeds, BADGE_EVERY)) do out[#out + 1] = b end
-						return out
-					end)
-					l.badges = bok and bs as {readout.Badge} or nil
-					if not bok then say("badges: " .. tostring(bs)) end
-					tool.line, tool.pending = l, nil
+					local m = #l.plan.built.nodes - 1
+					local speeds, found = curveSpeeds(data, m)
+					local r, bwhy = plans.readout(l.plan, speeds)
+					if bwhy ~= nil then say("badges: " .. bwhy) end
+					tool.line, tool.pending = { key = gk, readout = r }, nil
 					if not tool.speedsLogged then
 						tool.speedsLogged = true
 						say(string.format("ghost: the game's curve limits for %d of %d pieces, %d curve badges",
-							found, #l.pieces - 1, l.badges ~= nil and #l.badges or 0))
+							found, m, r.badges ~= nil and #r.badges or 0))
 					end
 				end
-				if tool.errors ~= nil and tool.drag == nil and tool.errorsLogged ~= gk then
+				if tool.errors ~= nil and sess.drag == nil and tool.errorsLogged ~= gk then
 					tool.errorsLogged = gk
 					say("ghost: " .. tool.errors:gsub("\n", "; "))
 				end
@@ -1455,7 +966,7 @@ local function toolAction(abort : function()) : TreeNodeId
 			proposalId = "westrom_track_geometry_ghost_" .. gk,
 		}
 	end
-	if tool.phase == "done" and tool.edit ~= nil then
+	if fresh and sess.phase == "done" and sess.edit ~= nil then
 		local ok, edges = pcall(vertical() and verticalEdges or editEdges)
 		if ok then
 			children[#children + 1] = builtin.EdgeRenderable{ edges = edges as {Builtin.Type.EdgeRenderable.Edge}, ignoreDepth = true }
@@ -1464,14 +975,14 @@ local function toolAction(abort : function()) : TreeNodeId
 			say("gizmo: " .. tool.gizmoErr)
 		end
 	end
-	if tool.screen ~= nil and #tool.screen > 0 then
+	if fresh and tool.screen ~= nil and #tool.screen > 0 then
 		children[#children + 1] = builtin.FullScreenComponent{ recipe = TgBadges as Recipe<any>, param = { items = tool.screen } as BadgesParam }
 	end
-	children[#children + 1] = builtin.ActionTooltip(tooltip())
+	if fresh then children[#children + 1] = builtin.ActionTooltip(tooltip()) end
 	return builtin.ActionDescriptor{
 		tool = "construction",
 		onBack = function()
-			if tool.confirmOpen then return end -- (the window takes Esc itself: Cancel)
+			if sess.confirmOpen then return end -- (the window takes Esc itself: Cancel)
 			if backIsOurs() then backAction() else abort() end
 		end,
 		terrainCirclePolicy = "Never",
@@ -1510,7 +1021,7 @@ local function trackObjects() : {MenuCategoryUtil.FilterObject}, integer
 		local wired = ok and t ~= nil and (t as table).catenaryRemove ~= nil and (t as table).catenaryRemove ~= ""
 		if ok and t ~= nil and (t as StreetTemplate).roadType == api.type["enum"].RoadType.TRACK and not wired then
 			out[#out + 1] = o
-			if api.res.streetTemplateRep.getName(o.id) == proposals.BASE_TEMPLATE then best = #out end
+			if api.res.streetTemplateRep.getName(o.id) == world.BASE_TEMPLATE then best = #out end
 		end
 	end
 	return out, best or 1
@@ -1567,11 +1078,14 @@ end
 
 local TgProbe = react.RegisterRecipe("TgProbe", function() : TreeNodeId
 	react.useRefLazy(function() : boolean
+		sessions.confirmClosed(sess)
+		sessions.reset(sess)
 		resetTool()
 		return true
 	end)
 	-- the ground under the mouse can only be read here: in the tool's own timer the game refuses it
 	react.onStep(function()
+		tool.frame = (tool.frame or 0) + 1
 		if not tool.active then return end
 		local ok, pos = pcall(function() : Vec3f
 			if not api.gui.mouse.hasTerrainPosition() then return nil end

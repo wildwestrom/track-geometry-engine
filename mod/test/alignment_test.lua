@@ -204,5 +204,30 @@ do
 	check(worst < 0.001, string.format("long Hermite pieces within 1 mm of the curve (worst %.3f mm at s = %.0f m)", worst * 1000, at))
 end
 
+-- 7. A break just past a segment boundary keeps its node (the boundary's node moves onto it);
+--    of two breaks closer than MIN_PIECE, the first keeps its node. No piece is shorter for it.
+do
+	local p = G.buildPath({ G.vec(0, 0, 0), G.vec(400, 0, 0), G.vec(400, 400, 0) }, G.DEFAULT_PARAMS, nil)
+	local first = G.length(p[1]) + G.length(p[2]) -- where the entry spiral meets the arc
+	local function has(ns, s)
+		for _, nd in ipairs(ns) do if near(nd.s, s, 1e-9) then return true end end
+		return false
+	end
+	local function shortest(ns)
+		local m = math.huge
+		for i = 2, #ns do m = math.min(m, ns[i].s - ns[i - 1].s) end
+		return m
+	end
+	local ns = A.sample(p, math.huge, math.rad(15), { first + 0.5 })
+	check(has(ns, first + 0.5) and not has(ns, first) and shortest(ns) >= A.MIN_PIECE,
+		"a break 0.5 m past a segment boundary has the node")
+	ns = A.sample(p, math.huge, math.rad(15), { 100, 100.5 })
+	check(has(ns, 100) and not has(ns, 100.5) and shortest(ns) >= A.MIN_PIECE,
+		"of two breaks 0.5 m apart, the first has the node")
+	ns = A.sample(p, math.huge, math.rad(15), { 0.5 })
+	check(not has(ns, 0.5) and ns[1].s == 0 and shortest(ns) >= A.MIN_PIECE,
+		"a break 0.5 m from the start: the first node stays")
+end
+
 print(failures == 0 and "all passed" or (failures .. " failed"))
 os.exit(failures == 0 and 0 or 1)
