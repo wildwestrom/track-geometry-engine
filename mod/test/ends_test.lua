@@ -1,18 +1,10 @@
--- Offline checks for the starting alignment between two picked ends (tg_ends.script.tl). Run from
--- mod/ after check.sh builds .tlpath/:
---   lua test/ends_test.lua
-local tl = require("tl")
-tl.loader()
-package.path = ".tlpath/?.tl;" .. package.path
-local G = require("westrom_track_geometry::/track_geometry/tg_geometry.script.tl")
-local A = require("westrom_track_geometry::/track_geometry/tg_alignment.script.tl")
-local E = require("westrom_track_geometry::/track_geometry/tg_ends.script.tl")
+-- Offline checks for the starting alignment between two picked ends (tg_ends.script.tl).
+local H = dofile("test/harness.lua")
+local G = H.mod("tg_geometry")
+local A = H.mod("tg_alignment")
+local E = H.mod("tg_ends")
 
-local failures = 0
-local function check(ok, what)
-	print((ok and "ok   " or "FAIL ") .. what)
-	if not ok then failures = failures + 1 end
-end
+local check = H.check
 local function atan2(y, x) return math.atan2 and math.atan2(y, x) or math.atan(y, x) end
 local function angleDiff(a, b) return math.abs(atan2(math.sin(a - b), math.cos(a - b))) end
 local function eq(a, b) return math.abs(a - b) < 1e-9 end
@@ -188,8 +180,8 @@ check(none == nil and hint:find("Point at the ground") ~= nil, "snap: over no gr
 
 -- A piece cut in two: the parts meet at the cut, keep the piece's ends, and follow its curve.
 local curved = { edge = 41, node0 = 21, node1 = 22, p0 = P(0, 0, 0), t0 = P(300, 0, 3), p1 = P(200, 200, 6), t1 = P(0, 300, 3) }
-local u = E.nearestOnPiece(curved, 150, 60)
-local cp = E.pieceAt(curved, u)
+local cp = E.snap({}, curved, 150, 60, 0)
+local u = cp.u
 local cut = true
 for k = 0, 20 do
 	local q = E.pieceAt(curved, k / 20)
@@ -280,7 +272,7 @@ local function aimedNode(x, y) return E.aim(E.nodeEnd(5, 0, 0, 0, { both(0, 0) }
 local gA = E.groundEnd(700, 300, 0) -- (an arc there: radius 967 m)
 local swPis, swHow = E.initialPis(aimedNode(gA.x, gA.y), gA)
 local t1 = swPis[2].x
-check(swHow == "switch" and eq(swPis[2].y, 0) and t1 < 414 and math.abs(t1 - E.SWITCH_RADIUS * math.tan(deflection(aimedNode(1, 0), swPis) / 2)) < 0.01,
+check(swHow == "switch" and eq(swPis[2].y, 0) and t1 < 414 and math.abs(t1 - 180 * math.tan(deflection(aimedNode(1, 0), swPis) / 2)) < 0.01,
 	"switch to the ground nearly ahead: the turn where the curve's radius is SWITCH_RADIUS (" .. tostring(t1) .. ")")
 local trPis, trHow = E.initialPis(E.trackEnd(5, 0, 0, 0, 1, 0, 0), gA)
 check(trHow == "arc" and math.abs(trPis[2].x - 580000 / 1400) < 1e-9, "a free track end there: the arc as before")
@@ -305,5 +297,4 @@ check(E.nearestPiece(two, 50, 3).edge == 32, "near pieces: the nearer of two")
 check(E.nearestPiece(two, 50, 3, 32).edge == 31, "near pieces: not the skipped one")
 check(E.nearestPiece(two, 50, -E.PIECE_SNAP - 0.5) == nil, "near pieces: none past PIECE_SNAP")
 
-print(failures == 0 and "all passed" or (failures .. " failed"))
-os.exit(failures == 0 and 0 or 1)
+H.done()

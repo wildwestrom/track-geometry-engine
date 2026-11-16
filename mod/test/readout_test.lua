@@ -1,16 +1,8 @@
--- Offline checks for the speed and grade readout (tg_readout.script.tl). Run from mod/ after
--- check.sh builds .tlpath/:
---   lua test/readout_test.lua
-local tl = require("tl")
-tl.loader()
-package.path = ".tlpath/?.tl;" .. package.path
-local R = require("westrom_track_geometry::/track_geometry/tg_readout.script.tl")
+-- Offline checks for the speed and grade readout (tg_readout.script.tl).
+local H = dofile("test/harness.lua")
+local R = H.mod("tg_readout")
 
-local failures = 0
-local function check(ok, what)
-	print((ok and "ok   " or "FAIL ") .. what)
-	if not ok then failures = failures + 1 end
-end
+local check = H.check
 local function near(a, b) return math.abs(a - b) < 1e-9 end
 
 local vmax = 120 / 3.6
@@ -21,8 +13,6 @@ for i = 0, 30 do
 	nodes[#nodes + 1] = { x = i * 10, y = 0, heading = 0, s = i * 10, k = 0 }
 	z[#z + 1] = i * 0.2 -- +20 ‰
 end
-local g = R.grades(nodes, z)
-check(#g == 30 and near(g[1], 0.02) and near(g[30], 0.02), "grades: one per piece, rise over run")
 
 local lines = R.summary(nodes, z, nil, vmax, nil)
 check(lines[1] == "Curve limit (game): waiting for the game, track 120 km/h", "summary: no data yet: " .. lines[1])
@@ -80,8 +70,8 @@ check(lines[2] == "Grade: -80.0 ‰ to +120.0 ‰, steepest +120.0 ‰ at 150 m"
 	"summary: varying grade: " .. lines[2])
 
 -- the profile's badges: at each point (ends too) and halfway along each span
-local P = require("westrom_track_geometry::/track_geometry/tg_profile.script.tl")
-local A = require("westrom_track_geometry::/track_geometry/tg_alignment.script.tl")
+local P = H.mod("tg_profile")
+local A = H.mod("tg_alignment")
 local prof = assert(P.solve({ { s = 0, z = 0 }, { s = 100, z = 3 }, { s = 300, z = 7 } }, 0.02, 0))
 local pb = R.profileBadges(nodes, prof, 1000)
 check(#pb == 5 and pb[1].kind == "point" and pb[2].kind == "span" and pb[3].kind == "point",
@@ -118,8 +108,4 @@ local ax, ay = A.pointAt(nodes, 123)
 local ps, pd = A.project(nodes, 123, 7)
 check(near(ax, 123) and near(ay, 0) and near(ps, 123) and near(pd, 7), "point at a chainage, chainage nearest a point")
 
-if failures > 0 then
-	print(failures .. " failed")
-	os.exit(1)
-end
-print("all passed")
+H.done()

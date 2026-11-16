@@ -1,17 +1,9 @@
--- Offline checks for placing bridges and tunnels (tg_structures.script.tl). Run from mod/ after
--- check.sh builds .tlpath/:
---   lua test/structures_test.lua
-local tl = require("tl")
-tl.loader()
-package.path = ".tlpath/?.tl;" .. package.path
-local S = require("westrom_track_geometry::/track_geometry/tg_structures.script.tl")
-local A = require("westrom_track_geometry::/track_geometry/tg_alignment.script.tl")
+-- Offline checks for placing bridges and tunnels (tg_structures.script.tl).
+local H = dofile("test/harness.lua")
+local S = H.mod("tg_structures")
+local A = H.mod("tg_alignment")
 
-local failures = 0
-local function check(ok, what)
-	print((ok and "ok   " or "FAIL ") .. what)
-	if not ok then failures = failures + 1 end
-end
+local check = H.check
 
 -- A straight track along x at height 0, a node every 10 m, over ground given by f(x).
 local function line(len)
@@ -88,5 +80,4 @@ do
 		"carry: each long piece takes the kind under it")
 end
 
-print(failures == 0 and "all passed" or (failures .. " failed"))
-os.exit(failures == 0 and 0 or 1)
+H.done()

@@ -84,26 +84,16 @@ local record Run
 end
 
 local record Ends
-	Kind : Kind
 	Run : Run
 	Dir : Dir
 	Point : Point
 	Piece : Piece
 	End : End
 	SNAP : number
-	SWITCH_RADIUS : number
 	CLEAR : number
-	NEAR : number
-	RUN_TURN : number
-	NODE_SNAP : number
 	PIECE_SNAP : number
-	MIN_HALF : number
 	MIN_LEG : number
-	MAX_REACH : number
 	LEAD : number
-	FAR : number
-	STRAIGHT_ANGLE : number
-	STRAIGHT_OFFSET : number
 	trackEnd : function(node : integer, x : number, y : number, z : number, dx : number, dy : number,
 		grade : number) : End
 	groundEnd : function(x : number, y : number, z : number) : End
@@ -112,7 +102,6 @@ local record Ends
 	runs : function(e : End, branch : Piece, mayGo : function(joint : integer, from : integer, to : integer) : boolean) : {Run}
 	aim : function(e : End, x : number, y : number) : End
 	pieceAt : function(pc : Piece, u : number) : Point, Point
-	nearestOnPiece : function(pc : Piece, x : number, y : number) : number
 	nearestPiece : function(pieces : {Piece}, x : number, y : number, skip ?: integer) : Piece
 	halves : function(pc : Piece, u : number) : Piece, Piece
 	splitEnd : function(pc : Piece, u : number) : End
@@ -129,22 +118,22 @@ local M : Ends = {}
 M.MIN_LEG = 20.0
 -- Furthest the rays may meet from an end for a "corner" (m). Rays that meet further away (nearly
 -- parallel) make an "s-curve".
-M.MAX_REACH = 1000.0
+local MAX_REACH = 1000.0
 -- How far out of each end its lead PI goes (m), when the room allows.
 M.LEAD = 200.0
 -- Ends further apart than this (m) get the "long s-curve" layout, unless they are in line.
-M.FAR = 800.0
+local FAR = 800.0
 -- Float noise: ends this close to one line are exactly in line. The game keeps positions and
 -- tangents in single precision: two ends of one straight line came out 1.4e-7 rad and 0.086 mm
 -- apart, and a position on an 8 km map is only good to about 0.5 mm. Anything more is a kink a
 -- straight would hide. (Sine of the angle between the directions; offset across the line, m.)
-M.STRAIGHT_ANGLE = 1e-6
-M.STRAIGHT_OFFSET = 0.002
+local STRAIGHT_ANGLE = 1e-6
+local STRAIGHT_OFFSET = 0.002
 -- A free end this close to the mouse snaps to it (m).
 M.SNAP = 40.0
 -- The radius a switch (a node or cut end) leaves on, as its starting layout puts it (m): the
 -- game's own builder branched off a straight at 182 m (and builds them as gentle as 4 km).
-M.SWITCH_RADIUS = 180.0
+local SWITCH_RADIUS = 180.0
 -- A new piece may overlap the existing track only where it shares a node with it: the game
 -- refuses one that does not ("Construction Not Possible"). So the first piece out of a switch runs
 -- on to the first node this far from the track beside it (m, centre to centre: parallel tracks'
@@ -152,9 +141,9 @@ M.SWITCH_RADIUS = 180.0
 M.CLEAR = 5.0
 -- A node with track through it this close to the mouse snaps to it (m); further, a click on track
 -- cuts the piece there. (MIN_HALF: as near a node as a cut can be.)
-M.NODE_SNAP = 5.0
+local NODE_SNAP = 5.0
 -- Shortest part of a piece a cut may leave (m): nearer its end, the node there is picked instead.
-M.MIN_HALF = 5.0
+local MIN_HALF = 5.0
 
 -- The free track end at node, at (x, y, z), with (dx, dy) the unit direction out of its piece and
 -- grade the piece's grade going out along it.
@@ -191,6 +180,7 @@ function M.aim(e : End, x : number, y : number) : End
 end
 
 local function pt(x : number, y : number, z : number) : Point return { x = x, y = y, z = z } end
+local function scaled(v : Point, k : number) : Point return pt(v.x * k, v.y * k, v.z * k) end
 
 -- The point at u along piece pc, and the curve's derivative there (d/du).
 function M.pieceAt(pc : Piece, u : number) : Point, Point
@@ -204,8 +194,8 @@ function M.pieceAt(pc : Piece, u : number) : Point, Point
 			d00 * p0.z + d10 * m0.z + d01 * p1.z + d11 * m1.z)
 end
 
--- The curve parameter of the point on piece pc nearest (x, y), in plan.
-function M.nearestOnPiece(pc : Piece, x : number, y : number) : number
+-- The curve parameter of the point on piece pc nearest (x, y), and how far it is, in plan.
+local function nearestOnPiece(pc : Piece, x : number, y : number) : number, number
 	local function d2(u : number) : number
 		local p = M.pieceAt(pc, u)
 		return (p.x - x) ^ 2 + (p.y - y) ^ 2
@@ -223,7 +213,8 @@ function M.nearestOnPiece(pc : Piece, x : number, y : number) : number
 		local a, b = hi - g * (hi - lo), lo + g * (hi - lo)
 		if d2(a) < d2(b) then hi = b else lo = a end
 	end
-	return (lo + hi) / 2
+	local u = (lo + hi) / 2
+	return u, math.sqrt(d2(u))
 end
 
 -- The mouse need not be on a track to cut it: a piece this close to it is picked (m, in plan; the
@@ -236,8 +227,7 @@ function M.nearestPiece(pieces : {Piece}, x : number, y : number, skip ?: intege
 	local bestD = M.PIECE_SNAP
 	for _, pc in ipairs(pieces) do
 		if pc.edge ~= skip then
-			local p = M.pieceAt(pc, M.nearestOnPiece(pc, x, y))
-			local d = math.sqrt((p.x - x) ^ 2 + (p.y - y) ^ 2)
+			local _, d = nearestOnPiece(pc, x, y)
 			if d <= bestD then best, bestD = pc, d end
 		end
 	end
@@ -248,7 +238,6 @@ end
 -- scale with the part's share), meeting at the cut with no kink.
 function M.halves(pc : Piece, u : number) : Piece, Piece
 	local p, d = M.pieceAt(pc, u)
-	local function scaled(v : Point, k : number) : Point return pt(v.x * k, v.y * k, v.z * k) end
 	return { edge = pc.edge, node0 = pc.node0, p0 = pc.p0, t0 = scaled(pc.t0, u), p1 = p, t1 = scaled(d, u) },
 		{ edge = pc.edge, node1 = pc.node1, p0 = p, t0 = scaled(d, 1 - u), p1 = pc.p1, t1 = scaled(pc.t1, 1 - u) }
 end
@@ -270,8 +259,8 @@ end
 function M.clearance(e : End, x : number, y : number) : number
 	local best = math.huge
 	for _, pc in ipairs(e.beside or {}) do
-		local p = M.pieceAt(pc, M.nearestOnPiece(pc, x, y))
-		best = math.min(best, math.sqrt((p.x - x) ^ 2 + (p.y - y) ^ 2))
+		local _, d = nearestOnPiece(pc, x, y)
+		best = math.min(best, d)
 	end
 	return best
 end
@@ -281,8 +270,8 @@ end
 -- between tracks 5 m apart built with the next joint 1.7 m off its centre line and was refused
 -- with one 0.4 m off). So the track's pieces are merged through every joint within NEAR of the
 -- new piece (m, in plan), while the merged piece turns no more than RUN_TURN.
-M.NEAR = 2.5
-M.RUN_TURN = math.rad(15)
+local NEAR = 2.5
+local RUN_TURN = math.rad(15)
 
 -- The existing track at switch end e to merge, given the new piece there (`branch`): from each
 -- piece at the switch outward through the joints within NEAR of the branch. mayGo(joint, from,
@@ -292,7 +281,6 @@ function M.runs(e : End, branch : Piece, mayGo : function(joint : integer, from 
 	local out : {Run} = {}
 	local beside = e.beside or {}
 	local function length(v : Point) : number return math.sqrt(v.x * v.x + v.y * v.y + v.z * v.z) end
-	local function scaled(v : Point, k : number) : Point return pt(v.x * k, v.y * k, v.z * k) end
 	for _, first in ipairs(beside) do
 		-- (which way the piece leaves the switch: from its start, from its end, or not at all)
 		local fromStart : boolean = nil
@@ -311,8 +299,8 @@ function M.runs(e : End, branch : Piece, mayGo : function(joint : integer, from 
 				local at = forward and cur.p1 or cur.p0
 				run.node, run.p = joint, at
 				run.t1 = forward and cur.t1 or scaled(cur.t0, -1)
-				local on = M.pieceAt(branch, M.nearestOnPiece(branch, at.x, at.y))
-				if joint == nil or math.sqrt((on.x - at.x) ^ 2 + (on.y - at.y) ^ 2) >= M.NEAR then break end
+				local _, off = nearestOnPiece(branch, at.x, at.y)
+				if joint == nil or off >= NEAR then break end
 				local nxt : Piece = nil
 				local count = 0
 				for _, q in ipairs(beside) do
@@ -323,7 +311,7 @@ function M.runs(e : End, branch : Piece, mayGo : function(joint : integer, from 
 				local far = nextForward and nxt.t1 or scaled(nxt.t0, -1)
 				local cosTurn = (start.x * far.x + start.y * far.y)
 					/ math.max(1e-9, math.sqrt((start.x ^ 2 + start.y ^ 2) * (far.x ^ 2 + far.y ^ 2)))
-				if cosTurn < math.cos(M.RUN_TURN) or not mayGo(joint, cur.edge, nxt.edge) then break end
+				if cosTurn < math.cos(RUN_TURN) or not mayGo(joint, cur.edge, nxt.edge) then break end
 				taken[nxt.edge] = true
 				run.edges[#run.edges + 1], run.nodes[#run.nodes + 1] = nxt.edge, joint
 				len = len + length(nextForward and nxt.t0 or nxt.t1)
@@ -377,7 +365,7 @@ local function switchLead(a : End, x : number, y : number) : number
 		local l = math.sqrt(vx * vx + vy * vy)
 		if l < 1e-9 then return t end
 		local c = math.max(-1.0, math.min(1.0, (vx * a.dx + vy * a.dy) / l))
-		return t - M.SWITCH_RADIUS * math.tan(math.min(math.acos(c), math.rad(179)) / 2)
+		return t - SWITCH_RADIUS * math.tan(math.min(math.acos(c), math.rad(179)) / 2)
 	end
 	local lo, hi = M.MIN_LEG, math.sqrt((x - a.x) ^ 2 + (y - a.y) ^ 2)
 	if gap(lo) >= 0 then return lo end
@@ -401,7 +389,7 @@ local function towardGround(a : End, b : End, dist : number) : {geometry.Vec}, s
 	-- |a + t (a.dx, a.dy) - b| = t
 	local t = along > 0 and dist * dist / (2 * along) or math.huge
 	local how = "arc"
-	if t > M.MAX_REACH then t, how = math.min(M.LEAD, dist / 3), "turn on the ray" end
+	if t > MAX_REACH then t, how = math.min(M.LEAD, dist / 3), "turn on the ray" end
 	local tS = isSwitch(a) and switchLead(a, b.x, b.y) or nil
 	if tS ~= nil and tS < t then t, how = tS, "switch" end
 	return { geometry.vec(a.x, a.y, 0), geometry.vec(a.x + t * a.dx, a.y + t * a.dy, 0), geometry.vec(b.x, b.y, 0) }, how
@@ -440,19 +428,19 @@ function M.initialPis(a : End, b : End) : {geometry.Vec}, string
 	local along = ex * a.dx + ey * a.dy
 	local lateral = a.dx * ey - a.dy * ex
 	local facing = a.dx * b.dx + a.dy * b.dy < 0
-	if facing and along > 0 and math.abs(cross) <= M.STRAIGHT_ANGLE and math.abs(lateral) <= M.STRAIGHT_OFFSET then
+	if facing and along > 0 and math.abs(cross) <= STRAIGHT_ANGLE and math.abs(lateral) <= STRAIGHT_OFFSET then
 		return { pa, pb }, "straight"
 	end
 	local capA = isSwitch(a) and (switchLead(a, b.x, b.y) or math.huge) or math.huge
 	local capB = isSwitch(b) and (switchLead(b, a.x, a.y) or math.huge) or math.huge
-	if dist > M.FAR then
+	if dist > FAR then
 		local la, lb = out(a, math.min(M.LEAD, capA)), out(b, math.min(M.LEAD, capB))
 		return { pa, la, geometry.vec((la.x + lb.x) / 2, (la.y + lb.y) / 2, 0), lb, pb }, "long s-curve"
 	end
 	if cross ~= 0 then
 		local s = (ex * b.dy - ey * b.dx) / cross
 		local t = (a.dy * ex - a.dx * ey) / cross
-		if s >= M.MIN_LEG and t >= M.MIN_LEG and s <= math.min(M.MAX_REACH, capA) and t <= math.min(M.MAX_REACH, capB) then
+		if s >= M.MIN_LEG and t >= M.MIN_LEG and s <= math.min(MAX_REACH, capA) and t <= math.min(MAX_REACH, capB) then
 			return { pa, out(a, s), pb }, "corner"
 		end
 	end
@@ -473,7 +461,7 @@ function M.snap(near : {End}, piece : Piece, x : number, y : number, z : number,
 	for _, e in ipairs(near) do
 		if exclude == nil or exclude.node == nil or e.node ~= exclude.node then
 			local d = math.sqrt((e.x - x) ^ 2 + (e.y - y) ^ 2)
-			if d <= (e.kind == "track" and M.SNAP or M.NODE_SNAP) and d < bestD then best, bestD = e, d end
+			if d <= (e.kind == "track" and M.SNAP or NODE_SNAP) and d < bestD then best, bestD = e, d end
 		end
 	end
 	if best ~= nil then return best, nil end
@@ -481,12 +469,12 @@ function M.snap(near : {End}, piece : Piece, x : number, y : number, z : number,
 		if exclude ~= nil and exclude.piece ~= nil and exclude.piece.edge == piece.edge then
 			return nil, "The track starts on this piece. End it elsewhere."
 		end
-		local u = M.nearestOnPiece(piece, x, y)
+		local u = nearestOnPiece(piece, x, y)
 		local a, b = M.halves(piece, u)
 		local function chord(h : Piece) : number return math.sqrt((h.p1.x - h.p0.x) ^ 2 + (h.p1.y - h.p0.y) ^ 2 + (h.p1.z - h.p0.z) ^ 2) end
-		if chord(a) < M.MIN_HALF or chord(b) < M.MIN_HALF then
+		if chord(a) < MIN_HALF or chord(b) < MIN_HALF then
 			-- (too near the piece's end to cut: the node there, when it can be picked)
-			local node = chord(a) < M.MIN_HALF and piece.node0 or piece.node1
+			local node = chord(a) < MIN_HALF and piece.node0 or piece.node1
 			for _, e in ipairs(near) do
 				if e.node == node and (exclude == nil or exclude.node ~= node) then return e, nil end
 			end

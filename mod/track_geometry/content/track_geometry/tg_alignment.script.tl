@@ -19,8 +19,11 @@ end
 local record Alignment
 	Sample : Sample
 	MIN_PIECE : number
+	ZERO : number
+	atan2 : function(number, number) : number
 	sample : function(path : {geometry.Segment}, step : number, maxTurn ?: number, breaks ?: {number}) : {Sample}
 	tangentLength : function(Sample, Sample) : number
+	locate : function(nodes : {Sample}, s : number) : integer, number
 	pointAt : function(nodes : {Sample}, s : number) : number, number
 	project : function(nodes : {Sample}, x : number, y : number) : number, number
 	carry : function<T>(nodes : {Sample}, values : {T}, other : {Sample}) : {T}
@@ -34,14 +37,15 @@ local M : Alignment = {}
 -- unless that one is the first node or a break itself (of two breaks this close, the first stays).
 M.MIN_PIECE = 1.0
 -- Segments this short or shorter count as zero-length (m).
-local ZERO = 1e-6
+M.ZERO = 1e-6
 
-local atan2 : function(number, number) : number = (math as {string : any}).atan2 as function(number, number) : number
+-- the game runs Lua 5.2: two-argument atan is math.atan2 there
+M.atan2 = (math as {string : any}).atan2 as function(number, number) : number
 	or (math.atan as function(number, number) : number)
 
 local function node(seg : geometry.Segment, t : number, s : number) : Sample
 	local p, tan = geometry.pointAt(seg, t), geometry.tangentAt(seg, t)
-	return { x = p.x, y = p.y, heading = atan2(tan.y, tan.x), s = s, k = geometry.curvatureAt(seg, t) }
+	return { x = p.x, y = p.y, heading = M.atan2(tan.y, tan.x), s = s, k = geometry.curvatureAt(seg, t) }
 end
 
 -- maxTurn (radians) and breaks (chainages, in any order) are optional.
@@ -51,7 +55,7 @@ function M.sample(path : {geometry.Segment}, step : number, maxTurn ?: number, b
 	-- nothing and have no direction of their own: skip them)
 	local segs : {geometry.Segment} = {}
 	for _, seg in ipairs(path) do
-		if geometry.length(seg) > ZERO then segs[#segs + 1] = seg end
+		if geometry.length(seg) > M.ZERO then segs[#segs + 1] = seg end
 	end
 	if #segs == 0 then return { node(path[1], 0, 0) } end
 	local bs : {number} = {}
@@ -65,7 +69,7 @@ function M.sample(path : {geometry.Segment}, step : number, maxTurn ?: number, b
 		-- the stretches between this segment's breaks, each in even pieces
 		local cuts : {number} = { 0 }
 		for _, b in ipairs(bs) do
-			if b - s0 > ZERO and b - s0 < len - ZERO then cuts[#cuts + 1] = b - s0 end
+			if b - s0 > M.ZERO and b - s0 < len - M.ZERO then cuts[#cuts + 1] = b - s0 end
 		end
 		cuts[#cuts + 1] = len
 		for c = 2, #cuts do
@@ -100,18 +104,24 @@ end
 function M.tangentLength(a : Sample, b : Sample) : number
 	local c = math.sqrt((b.x - a.x) ^ 2 + (b.y - a.y) ^ 2)
 	local ax, ay, bx, by = math.cos(a.heading), math.sin(a.heading), math.cos(b.heading), math.sin(b.heading)
-	local phi = math.abs(atan2(ax * by - ay * bx, ax * bx + ay * by))
+	local phi = math.abs(M.atan2(ax * by - ay * bx, ax * bx + ay * by))
 	if phi < 1e-3 then return c end
 	local r = c / (2 * math.sin(phi / 2))
 	return 4 * r * math.tan(phi / 4)
 end
 
--- The point at chainage s, on the straight between the nodes around it (clamped to the ends).
-function M.pointAt(nodes : {Sample}, s : number) : number, number
+-- Where chainage s falls: the piece (nodes i to i + 1) and t in [0, 1] along it, clamped.
+function M.locate(nodes : {Sample}, s : number) : integer, number
 	local i = 1
 	while i < #nodes - 1 and s > nodes[i + 1].s do i = i + 1 end
 	local a, b = nodes[i], nodes[i + 1] or nodes[i]
-	local t = b.s > a.s and math.max(0, math.min(1, (s - a.s) / (b.s - a.s))) or 0.0
+	return i, b.s > a.s and math.max(0, math.min(1, (s - a.s) / (b.s - a.s))) or 0.0
+end
+
+-- The point at chainage s, on the straight between the nodes around it.
+function M.pointAt(nodes : {Sample}, s : number) : number, number
+	local i, t = M.locate(nodes, s)
+	local a, b = nodes[i], nodes[i + 1] or nodes[i]
 	return a.x + t * (b.x - a.x), a.y + t * (b.y - a.y)
 end
 
@@ -133,12 +143,7 @@ end
 -- path: each takes the value at its middle (nil where that is nil).
 function M.carry<T>(nodes : {Sample}, values : {T}, other : {Sample}) : {T}
 	local out : {T} = {}
-	local i = 1
-	for j = 1, #other - 1 do
-		local mid = (other[j].s + other[j + 1].s) / 2
-		while i < #nodes - 1 and nodes[i + 1].s < mid do i = i + 1 end
-		out[j] = values[i]
-	end
+	for j = 1, #other - 1 do out[j] = values[(M.locate(nodes, (other[j].s + other[j + 1].s) / 2))] end
 	return out
 end
 

@@ -1,16 +1,8 @@
--- Offline checks for the vertical profile (tg_profile.script.tl). Run from mod/ after check.sh
--- builds .tlpath/:
---   lua test/profile_test.lua
-local tl = require("tl")
-tl.loader()
-package.path = ".tlpath/?.tl;" .. package.path
-local P = require("westrom_track_geometry::/track_geometry/tg_profile.script.tl")
+-- Offline checks for the vertical profile (tg_profile.script.tl).
+local H = dofile("test/harness.lua")
+local P = H.mod("tg_profile")
 
-local failures = 0
-local function check(ok, what)
-	print((ok and "ok   " or "FAIL ") .. what)
-	if not ok then failures = failures + 1 end
-end
+local check = H.check
 local function near(a, b, tol) return math.abs(a - b) < (tol or 1e-9) end
 
 -- two points: one Hermite, from the start grade to the end grade
@@ -101,8 +93,4 @@ check(near(P.gradeAt(p, 0), 0.02) and near(P.gradeAt(p, 125), 0.02), "two free e
 check(P.solve({ { s = 0, z = 0 } }, 0, 0) == nil, "one point: no profile")
 check(P.solve({ { s = 0, z = 0 }, { s = 100, z = 1 }, { s = 100, z = 2 } }, 0, 0) == nil, "two points at one chainage: no profile")
 
-if failures > 0 then
-	print(failures .. " failed")
-	os.exit(1)
-end
-print("all passed")
+H.done()

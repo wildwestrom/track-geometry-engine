@@ -27,15 +27,31 @@ local record Options
 end
 
 local record ProposalMod
-	Options : Options
-	finite : function(number) : boolean
 	make : function(nodes : {alignment.Sample}, o : Options) : SimpleProposal, string
 end
 
 local M : ProposalMod = {}
 
-function M.finite(v : number) : boolean
+local function finite(v : number) : boolean
 	return v ~= nil and v == v and v ~= math.huge and v ~= -math.huge
+end
+
+-- A new track piece for the proposal: its entity id, its component (nil: the new one's), its owner.
+local function segment(id : integer, comp : Engine.Component.BaseEdge, own : Engine.Component.PlayerOwned) : Proposal.SegmentAndEntity
+	local e = api.type.SegmentAndEntity.new()
+	e.entity, e.type = id, 1 -- track
+	if comp ~= nil then e.comp = comp end
+	if own ~= nil then e.playerOwned = own end
+	return e
+end
+
+-- The existing piece `edge` (`what`) to replace and its owner, or nil and why it can't be.
+local function existing(edge : integer, what : string) : Engine.Component.BaseEdge, Engine.Component.PlayerOwned, string
+	local be = api.engine.getComponent(edge, api.type.ComponentType.BASE_EDGE) as Engine.Component.BaseEdge
+	if be == nil then return nil, nil, what .. " (" .. edge .. ") is gone" end
+	-- (signals and other objects on it would need moving too: not yet)
+	if #(be.objects or {}) > 0 then return nil, nil, what .. " carries signals or other objects" end
+	return be, api.engine.getComponent(edge, api.type.ComponentType.PLAYER_OWNED) as Engine.Component.PlayerOwned, nil
 end
 
 -- The proposal, or nil and why not. Checks for what crashes the game: NaN, pieces under 0.1 m.
@@ -46,7 +62,7 @@ function M.make(nodes : {alignment.Sample}, o : Options) : SimpleProposal, strin
 	local z = o.z
 	for i, nd in ipairs(nodes) do
 		for _, v in ipairs({ nd.x, nd.y, nd.heading, z[i], o.grades[i] }) do
-			if not M.finite(v) then return nil, "NaN or infinite value at node " .. i end
+			if not finite(v) then return nil, "NaN or infinite value at node " .. i end
 		end
 		if i > 1 and (nd.x - nodes[i - 1].x) ^ 2 + (nd.y - nodes[i - 1].y) ^ 2 + (z[i] - z[i - 1]) ^ 2 < 0.01 then
 			return nil, "zero-length piece before node " .. i
@@ -68,12 +84,12 @@ function M.make(nodes : {alignment.Sample}, o : Options) : SimpleProposal, strin
 	local nodesToAdd : {Proposal.NodeAndEntity} = {}
 	local edgesToAdd : {Proposal.SegmentAndEntity} = {}
 	-- (the pieces cut, and the pieces at a node end that are not also cut)
-	local cuts : {{ends.Piece, integer}} = {}
+	local cuts : {integer} = {} -- (the node each is cut at: 1 or n)
 	local cutEdge : {integer : boolean} = {}
-	for _, c in ipairs({ { o.from, 1 }, { o.to, n } }) do
-		local en = c[1] as ends.End
+	for _, at in ipairs({ 1, n }) do
+		local en = at == 1 and o.from or o.to
 		if en ~= nil and en.kind == "split" then
-			cuts[#cuts + 1] = { en.piece, c[2] as integer }
+			cuts[#cuts + 1] = at
 			cutEdge[en.piece.edge] = true
 		end
 	end
@@ -99,9 +115,7 @@ function M.make(nodes : {alignment.Sample}, o : Options) : SimpleProposal, strin
 	for i = 1, m do
 		local a, b = nodes[i], nodes[i + 1]
 		local T = alignment.tangentLength(a, b)
-		local e = api.type.SegmentAndEntity.new()
-		e.entity = -i
-		e.type = 1 -- track
+		local e = segment(-i, nil, owned)
 		e.comp.node0 = nodeId(i)
 		e.comp.node1 = nodeId(i + 1)
 		e.comp.position0 = api.type.Vec3f.new(a.x, a.y, z[i])
@@ -124,7 +138,6 @@ function M.make(nodes : {alignment.Sample}, o : Options) : SimpleProposal, strin
 		e.comp.roadStyle = template.streetStyle
 		e.comp.roadType = api.type["enum"].RoadType.TRACK
 		e.comp.distance = trackDistance
-		if owned ~= nil then e.playerOwned = owned end
 		edgesToAdd[i] = e
 	end
 	-- (a copy or part that runs on through the next joints: its far end moves out to the run's)
@@ -144,44 +157,29 @@ function M.make(nodes : {alignment.Sample}, o : Options) : SimpleProposal, strin
 		end
 	end
 	for j, old in ipairs(replace) do
-		local be = api.engine.getComponent(old, api.type.ComponentType.BASE_EDGE) as Engine.Component.BaseEdge
-		if be == nil then return nil, "piece " .. old .. " at the switch is gone" end
-		-- (signals and other objects on it would need moving too: not yet)
-		if #(be.objects or {}) > 0 then return nil, "a piece at the switch carries signals or other objects" end
-		local e = api.type.SegmentAndEntity.new()
-		e.entity = -(m + j)
-		e.type = 1 -- track
+		local be, own, why = existing(old, "a piece at the switch")
+		if be == nil then return nil, why end
 		local comp = be:clone()
 		extend(comp, old, true)
 		extend(comp, old, false)
-		e.comp = comp
-		local own = api.engine.getComponent(old, api.type.ComponentType.PLAYER_OWNED) as Engine.Component.PlayerOwned
-		if own ~= nil then e.playerOwned = own end
-		edgesToAdd[m + j] = e
+		edgesToAdd[m + j] = segment(-(m + j), comp, own)
 	end
 	local removed : {integer} = {}
 	for _, old in ipairs(replace) do removed[#removed + 1] = old end
-	for c, cut in ipairs(cuts) do
-		local pc, at = cut[1] as ends.Piece, cut[2] as integer
-		local be = api.engine.getComponent(pc.edge, api.type.ComponentType.BASE_EDGE) as Engine.Component.BaseEdge
-		if be == nil then return nil, "the piece to cut (" .. pc.edge .. ") is gone" end
-		if #(be.objects or {}) > 0 then return nil, "the piece to cut carries signals or other objects" end
-		local own = api.engine.getComponent(pc.edge, api.type.ComponentType.PLAYER_OWNED) as Engine.Component.PlayerOwned
-		local o2 = (at == 1 and o.from or o.to) as ends.End
-		local a, b = ends.halves(pc, o2.u)
+	for c, at in ipairs(cuts) do
+		local en = at == 1 and o.from or o.to
+		local pc = en.piece
+		local be, own, why = existing(pc.edge, "the piece to cut")
+		if be == nil then return nil, why end
+		local a, b = ends.halves(pc, en.u)
 		for h, part in ipairs({ a, b }) do
-			local e = api.type.SegmentAndEntity.new()
-			e.entity = -(m + #replace + 2 * (c - 1) + h)
-			e.type = 1 -- track
 			local comp = be:clone()
 			comp.node0 = h == 1 and pc.node0 or nodeId(at)
 			comp.node1 = h == 1 and nodeId(at) or pc.node1
 			comp.position0, comp.tangent0 = v3(part.p0), v3(part.t0)
 			comp.position1, comp.tangent1 = v3(part.p1), v3(part.t1)
 			extend(comp, pc.edge, h == 2)
-			e.comp = comp
-			if own ~= nil then e.playerOwned = own end
-			edgesToAdd[#edgesToAdd + 1] = e
+			edgesToAdd[#edgesToAdd + 1] = segment(-(m + #replace + 2 * (c - 1) + h), comp, own)
 		end
 		removed[#removed + 1] = pc.edge
 	end

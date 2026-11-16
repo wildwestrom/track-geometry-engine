@@ -1,20 +1,11 @@
--- Offline checks for the plan of the new track (tg_plan.script.tl). Run from mod/ after check.sh
--- builds .tlpath/:
---   lua test/plan_test.lua
-local tl = require("tl")
-tl.loader()
-package.path = ".tlpath/?.tl;" .. package.path
-local P = require("westrom_track_geometry::/track_geometry/tg_plan.script.tl")
-local E = require("westrom_track_geometry::/track_geometry/tg_edit.script.tl")
-local S = require("westrom_track_geometry::/track_geometry/tg_structures.script.tl")
-local A = require("westrom_track_geometry::/track_geometry/tg_alignment.script.tl")
-local N = require("westrom_track_geometry::/track_geometry/tg_ends.script.tl")
+-- Offline checks for the plan of the new track (tg_plan.script.tl).
+local H = dofile("test/harness.lua")
+local P = H.mod("tg_plan")
+local E = H.mod("tg_edit")
+local S = H.mod("tg_structures")
+local N = H.mod("tg_ends")
 
-local failures = 0
-local function check(ok, what)
-	print((ok and "ok   " or "FAIL ") .. what)
-	if not ok then failures = failures + 1 end
-end
+local check = H.check
 local function near(a, b, tol) return math.abs(a - b) <= (tol or 1e-6) end
 local function endAt(x, y, dx, dy, z, grade)
 	return { x = x, y = y, dx = dx, dy = dy, z = z, grade = grade }
@@ -95,7 +86,7 @@ check(failed ~= nil and failed.kinds == nil and failed.note ~= nil and failed.no
 ------------------------------------------------------------------ an edit with an elevation point
 local e = E.new(a, b)
 local i = E.insertElevation(e, 1500)
-assert(E.moveElevation(e, i, 1500, 6, 1.0) and E.points(e)[i].z == 6)
+assert(E.movePoint(e, i, 1500, 6, 1.0) and E.points(e)[i].z == 6)
 plan = P.path(a, b, e, valley, dry)
 check(plan.info == "2000 m, 0 turns", "elevation point: an edit's info counts its turns: " .. tostring(plan.info))
 sound(plan, a, b, "elevation point")
@@ -128,7 +119,7 @@ for k = 2, #plan.built.nodes do
 	local d = plan.built.nodes[k].heading - plan.built.nodes[k - 1].heading
 	worst = math.max(worst, math.abs(math.atan2 and math.atan2(math.sin(d), math.cos(d)) or math.atan(math.sin(d), math.cos(d))))
 end
-check(worst <= P.MAX_TURN + 1e-9, string.format("turn: no built piece turns more than MAX_TURN (%.1f deg)", math.deg(worst)))
+check(worst <= math.rad(15) + 1e-9, string.format("turn: no built piece turns more than 15 deg (%.1f deg)", math.deg(worst)))
 
 -- the game's speeds, one per built piece, land on the dense pieces inside each
 local speeds = {}
@@ -158,14 +149,7 @@ local function straightPiece(x0, x1, y)
 	return { edge = 7, node0 = 1, node1 = 2, p0 = { x = x0, y = y, z = 0 }, t0 = { x = x1 - x0, y = 0, z = 0 },
 		p1 = { x = x1, y = y, z = 0 }, t1 = { x = x1 - x0, y = 0, z = 0 } }
 end
-local function clearance(nd, pcs)
-	local best = math.huge
-	for _, pc in ipairs(pcs) do
-		local p = N.pieceAt(pc, N.nearestOnPiece(pc, nd.x, nd.y))
-		best = math.min(best, math.sqrt((p.x - nd.x) ^ 2 + (p.y - nd.y) ^ 2))
-	end
-	return best
-end
+local function clearance(nd, pcs) return N.clearance({ beside = pcs }, nd.x, nd.y) end
 local main = straightPiece(-200, 200, 0)
 local cut = N.splitEnd(main, 0.5)
 check(cut.beside ~= nil and #cut.beside == 2, "switch: a split end knows the two halves beside it")
@@ -257,6 +241,21 @@ runs = N.runs(atNode, out, always)
 check(#runs == 1 and runs[1].first.edge == 22 and runs[1].edges[1] == 23 and runs[1].node == 5
 	and near(runs[1].p.x, 600) and near(runs[1].t1.x, 440),
 	"runs: from a node end, through a piece laid the other way")
+-- (what a switch changes: the world read through fakes, the built nodes from the end straight on)
+local function piecesAt(en) return ({ [3] = { 21, 22 }, [4] = { 22, 23 } })[en.kind == "node" and en.node or 0] or {} end
+local function leaving(en) return { { x = en.x, y = 0, heading = 0, s = 0 }, { x = en.x + 300, y = 5, heading = 0, s = 300 } } end
+local rep, rs = P.switches(atNode, far, leaving(atNode), piecesAt, always)
+check(#rep == 2 and rep[1] == 21 and rep[2] == 22 and #rs == 1 and rs[1].edges[1] == 23,
+	"switches: a node end replaces its pieces, and the run goes on past the one ahead")
+rep, rs = P.switches(atNode, N.nodeEnd(4, 200, 0, 0, atNode.dirs, atNode.beside), leaving(atNode), piecesAt, always)
+check(#rep == 3 and rep[3] == 23 and #rs == 0, "switches: a piece at both ends is replaced once, and merged into no run")
+rep, rs = P.switches(shallow, far, leaving(shallow), piecesAt, always)
+check(#rep == 0 and #rs == 1 and rs[1].edges[1] == 21 and rs[1].node == 3,
+	"switches: a cut replaces nothing, and merges through the joint beside it")
+rep, rs = P.switches(shallow, far, leaving(shallow), piecesAt, function(joint) return joint ~= 2 end)
+check(#rep == 0 and #rs == 0, "switches: no run through a joint that may not go")
+rep, rs = P.switches(N.trackEnd(1, 20, 0, 0, 1, 0, 0), far, leaving(shallow), piecesAt, always)
+check(#rep == 0 and #rs == 0, "switches: a free end changes nothing")
 local plain = P.path(N.trackEnd(1, 0, 0, 0, 1, 0, 0), far, nil, flat, dry)
 check(plain ~= nil and plain.built.nodes[2].s < bn[#bn].s - bn[#bn - 1].s,
 	"switch: a free end's pieces are not merged")
@@ -265,8 +264,4 @@ check(plain ~= nil and plain.built.nodes[2].s < bn[#bn].s - bn[#bn - 1].s,
 plan, why = P.path(endAt(0, 0, 1, 0, 0, 0), endAt(1, 0, -1, 0, 0, 0), nil, flat, dry)
 check(plan == nil and type(why) == "string", "ends 1 m apart: no plan, " .. tostring(why))
 
-if failures > 0 then
-	print(failures .. " FAILED")
-	os.exit(1)
-end
-print("all passed")
+H.done()

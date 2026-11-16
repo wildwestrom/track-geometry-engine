@@ -1,17 +1,10 @@
 -- Offline checks for the sampler (tg_alignment.script.tl) and the shape of the ported paths
--- (tg_geometry.script.tl). Run from mod/ after check.sh builds .tlpath/:
---   lua test/alignment_test.lua
-local tl = require("tl")
-tl.loader()
-package.path = ".tlpath/?.tl;" .. package.path
-local G = require("westrom_track_geometry::/track_geometry/tg_geometry.script.tl")
-local A = require("westrom_track_geometry::/track_geometry/tg_alignment.script.tl")
+-- (tg_geometry.script.tl).
+local H = dofile("test/harness.lua")
+local G = H.mod("tg_geometry")
+local A = H.mod("tg_alignment")
 
-local failures = 0
-local function check(ok, what)
-	print((ok and "ok   " or "FAIL ") .. what)
-	if not ok then failures = failures + 1 end
-end
+local check = H.check
 local function near(a, b, tol) return math.abs(a - b) <= tol end
 local function d2(a, b) return math.sqrt((a.x - b.x) ^ 2 + (a.y - b.y) ^ 2) end
 
@@ -229,5 +222,4 @@ do
 		"a break 0.5 m from the start: the first node stays")
 end
 
-print(failures == 0 and "all passed" or (failures .. " failed"))
-os.exit(failures == 0 and 0 or 1)
+H.done()

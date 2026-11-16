@@ -1,19 +1,12 @@
 -- Checks the Teal port (tg_geometry.script.tl) against the Lean core, using the fixtures that
--- `lake exe fixtures` writes to test/fixtures.lua. Run from mod/ after check.sh builds .tlpath/:
---   lua test/geometry_test.lua
-local tl = require("tl")
-tl.loader()
-package.path = ".tlpath/?.tl;" .. package.path
-local G = require("westrom_track_geometry::/track_geometry/tg_geometry.script.tl")
+-- `lake exe fixtures` writes to test/fixtures.lua.
+local H = dofile("test/harness.lua")
+local G = H.mod("tg_geometry")
 local fixtures = dofile("test/fixtures.lua")
 
 local TOL = 1e-9 -- m, rad, 1/m, m/s
 
-local failures = 0
-local function check(ok, what)
-	print((ok and "ok   " or "FAIL ") .. what)
-	if not ok then failures = failures + 1 end
-end
+local check = H.check
 
 -- IEEE-754 double from its 16-digit hex bit pattern (Lua 5.2 has no string.unpack).
 local function f64(h)
@@ -69,5 +62,4 @@ for _, fx in ipairs(fixtures) do
 		fx.name, values, exact, worst, worst > 0 and (" (" .. worstWhat .. ")") or ""))
 end
 
-print(failures == 0 and "all passed" or (failures .. " failed"))
-os.exit(failures == 0 and 0 or 1)
+H.done()

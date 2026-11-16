@@ -32,7 +32,6 @@ end
 local record Readout
 	Curve : Curve
 	Badge : Badge
-	grades : function(nodes : {alignment.Sample}, z : {number}) : {number}
 	curves : function(path : {geometry.Segment}) : {Curve}
 	badges : function(nodes : {alignment.Sample}, z : {number}, speeds : {number}, curves : {Curve}) : {Badge}
 	alongBadges : function(nodes : {alignment.Sample}, z : {number}, speeds : {number}, every : number) : {Badge}
@@ -44,11 +43,9 @@ local M : Readout = {}
 
 -- No curve limit: the game's value on straight pieces, or one this fast (m/s).
 local NO_LIMIT = 1000.0
--- Segments this short or shorter count as zero-length (m), as in tg_alignment.
-local ZERO = 1e-6
 
 -- Each piece's grade: rise over horizontal run.
-function M.grades(nodes : {alignment.Sample}, z : {number}) : {number}
+local function grades(nodes : {alignment.Sample}, z : {number}) : {number}
 	local out : {number} = {}
 	for i = 1, #nodes - 1 do
 		local run = math.sqrt((nodes[i + 1].x - nodes[i].x) ^ 2 + (nodes[i + 1].y - nodes[i].y) ^ 2)
@@ -64,7 +61,7 @@ function M.curves(path : {geometry.Segment}) : {Curve}
 	local s, cur, prev = 0.0, nil as Curve, nil as string
 	for _, seg in ipairs(path) do
 		local len = geometry.length(seg)
-		if len > ZERO then
+		if len > alignment.ZERO then
 			local k = seg.kind
 			if k == "straight" then
 				cur = nil
@@ -83,12 +80,22 @@ function M.curves(path : {geometry.Segment}) : {Curve}
 	return out
 end
 
--- The piece (between nodes i and i + 1) at chainage s.
-local function pieceAt(nodes : {alignment.Sample}, s : number) : integer
-	for i = 1, #nodes - 1 do
-		if s <= nodes[i + 1].s then return i end
+-- A badge at chainage s, with the grade of the piece there and speed v.
+local function badge(kind : string, nodes : {alignment.Sample}, z : {number}, gs : {number}, s : number, v : number) : Badge
+	local i, t = alignment.locate(nodes, s)
+	local a, b = nodes[i], nodes[i + 1]
+	return { kind = kind, x = a.x + t * (b.x - a.x), y = a.y + t * (b.y - a.y), z = z[i] + t * (z[i + 1] - z[i]),
+		speed = v, grade = gs[i], slowest = false }
+end
+
+-- The slowest of the speeds (m/s per piece; nil: none known) on the pieces whose middle `keep` takes.
+local function slowest(nodes : {alignment.Sample}, speeds : {number}, keep : function(mid : number, sp : number) : boolean) : number
+	local v : number = nil
+	for j = 1, speeds ~= nil and #nodes - 1 or 0 do
+		local sp = speeds[j]
+		if sp ~= nil and keep((nodes[j].s + nodes[j + 1].s) / 2, sp) then v = v == nil and sp or math.min(v, sp) end
 	end
-	return #nodes - 1
+	return v
 end
 
 -- A badge at each curve's arc middle. speeds (m/s per piece, nil where unknown) is nil until the
@@ -96,25 +103,12 @@ end
 function M.badges(nodes : {alignment.Sample}, z : {number}, speeds : {number}, curves : {Curve}) : {Badge}
 	local out : {Badge} = {}
 	if #nodes < 2 then return out end
-	local gs = M.grades(nodes, z)
+	local gs = grades(nodes, z)
 	local slow = math.huge
 	for _, c in ipairs(curves) do
-		local i = pieceAt(nodes, c.sMid)
-		local a, b = nodes[i], nodes[i + 1]
-		local t = b.s > a.s and math.max(0, math.min(1, (c.sMid - a.s) / (b.s - a.s))) or 0.0
-		local v : number = nil
-		if speeds ~= nil then
-			for j = 1, #nodes - 1 do
-				local mid = (nodes[j].s + nodes[j + 1].s) / 2
-				local sp = speeds[j]
-				if mid >= c.s0 and mid <= c.s1 and sp ~= nil and sp < NO_LIMIT then
-					v = v == nil and sp or math.min(v, sp)
-				end
-			end
-		end
+		local v = slowest(nodes, speeds, function(mid : number, sp : number) : boolean return mid >= c.s0 and mid <= c.s1 and sp < NO_LIMIT end)
 		if v ~= nil then slow = math.min(slow, v) end
-		out[#out + 1] = { kind = "curve", x = a.x + t * (b.x - a.x), y = a.y + t * (b.y - a.y), z = z[i] + t * (z[i + 1] - z[i]),
-			speed = v, grade = gs[i], slowest = false }
+		out[#out + 1] = badge("curve", nodes, z, gs, c.sMid, v)
 	end
 	-- (only when there is a choice: one curve is the slowest of one)
 	if #out > 1 and slow < math.huge then
@@ -128,23 +122,12 @@ end
 function M.alongBadges(nodes : {alignment.Sample}, z : {number}, speeds : {number}, every : number) : {Badge}
 	local out : {Badge} = {}
 	if #nodes < 2 then return out end
-	local gs = M.grades(nodes, z)
+	local gs = grades(nodes, z)
 	local len = nodes[#nodes].s
 	local s = every
 	while s <= len - every / 2 do
-		local i = pieceAt(nodes, s)
-		local a, b = nodes[i], nodes[i + 1]
-		local t = b.s > a.s and math.max(0, math.min(1, (s - a.s) / (b.s - a.s))) or 0.0
-		local v : number = nil
-		if speeds ~= nil then
-			for j = 1, #nodes - 1 do
-				local mid = (nodes[j].s + nodes[j + 1].s) / 2
-				local sp = speeds[j]
-				if math.abs(mid - s) <= every / 2 and sp ~= nil then v = v == nil and sp or math.min(v, sp) end
-			end
-		end
-		out[#out + 1] = { kind = "along", x = a.x + t * (b.x - a.x), y = a.y + t * (b.y - a.y), z = z[i] + t * (z[i + 1] - z[i]),
-			speed = v, grade = gs[i], slowest = false }
+		local v = slowest(nodes, speeds, function(mid : number) : boolean return math.abs(mid - s) <= every / 2 end)
+		out[#out + 1] = badge("along", nodes, z, gs, s, v)
 		s = s + every
 	end
 	return out
@@ -219,7 +202,7 @@ function M.summary(nodes : {alignment.Sample}, z : {number}, speeds : {number}, 
 			lines[#lines + 1] = string.format("Curve limit (game): slowest %s at %.0f m%s", kmh(slow), at, top)
 		end
 	end
-	local gs = M.grades(nodes, z)
+	local gs = grades(nodes, z)
 	local lo, hi, steep, steepAt : number, number, number, number = math.huge, -math.huge, 0.0, 0.0
 	for i, g in ipairs(gs) do
 		lo, hi = math.min(lo, g), math.max(hi, g)

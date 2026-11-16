@@ -14,13 +14,11 @@
 
 local alignment = require("westrom_track_geometry::/track_geometry/tg_alignment.script.tl")
 
-local record Params
-	bridgeMin : number -- clearance above the ground that makes a bridge (m)
-	tunnelMin : number -- depth below the ground that makes a tunnel (m)
-	minRun : number -- shortest bridge or tunnel kept (m)
-	fillGap : number -- longest stretch of ground merged into the runs either side (m)
-	probe : number -- the ground is read at most this far apart along a piece (m)
-end
+local BRIDGE_MIN = 12.0 -- clearance above the ground that makes a bridge (m)
+local TUNNEL_MIN = 15.0 -- depth below the ground that makes a tunnel (m)
+local MIN_RUN = 20.0 -- shortest bridge or tunnel kept (m)
+local FILL_GAP = 40.0 -- longest stretch of ground merged into the runs either side (m)
+local PROBE = 5.0 -- the ground is read at most this far apart along a piece (m)
 
 -- A bridge or tunnel type on offer: from api.res.bridgeTypeRep / tunnelTypeRep.
 local record Offer
@@ -30,11 +28,9 @@ local record Offer
 end
 
 local record StructuresMod
-	Params : Params
 	Offer : Offer
-	DEFAULT : Params
 	classify : function(nodes : {alignment.Sample}, z : {number}, ground : function(number, number) : number,
-		water : function(number, number) : boolean, p : Params) : {string}
+		water : function(number, number) : boolean) : {string}
 	summary : function(nodes : {alignment.Sample}, kinds : {string}) : string
 	changes : function(nodes : {alignment.Sample}, kinds : {string}) : {number}
 	pickType : function(offers : {Offer}, speed : number) : integer
@@ -42,16 +38,14 @@ end
 
 local M : StructuresMod = {}
 
-M.DEFAULT = { bridgeMin = 12.0, tunnelMin = 15.0, minRun = 20.0, fillGap = 40.0, probe = 5.0 }
-
 -- Each piece's raw kind and whether it crosses water.
 local function raw(nodes : {alignment.Sample}, z : {number}, ground : function(number, number) : number,
-	water : function(number, number) : boolean, p : Params) : {string}, {boolean}
+	water : function(number, number) : boolean) : {string}, {boolean}
 	local kinds, wet : {string}, {boolean} = {}, {}
 	for i = 1, #nodes - 1 do
 		local a, b = nodes[i], nodes[i + 1]
 		local len = b.s - a.s
-		local n = math.max(1, math.ceil(len / p.probe))
+		local n = math.max(1, math.ceil(len / PROBE))
 		local sum, isWet = 0.0, false
 		for k = 0, n do
 			local t = k / n
@@ -61,8 +55,8 @@ local function raw(nodes : {alignment.Sample}, z : {number}, ground : function(n
 		end
 		local clearance = sum / (n + 1)
 		wet[i] = isWet
-		if isWet or clearance > p.bridgeMin then kinds[i] = "bridge"
-		elseif -clearance > p.tunnelMin then kinds[i] = "tunnel"
+		if isWet or clearance > BRIDGE_MIN then kinds[i] = "bridge"
+		elseif -clearance > TUNNEL_MIN then kinds[i] = "tunnel"
 		else kinds[i] = "ground" end
 	end
 	return kinds, wet
@@ -95,20 +89,19 @@ local function paint(kinds : {string}, r : Run, k : string)
 end
 
 function M.classify(nodes : {alignment.Sample}, z : {number}, ground : function(number, number) : number,
-	water : function(number, number) : boolean, p : Params) : {string}
-	p = p or M.DEFAULT
-	local kinds, wet = raw(nodes, z, ground, water, p)
+	water : function(number, number) : boolean) : {string}
+	local kinds, wet = raw(nodes, z, ground, water)
 	-- short ground between two runs of the same structure: one structure
 	local rs = runs(nodes, kinds, wet)
 	for j = 2, #rs - 1 do
 		local r = rs[j]
-		if r.kind == "ground" and r.len <= p.fillGap and rs[j - 1].kind ~= "ground" and rs[j - 1].kind == rs[j + 1].kind then
+		if r.kind == "ground" and r.len <= FILL_GAP and rs[j - 1].kind ~= "ground" and rs[j - 1].kind == rs[j + 1].kind then
 			paint(kinds, r, rs[j - 1].kind)
 		end
 	end
 	-- too short to be worth a structure: ground (but water always needs its bridge)
 	for _, r in ipairs(runs(nodes, kinds, wet)) do
-		if r.kind ~= "ground" and r.len < p.minRun and not r.wet then paint(kinds, r, "ground") end
+		if r.kind ~= "ground" and r.len < MIN_RUN and not r.wet then paint(kinds, r, "ground") end
 	end
 	return kinds
 end

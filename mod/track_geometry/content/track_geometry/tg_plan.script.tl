@@ -44,26 +44,24 @@ end
 
 local type Ground = function(number, number) : number
 local type Water = function(number, number) : boolean
+local type PiecesAt = function(ends.End) : {integer}
+local type Mergeable = function(joint : integer, from : integer, to : integer) : boolean
 
 local record PlanMod
-	Track : Track
 	Plan : Plan
 	Readout : Readout
-	STEP : number
-	MAX_TURN : number
 	BADGE_EVERY : number
-	PARAMS : geometry.DesignParams
 	path : function(a : ends.End, b : ends.End, e : edits.Edit, ground : Ground, water : Water) : Plan, string
+	switches : function(a : ends.End, b : ends.End, nodes : {alignment.Sample}, piecesAt : PiecesAt, mergeable : Mergeable) : {integer}, {ends.Run}
 	readout : function(plan : Plan, speeds : {number}) : Readout, string
 	summary : function(r : Readout, trackSpeed : number) : {string}
 end
 
 local M : PlanMod = {}
 
-M.STEP = edits.STEP -- the path is read this finely (m): for the ground under it, the readout, picking...
-M.MAX_TURN = math.rad(15) -- ...but built in pieces turning at most this much (straights: one piece)
+-- The path is read every edits.STEP, but built in pieces turning at most this much (straights: one piece).
+local MAX_TURN = math.rad(15)
 M.BADGE_EVERY = 50.0 -- a speed badge this often along the path (m)
-M.PARAMS = edits.PARAMS
 
 -- The end nodes moved exactly onto the existing nodes, so the new track joins them.
 local function pinEnds(nodes : {alignment.Sample}, a : ends.End, b : ends.End)
@@ -83,7 +81,7 @@ end
 local function classify(nodes : {alignment.Sample}, z : {number}, ground : Ground, water : Water) : {string}, string, string
 	if ground == nil then return nil, nil, nil end
 	local ok, kinds, summary = pcall(function() : {string}, string
-		local ks = structures.classify(nodes, z, ground, water, structures.DEFAULT)
+		local ks = structures.classify(nodes, z, ground, water)
 		return ks, structures.summary(nodes, ks)
 	end)
 	if not ok then return nil, nil, tostring(kinds) end
@@ -146,13 +144,46 @@ function M.path(a : ends.End, b : ends.End, e : edits.Edit, ground : Ground, wat
 		if free then breaks[#breaks + 1] = s end
 	end
 	for _, pt in ipairs(prof.points) do breaks[#breaks + 1] = pt.s end
-	local built = clearSwitches(alignment.sample(path, math.huge, M.MAX_TURN, breaks), a, b)
+	local built = clearSwitches(alignment.sample(path, math.huge, MAX_TURN, breaks), a, b)
 	pinEnds(built, a, b)
 	if kinds ~= nil then kinds = alignment.carry(dense, kinds, built) end
 	local z, grades = profiles.sample(prof, chainages(built))
 	return { dense = { nodes = dense, z = denseZ }, built = { nodes = built, z = z }, grades = grades, kinds = kinds,
 		info = string.format("%.0f m, %s", dense[#dense].s, how), structures = structs, note = note,
 		minRadius = minRadius, curves = readout.curves(path) }
+end
+
+-- The existing track a switch changes, for the built nodes from a to b (tg_proposal): the pieces
+-- at a node end, replaced as the game's builder does (each once: two node ends can share a piece),
+-- and the runs of a shallow switch: the track it runs beside, merged through the joints there
+-- (ends.runs), each piece into one run only, and never a piece or node the other end is on. The
+-- world is read through piecesAt and mergeable (tg_world).
+function M.switches(a : ends.End, b : ends.End, nodes : {alignment.Sample}, piecesAt : PiecesAt, mergeable : Mergeable) : {integer}, {ends.Run}
+	local replace : {integer} = {}
+	local used : {integer : boolean} = {}
+	for _, en in ipairs({ a, b }) do
+		for _, e in ipairs(piecesAt(en)) do
+			if not used[e] then used[e] = true; replace[#replace + 1] = e end
+		end
+	end
+	local runs : {ends.Run} = {}
+	for _, en in ipairs({ a, b }) do
+		if en.kind == "split" then used[en.piece.edge] = true end
+	end
+	for i, en in ipairs({ a, b }) do
+		local other = i == 1 and b or a
+		local n0, n1 = nodes[i == 1 and 1 or #nodes - 1], nodes[i == 1 and 2 or #nodes]
+		local T = alignment.tangentLength(n0, n1)
+		local branch : ends.Piece = { edge = -1, p0 = { x = n0.x, y = n0.y, z = 0 }, p1 = { x = n1.x, y = n1.y, z = 0 },
+			t0 = { x = math.cos(n0.heading) * T, y = math.sin(n0.heading) * T, z = 0 },
+			t1 = { x = math.cos(n1.heading) * T, y = math.sin(n1.heading) * T, z = 0 } }
+		for _, r in ipairs(ends.runs(en, branch, function(joint : integer, from : integer, to : integer) : boolean
+			if used[to] or joint == other.node or not mergeable(joint, from, to) then return false end
+			used[to] = true
+			return true
+		end)) do runs[#runs + 1] = r end
+	end
+	return replace, runs
 end
 
 -- The plan read out with the game's curve limits, one per built piece (nil where it gave none):

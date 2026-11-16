@@ -1,24 +1,18 @@
--- Offline checks for editing the alignment (tg_edit.script.tl). Run from mod/ after check.sh
--- builds .tlpath/:
---   lua test/edit_test.lua
-local tl = require("tl")
-tl.loader()
-package.path = ".tlpath/?.tl;" .. package.path
-local G = require("westrom_track_geometry::/track_geometry/tg_geometry.script.tl")
-local A = require("westrom_track_geometry::/track_geometry/tg_alignment.script.tl")
-local E = require("westrom_track_geometry::/track_geometry/tg_edit.script.tl")
+-- Offline checks for editing the alignment (tg_edit.script.tl).
+local H = dofile("test/harness.lua")
+local G = H.mod("tg_geometry")
+local A = H.mod("tg_alignment")
+local E = H.mod("tg_edit")
 
-local failures = 0
-local function check(ok, what)
-	print((ok and "ok   " or "FAIL ") .. what)
-	if not ok then failures = failures + 1 end
-end
+local check = H.check
 local function atan2(y, x) return math.atan2 and math.atan2(y, x) or math.atan(y, x) end
 local function angleDiff(a, b) return math.abs(atan2(math.sin(a - b), math.cos(a - b))) end
 local function endAt(x, y, deg)
 	return { x = x, y = y, dx = math.cos(math.rad(deg)), dy = math.sin(math.rad(deg)) }
 end
-local dp = E.PARAMS
+local dp = G.DEFAULT_PARAMS
+local function mobility(e, i) return E.turn(e, i).mobility end
+local function length(e) local n = E.nodes(e) return n[#n].s end
 local function dist(a, b) return math.sqrt((b.x - a.x) ^ 2 + (b.y - a.y) ^ 2) end
 
 -- The path still starts and ends on the ends, along their headings, with sound nodes.
@@ -50,7 +44,7 @@ end
 
 -- long s-curve: a lead turn next to each end, sliding on its ray, and a free turn between them
 local e = E.new(endAt(0, 0, 0), endAt(1000, 100, 180))
-check(E.turnCount(e) == 3 and E.mobility(e, 2) == "ray" and E.mobility(e, 3) == "free" and E.mobility(e, 4) == "ray",
+check(E.turnCount(e) == 3 and mobility(e, 2) == "ray" and mobility(e, 3) == "free" and mobility(e, 4) == "ray",
 	"long s-curve: the leads slide on rays, the middle turn is free")
 check(E.movePi(e, 2, 150, 80) and math.abs(E.polyline(e)[2].y) < 1e-12 and math.abs(E.polyline(e)[2].x - 150) < 1e-9,
 	"long s-curve: a lead moves only along its end's ray")
@@ -65,13 +59,13 @@ check(not E.movePi(e, 3, E.polyline(e)[2].x + 1, E.polyline(e)[2].y), "a turn ca
 -- add a turn in a middle leg: free, and removable
 local rev = e.rev
 local i = E.insertOnLeg(e, 3, 500, 0)
-check(i == 4 and E.turnCount(e) == 4 and E.mobility(e, 4) == "free" and e.rev > rev, "add a turn on a middle leg: free")
+check(i == 4 and E.turnCount(e) == 4 and mobility(e, 4) == "free" and e.rev > rev, "add a turn on a middle leg: free")
 joinsSmoothly(e, "after adding a turn")
 check(E.removePi(e, 4) and E.turnCount(e) == 3, "a free turn can be removed")
 
 -- s-curve: one turn on each end's ray, both sliding
 local sc = E.new(endAt(0, 0, 0), endAt(600, 100, 180))
-check(E.turnCount(sc) == 2 and E.mobility(sc, 2) == "ray" and E.mobility(sc, 3) == "ray", "s-curve: two turns, both on rays")
+check(E.turnCount(sc) == 2 and mobility(sc, 2) == "ray" and mobility(sc, 3) == "ray", "s-curve: two turns, both on rays")
 check(E.movePi(sc, 3, 350, 140) and math.abs(E.polyline(sc)[3].y - 100) < 1e-9 and math.abs(E.polyline(sc)[3].x - 350) < 1e-9,
 	"s-curve: the second turn slides on its end's ray")
 noOverlap(sc, "s-curve after sliding")
@@ -79,7 +73,7 @@ joinsSmoothly(sc, "s-curve after sliding")
 
 -- corner: one turn where the rays meet, fixed until a turn is added
 local c = E.new(endAt(0, 0, 0), endAt(500, 400, -90))
-check(E.turnCount(c) == 1 and E.mobility(c, 2) == "fixed", "corner: one turn, fixed")
+check(E.turnCount(c) == 1 and mobility(c, 2) == "fixed", "corner: one turn, fixed")
 check(not E.movePi(c, 2, 450, 50) and E.polyline(c)[2].x == 500 and E.polyline(c)[2].y == 0, "corner: the turn does not move")
 check(not E.removePi(c, 2) and E.turnCount(c) == 1, "corner: the turn cannot be removed")
 joinsSmoothly(c, "corner as laid")
@@ -88,7 +82,7 @@ local size = E.corners(c)[2].budget
 local entry2 = E.corners(c)[2].entryPoint
 local before = E.nodes(c)
 i = E.insertOnLeg(c, 1, entry2.x / 2, 30)
-check(i == 2 and E.turnCount(c) == 2 and E.mobility(c, 2) == "ray" and E.mobility(c, 3) == "ray",
+check(i == 2 and E.turnCount(c) == 2 and mobility(c, 2) == "ray" and mobility(c, 3) == "ray",
 	"corner + a turn: both turns slide on rays")
 check(math.abs(E.polyline(c)[2].x - entry2.x / 2) < 1e-9 and E.polyline(c)[2].y == 0, "corner + a turn: the new turn is on the leg")
 check(math.abs(E.corners(c)[3].budget - size) < 1e-9, "corner + a turn: the old turn keeps its curve size")
@@ -103,7 +97,7 @@ joinsSmoothly(c, "corner + a turn")
 -- inside the curve, which shrinks to make room; the path still joins
 local c2 = E.new(endAt(0, 0, 0), endAt(500, 400, -90))
 i = E.insertOnLeg(c2, 2, 480, 300)
-check(i == 3 and E.mobility(c2, 2) == "ray" and E.mobility(c2, 3) == "ray", "corner + a turn on the filled leg: both on rays")
+check(i == 3 and mobility(c2, 2) == "ray" and mobility(c2, 3) == "ray", "corner + a turn on the filled leg: both on rays")
 noOverlap(c2, "corner + a turn on the filled leg")
 joinsSmoothly(c2, "corner + a turn on the filled leg")
 check(E.movePi(c, 2, 60, 0) and E.movePi(c, 3, 500, 100), "corner + a turn: both turns slide")
@@ -112,7 +106,7 @@ joinsSmoothly(c, "corner + a turn, slid")
 -- straight: adding a turn adds three, the middle one free
 local s = E.new(endAt(0, 0, 0), endAt(600, 0, 180))
 i = E.insertOnLeg(s, 1, 300, 50)
-check(i == 3 and E.turnCount(s) == 3 and E.mobility(s, 3) == "free" and math.abs(E.polyline(s)[3].x - 300) < 1e-9,
+check(i == 3 and E.turnCount(s) == 3 and mobility(s, 3) == "free" and math.abs(E.polyline(s)[3].x - 300) < 1e-9,
 	"straight: adding a turn adds three, the middle one free at the mouse")
 check(math.abs(E.polyline(s)[2].x - 150) < 1e-9 and math.abs(E.polyline(s)[4].x - 450) < 1e-9,
 	"straight: the turns next to the ends stop halfway to the new turn when LEAD does not fit")
@@ -129,11 +123,11 @@ local hs = E.handles(s)
 local entry
 for _, h in ipairs(hs) do if h.kind == "entry" and h.i == 3 then entry = h end end
 check(entry ~= nil, "a curving turn has brackets")
-local before = E.length(s)
+local before = length(s)
 local p3 = E.polyline(s)[3]
 check(E.budget(s, 3) == nil, "a new turn's curve sizes itself")
 check(E.dragBracket(s, 3, true, p3.x + 1.5 * (entry.x - p3.x), p3.y + 1.5 * (entry.y - p3.y)), "drag a bracket away from its turn")
-check(E.length(s) < before, "a wider curve makes the path shorter")
+check(length(s) < before, "a wider curve makes the path shorter")
 E.dragBracket(s, 3, true, p3.x, p3.y)
 local pl = E.polyline(s)
 check(math.abs(E.budget(s, 3) - G.cornerLayout(pl[2], p3, pl[4], dp, nil).geometry.minBudget) < 1e-9,
@@ -231,7 +225,7 @@ local function keepsHeadings(e, what)
 	check(ok, what .. ": on both ends, along the track end's heading")
 end
 local tg = assert(E.new(endAt(0, 0, 0), gnd(300, 200)))
-check(E.turnCount(tg) == 1 and E.mobility(tg, 2) == "ray", "track to ground: one turn, sliding on the track end's ray")
+check(E.turnCount(tg) == 1 and mobility(tg, 2) == "ray", "track to ground: one turn, sliding on the track end's ray")
 local leg1, leg2 = dist(E.polyline(tg)[1], E.polyline(tg)[2]), dist(E.polyline(tg)[2], E.polyline(tg)[3])
 check(math.abs(E.corners(tg)[2].budget - leg1) < 1e-6 and math.abs(leg1 - leg2) < 1e-6,
 	"track to ground: the curve takes all of both legs")
@@ -241,7 +235,7 @@ keepsHeadings(tg, "track to ground, turn slid")
 noOverlap(tg, "track to ground, turn slid")
 check(not E.removePi(tg, 2), "track to ground: the turn next to the track end cannot be removed")
 local gi = E.insertOnLeg(tg, 2, 400, 150)
-check(gi == 3 and E.mobility(tg, 2) == "ray" and E.mobility(tg, 3) == "free",
+check(gi == 3 and mobility(tg, 2) == "ray" and mobility(tg, 3) == "free",
 	"track to ground: a turn added next to the ground end is free")
 check(E.movePi(tg, 3, 380, 260) and math.abs(E.polyline(tg)[3].x - 380) + math.abs(E.polyline(tg)[3].y - 260) < 1e-9,
 	"track to ground: the turn next to the ground end goes anywhere")
@@ -250,7 +244,7 @@ noOverlap(tg, "track to ground, free turn moved")
 check(E.removePi(tg, 3) and E.turnCount(tg) == 1, "track to ground: and can be removed")
 
 local gt = assert(E.new(gnd(200, 400), endAt(500, 100, 90)))
-check(E.turnCount(gt) == 1 and E.mobility(gt, 2) == "ray", "ground to track: one turn, sliding on the track end's ray")
+check(E.turnCount(gt) == 1 and mobility(gt, 2) == "ray", "ground to track: one turn, sliding on the track end's ray")
 check(E.movePi(gt, 2, 450, 300) and math.abs(E.polyline(gt)[2].x - 500) < 1e-9 and math.abs(E.polyline(gt)[2].y - 300) < 1e-9,
 	"ground to track: the turn slides along the end's ray")
 keepsHeadings(gt, "ground to track, turn slid")
@@ -258,7 +252,7 @@ keepsHeadings(gt, "ground to track, turn slid")
 local gg = assert(E.new(gnd(0, 0), gnd(600, 0)))
 check(E.turnCount(gg) == 0, "ground to ground: no turns")
 gi = E.insertOnLeg(gg, 1, 250, 30)
-check(gi == 2 and E.turnCount(gg) == 1 and E.mobility(gg, 2) == "free" and math.abs(E.polyline(gg)[2].x - 250) < 1e-9,
+check(gi == 2 and E.turnCount(gg) == 1 and mobility(gg, 2) == "free" and math.abs(E.polyline(gg)[2].x - 250) < 1e-9,
 	"ground to ground: adding a turn adds one, free, on the leg")
 check(E.movePi(gg, 2, 300, 150) and E.removePi(gg, 2) and E.turnCount(gg) == 0, "ground to ground: it moves and is removed")
 
@@ -280,7 +274,7 @@ check(E.moveEnd(dg, 3, gnd(450, 380, 7)) and dg.b.x == 450 and dg.b.y == 380 and
 	and dg.rev > rev0, "drag end: the ground end moves, with its height")
 local pd = E.polyline(dg)
 check(math.abs(pd[3].x - 450) + math.abs(pd[3].y - 380) < 1e-9 and pd[2].x == rayX and pd[2].y == 0
-	and E.mobility(dg, 2) == "ray" and E.budget(dg, 2) == set, "drag end: the turn stays on its ray, with its curve size")
+	and mobility(dg, 2) == "ray" and E.budget(dg, 2) == set, "drag end: the turn stays on its ray, with its curve size")
 keepsHeadings(dg, "drag end")
 noOverlap(dg, "drag end")
 check(E.moveEnd(dg, 3, gnd(rayX + 30, 40)) and E.budget(dg, 2) == set, "drag end: close to the turn, the curve size holds")
@@ -320,7 +314,7 @@ noOverlap(dgg, "drag end, free turn")
 -- a free turn on its leg (dgg: ground to ground, one sized turn at (250, 300)) goes onto the end's ray
 local up = trackAt(700, 300, 180) -- (a track coming from +x: the new track leaves it going -x)
 local rev1 = dgg.rev
-check(E.moveEnd(dgg, 3, up) and E.turnCount(dgg) == 1 and E.mobility(dgg, 2) == "ray" and E.budget(dgg, fi) == fset
+check(E.moveEnd(dgg, 3, up) and E.turnCount(dgg) == 1 and mobility(dgg, 2) == "ray" and E.budget(dgg, fi) == fset
 	and math.abs(E.polyline(dgg)[2].x - 250) < 1e-9 and math.abs(E.polyline(dgg)[2].y - 300) < 1e-9 and dgg.rev > rev1,
 	"drop on track: the turn on its leg slides on that end's ray now, with its curve size")
 keepsHeadings(dgg, "drop on track, a free turn")
@@ -332,7 +326,7 @@ check(E.moveEnd(dgg, 3, trackAt(200, 500, 180)) and math.abs(E.polyline(dgg)[2].
 E.dropEnd(dgg)
 -- no turn on its leg: one is added, as the one-turn layout
 local bare = assert(E.new(gnd(0, 0), gnd(600, 0)))
-check(E.moveEnd(bare, 2, trackAt(600, 200, 180)) and E.turnCount(bare) == 1 and E.mobility(bare, 2) == "ray"
+check(E.moveEnd(bare, 2, trackAt(600, 200, 180)) and E.turnCount(bare) == 1 and mobility(bare, 2) == "ray"
 	and math.abs(E.polyline(bare)[2].y - 200) < 1e-9 and #endHandles(bare) == 2,
 	"drop on track: no turn on its leg: one is added on the end's ray")
 keepsHeadings(bare, "drop on track, a turn added")
@@ -347,7 +341,7 @@ keepsHeadings(bare, "drop on a node")
 local two = assert(E.new(gnd(0, 0), gnd(900, 0)))
 E.insertOnLeg(two, 1, 300, 0); E.insertOnLeg(two, 2, 600, 0)
 check(E.movePi(two, 2, 300, 100) and E.movePi(two, 3, 600, -100) and E.moveEnd(two, 4, trackAt(900, 50, 180))
-	and math.abs(E.polyline(two)[3].x - 600) < 1e-9 and math.abs(E.polyline(two)[3].y - 50) < 1e-9 and E.polyline(two)[2].y == 100 and E.mobility(two, 2) == "free",
+	and math.abs(E.polyline(two)[3].x - 600) < 1e-9 and math.abs(E.polyline(two)[3].y - 50) < 1e-9 and E.polyline(two)[2].y == 100 and mobility(two, 2) == "free",
 	"drop on track: only the turn on its leg moves")
 check(not E.moveEnd(two, 4, trackAt(325, 100, 180)) and two.b.y == 50, "drop on track: not where its turn would land on the next one")
 keepsHeadings(two, "drop on track, two turns")
@@ -356,9 +350,9 @@ check(eh2 ~= nil and eh2.kind == "pi", "drag end: a press on the turn next to a 
 
 -- a ground end's height is where the profile starts (or ends)
 local gz = assert(E.new(gnd(0, 0, 12), { kind = "track", x = 600, y = 0, dx = -1, dy = 0, z = 2, grade = 0 }))
-local gza, gzb = E.endHeights(gz)
+local gzs = E.points(gz)
 local gp = E.profile(gz)
-check(gza == 12 and gzb == 2 and gp ~= nil and math.abs(require("westrom_track_geometry::/track_geometry/tg_profile.script.tl")
+check(gzs[1].z == 12 and gzs[2].z == 2 and gp ~= nil and math.abs(H.mod("tg_profile")
 	.heightAt(gp, 0) - 12) < 1e-9, "a ground end: the profile starts at its height")
 
 -- The vertical profile: elevation points between the ends.
@@ -373,29 +367,29 @@ local i = E.insertElevation(v, 400)
 local after = E.profile(v)
 -- the monotone profile picks its own grade at the new point, so the curve around it reshapes a
 -- little (0.42 m at most here), but the point is where the profile was
-local Pv = require("westrom_track_geometry::/track_geometry/tg_profile.script.tl")
+local Pv = H.mod("tg_profile")
 local moved = 0
 for s = 0, 1000, 10 do moved = math.max(moved, math.abs(Pv.heightAt(before, s) - Pv.heightAt(after, s))) end
-check(i == 1 and math.abs(Pv.heightAt(after, 400) - Pv.heightAt(before, 400)) < 1e-9 and moved < 0.5,
+check(i == 2 and math.abs(Pv.heightAt(after, 400) - Pv.heightAt(before, 400)) < 1e-9 and moved < 0.5,
 	string.format("an added elevation point sits on the profile; the rest moves %.2f m at most", moved))
-check(E.insertElevation(v, 700) == 2 and #E.points(v) == 2 and E.points(v)[1].s < E.points(v)[2].s, "points stay in order")
-check(not E.points(v)[1].tooClose and not E.points(v)[2].tooClose and E.spacingProblem(v) == nil, "points 20 m clear are not too close")
+check(E.insertElevation(v, 700) == 3 and #E.points(v) == 4 and E.points(v)[2].s < E.points(v)[3].s, "points stay in order")
+check(not E.points(v)[2].tooClose and not E.points(v)[3].tooClose and E.spacingProblem(v) == nil, "points 20 m clear are not too close")
 
 local rev, nodes0 = v.rev, E.nodes(v)
-check(E.moveElevation(v, 1, 450, E.points(v)[1].z + 1, 0.04) and v.rev > rev
-	and math.abs(E.points(v)[1].s - 450) < 1e-9, "a point moves along the path and up")
+check(E.movePoint(v, 2, 450, E.points(v)[2].z + 1, 0.04) and v.rev > rev
+	and math.abs(E.points(v)[2].s - 450) < 1e-9, "a point moves along the path and up")
 check(E.nodes(v) == nodes0, "a vertical change keeps the sampled path")
-E.moveElevation(v, 1, 400, E.points(v)[1].z + 100, 0.04)
+E.movePoint(v, 2, 400, E.points(v)[2].z + 100, 0.04)
 local steep = E.steepest(v)
 check(steep <= 0.04 + 1e-9 and steep > 0.039, "raising a point stops at the grade limit: " .. steep * 1000 .. " permille")
 
 -- The 20 m spacing does not stop a drag: a point too close is red, left out of the profile, and
 -- blocks the build.
-local P = require("westrom_track_geometry::/track_geometry/tg_profile.script.tl")
+local P = H.mod("tg_profile")
 local function zs(e)
 	local p = assert(E.profile(e))
 	local out = {}
-	for s = 0, E.length(e), 10 do out[#out + 1] = P.heightAt(p, s) end
+	for s = 0, length(e), 10 do out[#out + 1] = P.heightAt(p, s) end
 	return out
 end
 local function sameZ(a, b)
@@ -406,49 +400,49 @@ end
 local sp = assert(E.new(vend(0, 0, 0, 100, 0), vend(1000, 0, 180, 110, 0)))
 E.insertElevation(sp, 300)
 E.insertElevation(sp, 600)
-E.moveElevation(sp, 1, 300, 104, 1.0)
-E.moveElevation(sp, 2, 600, 108, 1.0)
+E.movePoint(sp, 2, 300, 104, 1.0)
+E.movePoint(sp, 3, 600, 108, 1.0)
 local without2 = assert(E.new(vend(0, 0, 0, 100, 0), vend(1000, 0, 180, 110, 0)))
 E.insertElevation(without2, 300)
-E.moveElevation(without2, 1, 300, 104, 1.0)
-local ok2, j = E.moveElevation(sp, 2, 312, 108, 1.0)
-check(ok2 and j == 2 and math.abs(E.points(sp)[2].s - 312) < 1e-9, "a point dragged within MIN_SPAN of its neighbour is not stopped")
+E.movePoint(without2, 2, 300, 104, 1.0)
+local ok2, j = E.movePoint(sp, 3, 312, 108, 1.0)
+check(ok2 and j == 3 and math.abs(E.points(sp)[3].s - 312) < 1e-9, "a point dragged within MIN_SPAN of its neighbour is not stopped")
 local q = E.points(sp)
-check(q[2].tooClose and not q[1].tooClose and math.abs(q[2].gap - 12) < 1e-9 and q[2].near == "neighbour",
-	"the dragged point is the one too close, and how close: " .. tostring(q[2].gap))
+check(q[3].tooClose and not q[2].tooClose and math.abs(q[3].gap - 12) < 1e-9 and q[3].near == "neighbour",
+	"the dragged point is the one too close, and how close: " .. tostring(q[3].gap))
 local why = E.spacingProblem(sp)
 check(why == "elevation point 2 is too close to its neighbour (12 m, needs 20 m)", "why: " .. tostring(why))
 check(E.profile(sp) ~= nil and sameZ(zs(sp), zs(without2)), "the profile leaves out the point too close")
 -- dragged past its neighbour: the points reorder, and the profile follows the new order
-ok2, j = E.moveElevation(sp, 2, 250, 108, 1.0)
+ok2, j = E.movePoint(sp, 3, 250, 108, 1.0)
 q = E.points(sp)
-check(ok2 and j == 1 and math.abs(q[1].s - 250) < 1e-9 and q[1].z == 108 and q[2].z == 104 and q[1].s < q[2].s,
+check(ok2 and j == 2 and math.abs(q[2].s - 250) < 1e-9 and q[2].z == 108 and q[3].z == 104 and q[2].s < q[3].s,
 	"a point dragged past its neighbour comes before it")
-check(not q[1].tooClose and not q[2].tooClose and E.spacingProblem(sp) == nil, "dragged clear: no point too close")
+check(not q[2].tooClose and not q[3].tooClose and E.spacingProblem(sp) == nil, "dragged clear: no point too close")
 local swapped = assert(E.new(vend(0, 0, 0, 100, 0), vend(1000, 0, 180, 110, 0)))
 E.insertElevation(swapped, 250); E.insertElevation(swapped, 300)
-E.moveElevation(swapped, 1, 250, 108, 1.0); E.moveElevation(swapped, 2, 300, 104, 1.0)
+E.movePoint(swapped, 2, 250, 108, 1.0); E.movePoint(swapped, 3, 300, 104, 1.0)
 check(sameZ(zs(sp), zs(swapped)), "the profile follows the new order")
 -- near an end
-ok2, j = E.moveElevation(sp, 1, 8, 108, 1.0)
+ok2, j = E.movePoint(sp, 2, 8, 108, 1.0)
 q = E.points(sp)
-check(ok2 and q[1].tooClose and q[1].near == "end" and math.abs(q[1].gap - 8) < 1e-9, "a point dragged within MIN_SPAN of an end is too close")
+check(ok2 and q[2].tooClose and q[2].near == "end" and math.abs(q[2].gap - 8) < 1e-9, "a point dragged within MIN_SPAN of an end is too close")
 check(E.spacingProblem(sp) == "elevation point 1 is too close to the end (8 m, needs 20 m)", "why: " .. tostring(E.spacingProblem(sp)))
-ok2 = E.moveElevation(sp, 1, -50, 108, 1.0)
-check(ok2 and E.points(sp)[1].s == 0, "a point stops at the end of the path")
+ok2 = E.movePoint(sp, 2, -50, 108, 1.0)
+check(ok2 and E.points(sp)[2].s == 0, "a point stops at the end of the path")
 -- a point added within MIN_SPAN of another is added, too close, rather than refused
 local k = E.insertElevation(sp, 310)
-check(k == 3 and E.points(sp)[3].tooClose and not E.points(sp)[2].tooClose,
+check(k == 4 and E.points(sp)[4].tooClose and not E.points(sp)[3].tooClose,
 	"a point added within MIN_SPAN of another is added too close (the earlier one stays)")
-check(E.removeElevation(sp, 3) and E.removeElevation(sp, 1) and E.spacingProblem(sp) == nil, "removing the points too close clears it")
+check(E.removeElevation(sp, 4) and E.removeElevation(sp, 2) and E.spacingProblem(sp) == nil, "removing the points too close clears it")
 
 -- the grade limit still stops a drag, also once the point leaves the too-close range
 local gl = assert(E.new(vend(0, 0, 0, 100, 0), vend(1000, 0, 180, 100, 0)))
 E.insertElevation(gl, 500)
 E.insertElevation(gl, 510) -- too close to the first
-ok2 = E.moveElevation(gl, 2, 510, 160, 0.04) -- too close, so no grade check: its height goes through
-check(ok2 and E.points(gl)[2].z == 160 and E.points(gl)[2].tooClose, "a point too close changes height freely (it is not in the profile)")
-ok2, j = E.moveElevation(gl, 2, 700, 160, 0.04)
+ok2 = E.movePoint(gl, 3, 510, 160, 0.04) -- too close, so no grade check: its height goes through
+check(ok2 and E.points(gl)[3].z == 160 and E.points(gl)[3].tooClose, "a point too close changes height freely (it is not in the profile)")
+ok2, j = E.movePoint(gl, 3, 700, 160, 0.04)
 local g2 = E.points(gl)[j]
 check(ok2 and E.steepest(gl) <= 0.04 + 1e-9, string.format("dragged clear, the grade limit stops it (%.1f permille)", E.steepest(gl) * 1000))
 check(g2.tooClose or g2.s < 700, "it does not reach where the profile would be too steep: " .. string.format("%.1f m", g2.s))
@@ -457,7 +451,7 @@ local gc = assert(E.new(vend(0, 0, 0, 100, 0), vend(1000, 0, 180, 100, 0)))
 E.insertElevation(gc, 500)
 E.insertElevation(gc, 510)
 -- (at 20 ‰ it cannot clear at all: a 20 m span peaking at the point is 1.5 × its chord grade)
-ok2, j = E.moveElevation(gc, 2, 700, 106, 0.03)
+ok2, j = E.movePoint(gc, 3, 700, 106, 0.03)
 local g3 = E.points(gc)[j]
 check(ok2 and not g3.tooClose and g3.s > 520 and g3.s < 700 and E.steepest(gc) <= 0.03 + 1e-9,
 	string.format("cleared, the grade limit stops it (%.1f m, %.1f m high, %.1f permille)", g3.s, g3.z, E.steepest(gc) * 1000))
@@ -466,9 +460,9 @@ E.insertElevation(gr, 500); E.insertElevation(gr, 519.6)
 check(E.spacingProblem(gr) == "elevation point 2 is too close to its neighbour (19 m, needs 20 m)", "a gap is rounded down: " .. tostring(E.spacingProblem(gr)))
 
 -- what is under the mouse while editing the vertical alignment
-local pt1 = E.points(v)[1]
+local pt1 = E.points(v)[2]
 local vh = E.hit(v, true, pt1.x + 2, pt1.y + 1, 5)
-check(vh ~= nil and vh.kind == "point" and vh.i == 1 and vh.s == pt1.s, "an elevation point within the radius is hit")
+check(vh ~= nil and vh.kind == "point" and vh.i == 2 and vh.s == pt1.s, "an elevation point within the radius is hit")
 local th2 = E.hit(v, true, 200, 3, 5)
 check(th2 ~= nil and th2.kind == "track" and math.abs(th2.s - 200) < 1e-6, "else the track within the radius, at its chainage")
 check(E.hit(v, true, 200, 30, 5) == nil, "nothing far from the track is hit")
@@ -487,7 +481,7 @@ local rs, rd = E.chainageOnRay(hi, ray)
 check(math.abs(rs - 500) < 1 and rd < 1, string.format("the chainage where the ray passes the track (%.1f m, %.2f m off)", rs, rd))
 E.insertElevation(hi, 500)
 local ph = E.hit(hi, true, 503, 100, 5, ray)
-check(ph ~= nil and ph.kind == "point" and ph.i == 1, "an elevation point up at its height is hit along the ray")
+check(ph ~= nil and ph.kind == "point" and ph.i == 2, "an elevation point up at its height is hit along the ray")
 local past = E.hit(hi, true, 800, 100, 5, { ex = 800, ey = -300, ez = 400, gx = 800, gy = 100, gz = 0 })
 check(past ~= nil and past.kind == "track" and math.abs(past.s - 800) < 1, "a ray 300 m past the point hits the track there, not the point")
 local low = E.hit(v, true, 200, 3, 5, { ex = 200, ey = -300, ez = 400, gx = 200, gy = 3, gz = 100 })
@@ -497,12 +491,12 @@ check(low ~= nil and low.kind == "track" and math.abs(low.s - 200) < 1, "a track
 local f = E.new(vend(0, 0, 0, 100, 0), vend(1000, 0, 180, 110, 0))
 E.insertOnLeg(f, 1, 500, 0)
 E.insertElevation(f, 300)
-local frac0, hrev0, fn0 = E.points(f)[1].s / E.length(f), f.hrev, E.nodes(f)
+local frac0, hrev0, fn0 = E.points(f)[2].s / length(f), f.hrev, E.nodes(f)
 E.movePi(f, 3, 500, 150)
-local fp = E.points(f)[1]
+local fp = E.points(f)[2]
 local ax, ay = A.pointAt(E.nodes(f), fp.s)
-check(f.hrev > hrev0 and E.nodes(f) ~= fn0 and E.length(f) > 1000 + 1, "moving a turn samples the path again")
-check(math.abs(fp.s / E.length(f) - frac0) < 1e-9 and math.abs(ax - fp.x) + math.abs(ay - fp.y) < 1e-6,
+check(f.hrev > hrev0 and E.nodes(f) ~= fn0 and length(f) > 1000 + 1, "moving a turn samples the path again")
+check(math.abs(fp.s / length(f) - frac0) < 1e-9 and math.abs(ax - fp.x) + math.abs(ay - fp.y) < 1e-6,
 	"an elevation point keeps its place along the path and sits on it after a turn moves")
 
 -- a profile that starts over the limit: moves may not make it steeper, but may ease it (the
@@ -511,18 +505,18 @@ local w = assert(E.new(vend(0, 0, 0, 0, 0), vend(400, 0, 180, 30, 0)))
 E.insertElevation(w, 100)
 local start = E.steepest(w)
 check(start > 0.04, "steep profile: over the limit to begin with")
-E.moveElevation(w, 1, 100, E.points(w)[1].z - 20, 0.04)
+E.movePoint(w, 2, 100, E.points(w)[2].z - 20, 0.04)
 check(E.steepest(w) <= start + 1e-9, "steep profile: a move does not make it steeper")
-local z0 = E.points(w)[1].z
-E.moveElevation(w, 1, 100, 7, 0.04)
-check(E.steepest(w) <= start + 1e-9 and E.points(w)[1].z ~= z0, "steep profile: a move towards easing it goes through")
+local z0 = E.points(w)[2].z
+E.movePoint(w, 2, 100, 7, 0.04)
+check(E.steepest(w) <= start + 1e-9 and E.points(w)[2].z ~= z0, "steep profile: a move towards easing it goes through")
 
 -- a height set directly goes past the limit; the profile is then too steep and says where
 local hs = assert(E.new(vend(0, 0, 0, 100, 0), vend(1000, 0, 180, 100, 0)))
 E.insertElevation(hs, 500)
 check(E.gradeProblem(hs, 0.04) == nil, "a level profile is not too steep")
 local rev1 = hs.rev
-check(E.setHeight(hs, 1, 160) and E.points(hs)[1].z == 160 and E.points(hs)[1].s == 500 and hs.rev > rev1,
+check(E.setHeight(hs, 2, 160) and E.points(hs)[2].z == 160 and E.points(hs)[2].s == 500 and hs.rev > rev1,
 	"a height set directly applies as asked, past the limit")
 check(E.steepest(hs) > 0.04, string.format("the profile is past the limit (%.1f permille)", E.steepest(hs) * 1000))
 local gp, gs = E.gradeProblem(hs, 0.04)
@@ -533,25 +527,26 @@ for _, nd in ipairs(E.nodes(hs)) do
 end
 check(gs == worstAt and gp == string.format("too steep: %d ‰ at %.0f m (limit 40 ‰)", math.ceil(worst * 1000), worstAt),
 	"why: " .. tostring(gp))
-check(not E.setHeight(hs, 2, 100), "no such point: nothing set")
+check(not E.setHeight(hs, 3, 100), "no such point: nothing set")
 -- a drag on it still does not make it steeper
 local st = E.steepest(hs)
-E.moveElevation(hs, 1, 500, 200, 0.04)
-check(E.steepest(hs) <= st + 1e-9 and E.points(hs)[1].z == 160, "a drag on a profile too steep does not make it steeper")
-check(E.setHeight(hs, 1, 100) and E.gradeProblem(hs, 0.04) == nil, "set back level: no longer too steep")
+E.movePoint(hs, 2, 500, 200, 0.04)
+check(E.steepest(hs) <= st + 1e-9 and E.points(hs)[2].z == 160, "a drag on a profile too steep does not make it steeper")
+check(E.setHeight(hs, 2, 100) and E.gradeProblem(hs, 0.04) == nil, "set back level: no longer too steep")
 -- a point too close is not in the profile, so its height never makes it too steep
 E.insertElevation(hs, 510)
-check(E.points(hs)[2].tooClose and E.setHeight(hs, 2, 300) and E.gradeProblem(hs, 0.04) == nil,
+check(E.points(hs)[3].tooClose and E.setHeight(hs, 3, 300) and E.gradeProblem(hs, 0.04) == nil,
 	"a point too close set very high does not make the profile too steep")
 
-check(E.removeElevation(v, 2) and #E.points(v) == 1 and not E.removeElevation(v, 5), "remove a point")
+check(E.removeElevation(v, 3) and #E.points(v) == 3 and not E.removeElevation(v, 6), "remove a point")
 
 -- a ground end's height is edited like an elevation point's (it cannot slide); a track end's stays
 local ge = assert(E.new(vend(0, 0, 0, 100, 0), gnd(1000, 0, 100)))
-local last = #E.polyline(ge)
-check(not E.liftableEnd(ge, 1) and E.liftableEnd(ge, last), "ground end: its height can be set, a track end's cannot")
+local last = #E.points(ge)
+check(not E.points(ge)[1].liftable and E.points(ge)[last].liftable and not E.points(ge)[last].slides,
+	"ground end: its height can be set, a track end's cannot; it does not slide")
 local geh = E.hit(ge, true, 1002, 1, 5)
-check(geh ~= nil and geh.kind == "end" and geh.i == last and geh.s == E.length(ge) and geh.x == 1000,
+check(geh ~= nil and geh.kind == "end" and geh.i == last and geh.s == length(ge) and geh.x == 1000,
 	"ground end: hit in vertical mode")
 check(E.hit(ge, true, 2, 1, 5).kind == "track", "track end: not hit in vertical mode (the track there is)")
 local geRay = E.hit(ge, true, 1000, 100, 5, { ex = 1000, ey = -300, ez = 400, gx = 1000, gy = 100, gz = 0 })
@@ -560,25 +555,25 @@ check(E.hit(ge, true, 1000, 100, 5) == nil and geRay ~= nil and geRay.kind == "e
 E.insertElevation(ge, 995) -- too close to the end: the end still wins at the end
 local near = E.hit(ge, true, 1000, 0, 5)
 check(near ~= nil and near.kind == "end", "ground end: hit over a point too close to it")
-E.removeElevation(ge, 1)
+E.removeElevation(ge, 2)
 local revG = ge.rev
-check(E.setEndHeight(ge, last, 160) and select(2, E.ends(ge)).z == 160 and ge.b.kind == "ground" and ge.rev > revG
-	and select(2, E.endHeights(ge)) == 160, "ground end: a height set directly applies as asked")
-check(math.abs(P.heightAt(assert(E.profile(ge)), E.length(ge)) - 160) < 1e-9, "ground end: the profile ends at its height")
+check(E.setHeight(ge, last, 160) and select(2, E.ends(ge)).z == 160 and ge.b.kind == "ground" and ge.rev > revG
+	and E.points(ge)[last].z == 160, "ground end: a height set directly applies as asked")
+check(math.abs(P.heightAt(assert(E.profile(ge)), length(ge)) - 160) < 1e-9, "ground end: the profile ends at its height")
 local why = E.gradeProblem(ge, 0.04)
 check(why ~= nil and E.steepest(ge) > 0.04, "ground end: too-steep checks include it: " .. tostring(why))
-check(not E.setEndHeight(ge, 1, 120) and ge.a.z == 100, "track end: its height stays")
-check(E.setEndHeight(ge, last, 100) and E.gradeProblem(ge, 0.04) == nil, "ground end: set back, no longer too steep")
-check(E.moveEndHeight(ge, last, 200, 0.04) and ge.b.z > 100 and ge.b.z < 200
+check(not E.setHeight(ge, 1, 120) and ge.a.z == 100, "track end: its height stays")
+check(E.setHeight(ge, last, 100) and E.gradeProblem(ge, 0.04) == nil, "ground end: set back, no longer too steep")
+check(E.movePoint(ge, last, 0, 200, 0.04) and ge.b.z > 100 and ge.b.z < 200 and ge.b.x == 1000 and E.points(ge)[last].s == length(ge)
 	and E.steepest(ge) <= 0.04 + 1e-9 and E.steepest(ge) > 0.039,
 	string.format("ground end: a height drag stops at the limit (%.1f m, %.1f permille)", ge.b.z, E.steepest(ge) * 1000))
-check(not E.moveEndHeight(ge, 1, 200, 0.04), "track end: no height drag")
+check(not E.movePoint(ge, 1, 0, 200, 0.04), "track end: no height drag")
 -- the free grade at a ground end: no overshoot in the end span
 local gf = assert(E.new(gnd(0, 0, 0), gnd(1000, 0, 0)))
 E.insertElevation(gf, 100)
-E.setHeight(gf, 1, 1)
+E.setHeight(gf, 2, 1)
 E.insertElevation(gf, 400)
-E.setHeight(gf, 2, 20)
+E.setHeight(gf, 3, 20)
 local gpf = assert(E.profile(gf))
 local dips = false
 for s = 0, 100, 1 do if P.heightAt(gpf, s) < -1e-9 or P.heightAt(gpf, s) > 1 + 1e-9 then dips = true end end
@@ -630,5 +625,4 @@ check(is(hitAt(bg, 300 + gx * 1.4 * R, 200 + gy * 1.4 * R, R), "exit", 2)
 	and is(hitAt(bg, 300 - gx * 1.4 * R, 200 - gy * 1.4 * R, R), "exit", 2),
 	"a bracket on a ground end: past the circle, either tip picks the bracket")
 
-print(failures == 0 and "all passed" or (failures .. " failed"))
-os.exit(failures == 0 and 0 or 1)
+H.done()
