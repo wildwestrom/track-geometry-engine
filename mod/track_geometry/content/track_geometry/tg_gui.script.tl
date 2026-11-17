@@ -5,7 +5,8 @@
 --            by tg_session) under the game's ghost, and click off it to build (a window asks first).
 --   TgProbe : a plugin in the bottom game bar (tg_probe.res.lua): every frame it reads the ground
 --            under the mouse and places the badges for the tool (both only allowed there).
---   TgMenuPlugin : gives every track entry the "Geometry" row (tg_menu.res.lua), the only way in.
+--   TgMenuPlugin : gives every track entry the "Geometry" row (tg_menu.res.lua), the only way in,
+--            and the "Alignment" row (horizontal or vertical) beside it.
 
 local react = ug_require "::/gui/main/react.lua" as React
 local builtin = ug_require "::/gui/main/builtin.lua" as Builtin
@@ -184,6 +185,9 @@ end
 -- picked entry's track, with the panel's bridge and tunnel types. One value for every track
 -- entry; it lasts until the game is closed.
 local GEO_KEY = "tg_geometry"
+-- And an "Alignment" row beside it: edit the horizontal or the vertical alignment.
+local ALIGN_KEY = "tg_alignment"
+local MODES : {sessions.Mode} = { "horizontal", "vertical" }
 
 local record Geo
 	on : boolean -- the row says Yes
@@ -652,8 +656,6 @@ end
 
 ------------------------------------------------------------------ the mode window
 
-local MODES : {sessions.Mode} = { "horizontal", "vertical" }
-
 local run : function(reqs : {sessions.Request}) -- (below, with the session's adapter)
 
 local record ModeParam -- (none: the window reads the session)
@@ -736,29 +738,15 @@ local function elevationSection() : TreeNodeId
 	return builtin.BoxLayout{ orientation = builtin.type.Orientation.Vertical, children = rows }
 end
 
--- A small window to switch between editing the horizontal and the vertical alignment. Opened
--- from a click (as the confirm window; opening a window from onStep kills the game). A window
--- recipe must wrap builtin.Window (RegisterWrapperRecipe, as the game's own windows do): a plain
--- recipe returning one fails a native assertion in the window container (NodeStorage.cpp:51).
--- It sits at the bottom right of the screen, above the game bar (tg_gui.css.lua). In vertical
--- mode it has the Elevation section below the switch.
+-- A small window with the Elevation section, open while the vertical alignment is edited (the
+-- menu's Alignment row switches the mode). Opened from a click (the second end's, or the row's;
+-- opening a window from onStep kills the game). A window recipe must wrap builtin.Window
+-- (RegisterWrapperRecipe, as the game's own windows do): a plain recipe returning one fails a
+-- native assertion in the window container (NodeStorage.cpp:51). It sits at the bottom right of
+-- the screen, above the game bar (tg_gui.css.lua).
 local TgModeWindow = react.RegisterWrapperRecipe("TgModeWindow", builtin.Window, function(_p : ModeParam, _ : any) : TreeNodeId
 	local key = engine_react_util.useStepStateTimer(modeKey, 0.1)
 	local _ = key:old()
-	local isVertical = sessions.vertical(sess)
-	local modes = builtin.ToggleButtonGroup{
-		layout = "Horizontal", -- (each as wide as its label; "Uniform" squeezes them to nothing here)
-		buttons = {
-			{ content = builtin.TextView{ text = "Horizontal alignment" } },
-			{ content = builtin.TextView{ text = "Vertical alignment" } },
-		},
-		-- (1-based, as the game's own toggle groups; from the session, not the params, as the
-		-- window is drawn again on its timer)
-		initialSelected = isVertical and 2 or 1,
-		onValueChange = function(index : integer)
-			if MODES[index] ~= nil then sessions.setMode(sess, MODES[index]) end
-		end,
-	}
 	return builtin.Window{
 		-- (no-close-button: the plain window surface, as the game's dialogs; the default one has a
 		-- notch for the close button. Size and place: tg_gui.css.lua, by the id.)
@@ -767,8 +755,7 @@ local TgModeWindow = react.RegisterWrapperRecipe("TgModeWindow", builtin.Window,
 		title = "Track Geometry",
 		closable = false,
 		movable = true,
-		content = isVertical and builtin.BoxLayout{ orientation = builtin.type.Orientation.Vertical,
-			children = { modes, elevationSection() } } or modes,
+		content = elevationSection(),
 	}
 end)
 
@@ -778,8 +765,9 @@ closeModeWindow = function()
 	closeWindow(TgModeWindow)
 end
 
+-- (only while the vertical alignment is edited)
 local function openModeWindow()
-	if tool.modeOpen then return end
+	if tool.modeOpen or not (sessions.vertical(sess) and sess.phase == "done") then return end
 	if openWindow(TgModeWindow, {} as ModeParam, "mode window") then
 		tool.modeOpen = true
 		say("mode window: open")
@@ -1558,6 +1546,40 @@ local function geoParam() : ConstructionMenuParam
 	return p
 end
 
+-- The "Alignment" row, kept as the Geometry row: which alignment the tool edits (the session's
+-- mode). Greyed out unless the tool has the builder's place. A switch while editing opens or
+-- closes the Elevation window (from the row's click: never from onStep).
+local function alignParam() : ConstructionMenuParam
+	local p : ConstructionMenuParam = {
+		key = ALIGN_KEY,
+		group = "settings",
+		name = "Alignment",
+		tooltip = "Plan: edit the horizontal alignment (curves and straights).\nProfile: edit the vertical alignment (heights and grades).",
+		values = { "Plan", "Profile" }, -- (the row is too narrow for "Horizontal")
+		numbers = { 0, 1 },
+		defaultIndex = sessions.vertical(sess) and 2 or 1,
+		yearFrom = 0,
+		yearTo = 0,
+		uiType = api.type["enum"].ScriptParamType.Button,
+		location = api.type["enum"].ScriptParamLocation.Toolbar,
+		preserveValueInAllCategories = true,
+		resetOnCategoryChange = false,
+		resetOnMenuClose = false,
+		resetOnDefinitionChange = false,
+		checkEnabledFn = function(ps : {string : number}) : ConstructionMenuParam.CheckEnabledResult
+			return (ps[GEO_KEY] == 1 and not onWandTab(ps)) and ENABLED or DISABLED
+		end,
+		onChangeFn = function(v : number, _a : ConstructionMenuParamsAPI, _o : number)
+			local m = MODES[math.floor(v + 0.5) + 1]
+			if m == nil then return end
+			sessions.setMode(sess, m)
+			if sessions.vertical(sess) then openModeWindow() else closeModeWindow() end
+		end,
+	}
+	;(p as {string : any}).id = ALIGN_KEY
+	return p
+end
+
 local function hasGeoRow(def : ConstructionDefinition) : boolean
 	for _, p in ipairs(def.params or {}) do
 		if p.key == GEO_KEY then return true end
@@ -1574,6 +1596,7 @@ local function decorate(defs : {ConstructionDefinition})
 			if not ours then
 				def.params = def.params or {}
 				table.insert(def.params, geoParam())
+				table.insert(def.params, alignParam())
 			end
 			def.customAction = { recipe = TgTrackAction as Recipe<ConstructionCustomActionParams<any>>, customParam = nil }
 		end
@@ -1598,9 +1621,9 @@ local function wrapOnce(name : string, slot : string, hook : any, wrap : functio
 end
 
 -- The track panel's rows that stay usable in Geometry mode: the builder / wand tabs, the bridge
--- and tunnel types, Snapping and Geometry. Every other row, the game's or another mod's, belongs
+-- and tunnel types, Snapping, Geometry and Alignment. Every other row, the game's or another mod's, belongs
 -- to the drag builder.
-local GEO_ROWS : {string : boolean} = { mode = true, bridgeType = true, tunnelType = true, disableSnapping = true, [GEO_KEY] = true }
+local GEO_ROWS : {string : boolean} = { mode = true, bridgeType = true, tunnelType = true, disableSnapping = true, [GEO_KEY] = true, [ALIGN_KEY] = true }
 
 -- The rows already greyed (weak: the menu makes new definitions on each opening).
 local greyed : {ConstructionMenuParam : boolean} = setmetatable({}, { __mode = "k" })
