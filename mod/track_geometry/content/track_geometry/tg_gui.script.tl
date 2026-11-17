@@ -116,6 +116,9 @@ end
 
 local record ToolState
 	active : boolean
+	mounted : integer -- the tools open (two for a moment when another track entry is picked)
+	takeFocus : function(why : string) -- give TgProbe the keyboard focus, so "back" reaches the tool (set by TgProbe)
+	wantFocus : string -- take it at the next tick, and why (a track entry was picked in the menu)
 	ticked : boolean -- the tool has ticked since it opened (until then its state is the last opening's)
 	opens : integer -- how often the tool has closed: in the redraw key, so the first tick always redraws
 	matchRedraws : integer -- bumped on each pick in the mode window's match list: in its redraw key, so the list shows its placeholder again
@@ -958,7 +961,16 @@ run = function(reqs : {sessions.Request})
 	end
 end
 
-local function backAction() run(sessions.back(sess, worldNow(false))) end
+-- (a press counts once a frame, should it come both by onBack and by an IA_CLOSE_TOPMOST_WINDOW handler)
+local backFrame : integer = nil
+local function backAction(from : string)
+	if backFrame ~= nil and backFrame == tool.frame then
+		say("back: again by " .. from .. " in frame " .. tostring(tool.frame) .. ": ignored")
+		return
+	end
+	backFrame = tool.frame
+	run(sessions.back(sess, worldNow(false)))
+end
 
 -- Where the cursor is and how it is drawn, so the tool draws again when it moves.
 local function cursorKey() : string
@@ -971,6 +983,11 @@ end
 -- Returns a key that changes whenever the tool must draw again.
 local function toolTick() : string
 	tool.tickFrame, tool.ticked = tool.frame or 0, true
+	if tool.wantFocus ~= nil and tool.takeFocus ~= nil then
+		local why = tool.wantFocus
+		tool.wantFocus = nil
+		tool.takeFocus(why)
+	end
 	run(sessions.tick(sess, worldNow(true)))
 	if sess.phase == "done" and sessions.vertical(sess) then updateVBadges() else tool.vbadges = nil end
 	updateGhost()
@@ -1308,8 +1325,17 @@ end
 -- The tool in the world: the selector (clicks), the ghost, the gizmos, the cursor and the tooltip.
 local function toolAction(abort : function()) : TreeNodeId
 	tool.active = true
-	react.onMount(function(_ : any) tool.active = true end)
+	-- Picking another track entry opens that entry's tool before the last one's closes (seen in
+	-- game: the new entry's tool ran, then the old one unmounted). The tool's state is shared, so
+	-- only the last one open to close puts it away: else the open one counts as closed, and
+	-- every "back" (Esc, right-click) is left to the menu, which quits.
+	react.onMount(function(_ : any)
+		tool.active, tool.mounted = true, (tool.mounted or 0) + 1
+		if tool.takeFocus ~= nil then tool.takeFocus("open") end
+	end)
 	react.onUnmount(function(_ : any)
+		tool.mounted = math.max((tool.mounted or 1) - 1, 0)
+		if tool.mounted > 0 then return end
 		closeConfirm()
 		closeModeWindow()
 		tool.active, tool.ticked, tool.opens = false, false, (tool.opens or 0) + 1
@@ -1338,6 +1364,7 @@ local function toolAction(abort : function()) : TreeNodeId
 				local T = api.gui.mouse.Event.Type
 				local kind : sessions.MouseKind = evt.type == T.Pressed and "pressed" or evt.type == T.Released and "released"
 					or evt.type == T.Clicked and "clicked" or evt.type == T.Moved and "moved" or "other"
+				if evt.button == 0 and kind == "pressed" and tool.takeFocus ~= nil then tool.takeFocus("press") end
 				local took, reqs = sessions.mouse(sess, worldNow(false), evt.button, kind, evt.y)
 				run(reqs)
 				return took
@@ -1415,7 +1442,7 @@ local function toolAction(abort : function()) : TreeNodeId
 		tool = "construction",
 		onBack = function()
 			if sess.confirmOpen then return end -- (the window takes Esc itself: Cancel)
-			if sessions.backIsOurs(sess) then backAction() return end
+			if sessions.backIsOurs(sess) then backAction("onBack") return end
 			say("back: not the tool's (" .. sess.phase .. "): closing the menu")
 			closeMenu(abort)
 		end,
@@ -1431,7 +1458,11 @@ end
 -- where the tool learns which track to build.
 local function hostedAction(params : ConstructionCustomActionParams<any>, entry : string) : TreeNodeId
 	tool.gameCtx = params.gameCtx
-	if entry ~= tool.entry then say("track type: " .. entry) end
+	if entry ~= tool.entry then
+		say("track type: " .. entry)
+		-- (the click on the entry left the focus in the menu)
+		if tool.entry ~= nil then tool.wantFocus = "track type picked" end
+	end
 	tool.entry = entry
 	geo.hosted = true
 	return toolAction(params.abort)
@@ -1476,13 +1507,15 @@ local TgTrackAction = react.RegisterRecipe("TgTrackAction", function(params : Co
 	local entry = params.definition.resName as string
 	-- (a "back" that is not ours must say Disabled: a plain false keeps the key and does nothing)
 	local IAS = api.gui.inputAction.InputActionState
-	react.useInputAction("IA_CLOSE_TOPMOST_WINDOW", react.iaHandler(backAction, function() : Gui.InputAction.InputActionState
+	react.useInputAction("IA_CLOSE_TOPMOST_WINDOW", react.iaHandler(function() backAction("IA_CLOSE_TOPMOST_WINDOW") end, function() : Gui.InputAction.InputActionState
 		return sessions.backIsOurs(sess) and IAS.Enabled or IAS.Disabled
 	end))
 	bound:set(true)
-	-- (a key per entry, as the game's own custom actions have: whether the menu would call a new
-	-- entry's fn under an unchanged key is not known)
-	params.setActionFn(function() : TreeNodeId return hostedAction(params, entry) end, "TgTrackAction:" .. entry)
+	-- (one key for every entry: the tool stack keeps the action's node and only swaps the fn while
+	-- the key stays (ToolStackEntryWrap, builtin.lua). A key per entry, as the game's own custom
+	-- actions have, makes a new node on each switch of track type: the new tool mounts before the
+	-- old one unmounts, and the old one's unmount puts away the state they share.)
+	params.setActionFn(function() : TreeNodeId return hostedAction(params, entry) end, "TgTrackAction")
 	return nil
 end)
 
@@ -1621,6 +1654,31 @@ end)
 local TgProbe = react.RegisterRecipe("TgProbe", function() : TreeNodeId
 	-- (as startOver, but it touches no window: it only marks the confirm window closed)
 	react.useRefLazy(function() : boolean sessions.confirmClosed(sess); sessions.reset(sess); resetTool(); return true end)
+	-- The keyboard focus. "Back" (Esc, and a right-click) goes from the focused node up; left on
+	-- the menu (after a click on a track entry in its list) it reaches the menu's IA_MENU_BACK,
+	-- which quits the menu, and onBack never comes (seen in game: every right-click and Esc after
+	-- picking another track type quit it, also after reopening the tool). The tool's own node
+	-- cannot take the focus (focus() on it did nothing, seen in game; the tool stack is not
+	-- focusable), so this node takes it when the tool opens, on each left press, and after
+	-- another entry is picked, and takes "back" here while it is the tool's.
+	react.setForceFocusable(true)
+	local selfRef = react.useSelfRef()
+	tool.takeFocus = function(why : string)
+		local ok, err = pcall(function() : boolean
+			local n = selfRef:get()
+			if n == nil then return false end
+			n:focus()
+			return true
+		end)
+		if not ok then say("focus: on " .. why .. ": " .. tostring(err)) end
+	end
+	local IAS = api.gui.inputAction.InputActionState
+	local function ours() : Gui.InputAction.InputActionState
+		return sessions.backIsOurs(sess) and IAS.Enabled or IAS.Disabled
+	end
+	-- (IA_CLOSE_TOPMOST_WINDOW has the same keys as IA_MENU_BACK and comes first: seen in game,
+	-- every Esc and right-click came by it here)
+	react.useInputAction("IA_CLOSE_TOPMOST_WINDOW", react.iaHandler(function() backAction("probe") end, ours))
 	-- the ground under the mouse can only be read here: in the tool's own timer the game refuses it
 	react.onStep(function()
 		tool.frame = (tool.frame or 0) + 1
