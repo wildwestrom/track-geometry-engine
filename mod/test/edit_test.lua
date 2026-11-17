@@ -8,7 +8,7 @@ local check = H.check
 local function atan2(y, x) return math.atan2 and math.atan2(y, x) or math.atan(y, x) end
 local function angleDiff(a, b) return math.abs(atan2(math.sin(a - b), math.cos(a - b))) end
 local function endAt(x, y, deg)
-	return { x = x, y = y, dx = math.cos(math.rad(deg)), dy = math.sin(math.rad(deg)) }
+	return { x = x, y = y, z = 0, dx = math.cos(math.rad(deg)), dy = math.sin(math.rad(deg)) }
 end
 local dp = G.DEFAULT_PARAMS
 local function mobility(e, i) return E.turn(e, i).mobility end

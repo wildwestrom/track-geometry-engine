@@ -16,6 +16,7 @@ local dialog_react_util = ug_require "::/gui/menu/dialog_react_util.tl" as Dialo
 local mod_entry_point = ug_require "::/gui/main/mod_entry_point.tl" as ModEntryPoint
 local ends = require("westrom_track_geometry::/track_geometry/tg_ends.script.tl")
 local edits = require("westrom_track_geometry::/track_geometry/tg_edit.script.tl")
+local gizmos = require("westrom_track_geometry::/track_geometry/tg_gizmos.script.tl")
 local proposals = require("westrom_track_geometry::/track_geometry/tg_proposal.script.tl")
 local readout = require("westrom_track_geometry::/track_geometry/tg_readout.script.tl")
 local plans = require("westrom_track_geometry::/track_geometry/tg_plan.script.tl")
@@ -26,8 +27,6 @@ local TAG = "[westrom_track_geometry] "
 local GHOST_TICKS = 4 -- while dragging, remake the ghost at most every this many tool ticks (50 ms)...
 local GHOST_WAIT = 20 -- ...and only once the game has checked the last one, or this many ticks have passed
 local GRAB = 0.02 -- grab radius for handles, as a share of the camera's distance
-local LEG_STEP = 10.0 -- gizmo legs follow the ground in pieces this long (m)...
-local MAX_LEG_PIECES = 60 -- ...or this many per leg, on long legs
 local RAIL_CURSOR = 1024 -- the track builder's mouse cursor ("Rail" in the game's gui_react_util.tl)
 
 local function say(msg : string)
@@ -781,7 +780,9 @@ local BADGE_SLOW = { 230 / 255, 109 / 255, 149 / 255, 0.95 } -- the slowest curv
 local BADGE_STEEP = { 0.8, 0.12, 0.12, 0.95 } -- a span too steep (past the grade limit)
 local BADGE_TEXT = { 1, 1, 1, 1 }
 local ICONS = "::/gui/construction/build_control/"
-local BADGE_W = 90 -- a badge's size on the screen, about (px): width, and height with two rows or one
+local RADIUS_ICON = "westrom_track_geometry::/gui/icons/tg_radius.tga" -- our own: the game has a curved road icon, not a track one
+local BADGE_W = 90 -- a badge's size on the screen, about (px): width, and height with three rows, two or one
+local BADGE_H3 = 72
 local BADGE_H2 = 50
 local BADGE_H1 = 28
 local BADGE_GAP = 10 -- the badge sits this far (px) up and left of its curve, clear of the handles
@@ -805,7 +806,7 @@ local function badgeRow(icon : string, text : string) : TreeNodeId
 	}
 end
 
--- A curve's badge: its speed and grade; an elevation point's: its height and grade; halfway
+-- A curve's badge: its radius (as Network Toolkit labels one), speed and grade; an elevation point's: its height and grade; halfway
 -- between two: the grade.
 local function badgeRows(b : readout.Badge) : {TreeNodeId}
 	local grade = badgeRow(slopeIcon(b.grade), string.format("%+.0f ‰", b.grade * 1000))
@@ -814,7 +815,9 @@ local function badgeRows(b : readout.Badge) : {TreeNodeId}
 	-- (the game's curve limit, but no faster than the track itself)
 	local top = trackType().speed
 	local v = b.speed ~= nil and top > 0 and math.min(b.speed, top) or b.speed
-	return { badgeRow(ICONS .. "symbol_speed_16.tga", v ~= nil and string.format("%.0f", v * 3.6) or "..."), grade }
+	local speed = badgeRow(ICONS .. "symbol_speed_16.tga", v ~= nil and string.format("%.0f", v * 3.6) or "...")
+	if b.radius == nil then return { speed, grade } end
+	return { badgeRow(RADIUS_ICON, string.format("R %.0f m", b.radius)), speed, grade }
 end
 
 local function badgeView(b : readout.Badge) : TreeNodeId
@@ -878,7 +881,7 @@ local function placeBadges()
 	for _, b in ipairs(list) do
 		local prio = (b.kind == "curve" or b.kind == "point") and 1 or b.kind == "span" and 2 or 3
 		local p = prio == pass and api.gui.camera.world2Screen(api.type.Vec3f.new(b.x, b.y, b.z)) or nil
-		local bh = (b.kind == "span" or b.kind == "grade") and BADGE_H1 or BADGE_H2
+		local bh = (b.kind == "span" or b.kind == "grade") and BADGE_H1 or b.radius ~= nil and BADGE_H3 or BADGE_H2
 		if p ~= nil and p.x >= 0 and p.x <= w and p.y >= 0 and p.y <= h and free(p.x, p.y, bh) then
 			taken[#taken + 1] = { p.x, p.y, bh }
 			out[#out + 1] = { h = (p.x - BADGE_GAP) / w, v = (p.y - BADGE_GAP) / h, badge = b }
@@ -892,7 +895,7 @@ end
 ------------------------------------------------------------------ gizmos
 
 local COLORS : {string : {number}} = {
-	leg = { 1.0, 0.75, 0.1, 1.0 }, -- the PI polyline
+	leg = { 1.0, 0.75, 0.1, 0.5 }, -- the PI polyline
 	free = { 1.0, 0.75, 0.1, 1.0 }, -- turns
 	ray = { 0.3, 0.8, 1.0, 1.0 },
 	fixed = { 0.6, 0.6, 0.6, 1.0 },
@@ -901,9 +904,9 @@ local COLORS : {string : {number}} = {
 	hot = { 1.0, 1.0, 1.0, 1.0 }, -- under the mouse or dragged
 	selected = { 1.0, 1.0, 0.1, 1.0 }, -- the selected elevation point (the mode window sets its height)
 	tooClose = { 1.0, 0.15, 0.15, 0.4 }, -- an elevation point too close to a neighbour or an end
+	osculating = { 0.8, 0.95, 1.0, 0.5 }, -- a curve's osculating circle
+	spiral = { 1.0, 0.35, 0.85, 0.5 }, -- a transition spiral
 }
-
-local GIZMO_STEP = 2.0 -- a gizmo is drawn in steps this long (m), unless it says otherwise
 
 -- e in colour c, width wide, drawn in steps `step` long (m).
 local function paint(e : Builtin.Type.EdgeRenderable.Edge, c : {number}, width : number, step : number) : Builtin.Type.EdgeRenderable.Edge
@@ -927,12 +930,12 @@ local function circleEdge(x : number, y : number, z : number, r : number, c : {n
 	g.height = api.type.Vec2f.new(z, z)
 	g.tangent = api.type.Vec2f.new(0, 0)
 	g.length = 2 * math.pi * r
-	g.width = width
+	g.width = 1.0
 	return paint(builtin.type.EdgeRenderable.Edge.new(g), c, width, step)
 end
 
 -- A straight gizmo line from (x0, y0, z0) to (x1, y1, z1).
-local function straightEdge(x0 : number, y0 : number, z0 : number, x1 : number, y1 : number, z1 : number, c : {number}, width : number) : Builtin.Type.EdgeRenderable.Edge
+local function straightEdge(x0 : number, y0 : number, z0 : number, x1 : number, y1 : number, z1 : number, c : {number}, width : number, step : number) : Builtin.Type.EdgeRenderable.Edge
 	local g = api.type.EdgeGeometry.new()
 	g.type = api.type.EdgeGeometry.Type.STRAIGHT
 	local st = api.type.EdgeGeometry.Straight.new()
@@ -941,80 +944,23 @@ local function straightEdge(x0 : number, y0 : number, z0 : number, x1 : number, 
 	g.height = api.type.Vec2f.new(z0, z1)
 	g.tangent = api.type.Vec2f.new(0, 0)
 	g.length = math.sqrt((x1 - x0) ^ 2 + (y1 - y0) ^ 2 + (z1 - z0) ^ 2)
-	g.width = width
-	return paint(builtin.type.EdgeRenderable.Edge.new(g), c, width, GIZMO_STEP)
+	g.width = 1.0
+	return paint(builtin.type.EdgeRenderable.Edge.new(g), c, width, step)
 end
 
--- The gizmos of the edit: the PI polyline, a circle at each turn (coloured by how it can move)
--- and a bracket at each curve's start and end, open towards its curve.
-local function editEdges() : {Builtin.Type.EdgeRenderable.Edge}
-	local e, r = sess.edit, sess.grab
-	local w = math.max(0.5, r / 8)
-	local hot = sess.drag or sess.hit
-	local function isHot(h : edits.Hit) : boolean return hot ~= nil and hot.kind == h.kind and hot.i == h.i end
+-- The gizmos of the edit (tg_gizmos), as edges: a circle as one, a line as one straight per pair
+-- of its points.
+local function gizmoEdges() : {Builtin.Type.EdgeRenderable.Edge}
 	local edges : {Builtin.Type.EdgeRenderable.Edge} = {}
-	local pis = edits.polyline(e)
-	for i = 1, #pis - 1 do
-		local a, b = pis[i], pis[i + 1]
-		local c = (sess.drag == nil and hot ~= nil and hot.kind == "leg" and hot.i == i) and COLORS.hot or COLORS.leg
-		-- in pieces at most LEG_STEP long (more on very long legs), each over the ground
-		local len = math.sqrt((b.x - a.x) ^ 2 + (b.y - a.y) ^ 2)
-		local n = math.max(1, math.ceil(len / math.max(LEG_STEP, len / MAX_LEG_PIECES)))
-		local px, py, pz = a.x, a.y, zAt(a.x, a.y)
-		for k = 1, n do
-			local t = k / n
-			local qx, qy = a.x + t * (b.x - a.x), a.y + t * (b.y - a.y)
-			local qz = zAt(qx, qy)
-			edges[#edges + 1] = straightEdge(px, py, pz, qx, qy, qz, c, w)
-			px, py, pz = qx, qy, qz
-		end
-	end
-	for _, h in ipairs(edits.handles(e)) do
-		local z = zAt(h.x, h.y)
-		if h.kind == "pi" then
-			edges[#edges + 1] = circleEdge(h.x, h.y, z, r, isHot(h) and COLORS.hot or COLORS[h.mobility], w, GIZMO_STEP)
-		elseif h.kind == "end" then
-			edges[#edges + 1] = circleEdge(h.x, h.y, z, r, isHot(h) and COLORS.hot or COLORS.groundEnd, w, GIZMO_STEP)
+	for _, s in ipairs(gizmos.of(sess, zAt)) do
+		local c = COLORS[s.color]
+		if s.kind == "circle" then
+			edges[#edges + 1] = circleEdge(s.x, s.y, s.z, s.r, c, s.width, s.step)
 		else
-			-- a thin 〔: a bar across the leg, past the circles; at each end a slanted corner and
-			-- then a tip along the leg, towards the curve
-			local c = isHot(h) and COLORS.hot or COLORS.bracket
-			local bar, tip = edits.BRACKET_BAR * r, edits.BRACKET_TIP * r
-			local corner = tip / 2
-			-- (a point `along` the leg towards the curve and `across` it)
-			local function at(along : number, across : number) : number, number
-				return h.x + h.ux * along - h.uy * across, h.y + h.uy * along + h.ux * across
+			for k = 1, #s.pts - 1 do
+				local p, q = s.pts[k], s.pts[k + 1]
+				edges[#edges + 1] = straightEdge(p[1], p[2], p[3], q[1], q[2], q[3], c, s.width, s.step)
 			end
-			local shape = { { tip, bar }, { corner, bar }, { 0, bar - corner }, { 0, corner - bar }, { corner, -bar }, { tip, -bar } }
-			for k = 1, #shape - 1 do
-				local x0, y0 = at(shape[k][1], shape[k][2])
-				local x1, y1 = at(shape[k + 1][1], shape[k + 1][2])
-				edges[#edges + 1] = straightEdge(x0, y0, z, x1, y1, z, c, w / 2)
-			end
-		end
-	end
-	return edges
-end
-
--- The vertical gizmos: at each end and elevation point a circle on the ground (where the mouse
--- grabs it) and a post from the ground up to the track (a point's own height); grey at a track
--- end, amber at a ground end (its height can be set), white under the mouse, see-through red when
--- a point is too close (it is not in the profile).
-local function verticalEdges() : {Builtin.Type.EdgeRenderable.Edge}
-	local e, r = sess.edit, sess.grab
-	local edges : {Builtin.Type.EdgeRenderable.Edge} = {}
-	local w = math.max(0.5, r / 8)
-	if edits.profile(e) == nil then return edges end
-	local h, d = sess.hit, sess.dragEl
-	local hot = d ~= nil and d.i or (h ~= nil and h.kind ~= "track" and h.i or nil)
-	for i, pt in ipairs(edits.points(e)) do
-		local c = not pt.liftable and COLORS.fixed or pt.tooClose and COLORS.tooClose or i == hot and COLORS.hot
-			or i == sess.selected and COLORS.selected or pt.slides and COLORS.ray or COLORS.groundEnd
-		local g = zAt(pt.x, pt.y)
-		edges[#edges + 1] = circleEdge(pt.x, pt.y, g, r, c, w, GIZMO_STEP)
-		if math.abs(pt.z - g) > 0.1 then
-			-- (a hair off vertical: a straight with no run has no direction)
-			edges[#edges + 1] = straightEdge(pt.x, pt.y, g, pt.x + 0.01, pt.y, pt.z, c, w)
 		end
 	end
 	return edges
@@ -1081,6 +1027,7 @@ local function toolAction(abort : function()) : TreeNodeId
 				local T = api.gui.mouse.Event.Type
 				local kind : sessions.MouseKind = evt.type == T.Pressed and "pressed" or evt.type == T.Released and "released"
 					or evt.type == T.Clicked and "clicked" or evt.type == T.Moved and "moved" or "other"
+				if kind ~= "moved" then say("[DEBUG-rc7] mouse button " .. tostring(evt.button) .. " " .. kind .. " (type " .. tostring(evt.type) .. ") at tick " .. tostring(sess.ticks) .. ", frame " .. tostring(tool.frame) .. ", ground " .. (tool.terrX ~= nil and "yes" or "none") .. ", hit " .. (sess.hit and sess.hit.kind .. " " .. tostring(sess.hit.i) or "none")) end
 				local took, reqs = sessions.mouse(sess, worldNow(false), evt.button, kind, evt.y)
 				run(reqs)
 				return took
@@ -1136,7 +1083,7 @@ local function toolAction(abort : function()) : TreeNodeId
 			proposalId = "westrom_track_geometry_cursor",
 		}
 	end
-	local edges = fresh and sess.phase == "done" and guard("gizmo", sessions.vertical(sess) and verticalEdges or editEdges) or {}
+	local edges = fresh and sess.phase == "done" and guard("gizmo", gizmoEdges) or {}
 	if #edges > 0 then
 		children[#children + 1] = builtin.EdgeRenderable{ edges = edges, ignoreDepth = true }
 	end
@@ -1147,8 +1094,11 @@ local function toolAction(abort : function()) : TreeNodeId
 	local param : Builtin.ActionDescriptorParam = {
 		tool = "construction",
 		onBack = function()
+			say("[DEBUG-rc7] onBack at tick " .. tostring(sess.ticks) .. ", frame " .. tostring(tool.frame) .. ", ground " .. (tool.terrX ~= nil and "yes" or "none") .. ", hit " .. (sess.hit and sess.hit.kind .. " " .. tostring(sess.hit.i) or "none") .. ", badges " .. tostring(tool.screen and #tool.screen or 0) .. ", mode " .. tostring(sess.mode))
 			if sess.confirmOpen then return end -- (the window takes Esc itself: Cancel)
-			if sessions.backIsOurs(sess) then backAction() else closeMenu(abort) end
+			if sessions.backIsOurs(sess) then backAction() return end
+			say("back: not the tool's (" .. sess.phase .. "): closing the menu")
+			closeMenu(abort)
 		end,
 		terrainCirclePolicy = "Never",
 		children = children,

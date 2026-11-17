@@ -81,6 +81,7 @@ local record Geometry
 
 	vec : function(number, number, number) : Vec
 	clothoidOffset : function(k0 : number, kp : number, s : number) : number, number
+	circleCenter : function(p : Vec, v : Vec, r : number, B : Vec) : Vec
 	length : function(Segment) : number
 	pointAt : function(Segment, t : number) : Vec
 	tangentAt : function(Segment, t : number) : Vec
@@ -169,6 +170,7 @@ end
 local function circleCenter(p : Vec, v : Vec, r : number, B : Vec) : Vec
 	return add(p, scale(r / norm(v), cross(B, v)))
 end
+M.circleCenter = circleCenter
 
 -- Point at arc length `s` on a curve from `p` with start tangent `v`, curvature linear from k0
 -- to k1 over length L, in the plane with binormal `B`.

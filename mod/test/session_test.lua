@@ -833,4 +833,24 @@ t.free[1] = nil
 tick(t)
 check(t.s.phase == "from" and from(t) == nil, "node: a picked node that is gone undoes its pick")
 
+------------------------------------------------------------------ "back" taken as Esc, logged
+-- (to tell, from the game's log, a right-click taken for an Esc from a real Esc)
+local lt = editing()
+local logged = {}
+lt.s.log = function(m) logged[#logged + 1] = m end
+local function escLines()
+	local n, last = 0, nil
+	for _, m in ipairs(logged) do if m:find("as Esc", 1, true) then n, last = n + 1, m end end
+	logged = {}
+	return n, last
+end
+rightClick(lt)
+check(escLines() == 0, "back log: a right-click's back is not logged as an Esc")
+moveTo(lt, FAR_X, FAR_Y)
+mouse(lt, 2, "clicked"); tick(lt, 2); esc(lt)
+local n, line = escLines()
+check(n == 1 and line:find("right click at tick", 1, true) ~= nil and line:find("last mouse: button 2 clicked", 1, true) ~= nil,
+	"back log: a back that comes too late after a right click is logged as an Esc, with the click's tick")
+check(lt.s.phase ~= "done", "back log: ...and it leaves editing, as an Esc does")
+
 H.done()

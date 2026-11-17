@@ -12,6 +12,7 @@ local record Curve
 	s0 : number
 	s1 : number
 	sMid : number -- the middle of its arc
+	radius : number -- its arc's radius (m); nil with no arc
 end
 
 -- A badge: where it goes and what it says. "curve": at a curve's arc middle, with its speed;
@@ -24,6 +25,7 @@ local record Badge
 	y : number
 	z : number
 	speed : number -- the game's slowest curve limit over the curve (m/s); nil while unknown
+	radius : number -- curves: the arc's radius (m); nil with no arc
 	grade : number -- rise over run at the badge
 	slowest : boolean -- the path's slowest curve
 	steep : boolean -- spans: too steep (past the grade limit at a node over it)
@@ -71,7 +73,7 @@ function M.curves(path : {geometry.Segment}) : {Curve}
 			end
 			if cur ~= nil then
 				cur.s1 = s + len
-				if k == "arc" then cur.sMid = s + len / 2 end
+				if k == "arc" then cur.sMid, cur.radius = s + len / 2, math.abs(seg.radius) end
 			end
 			prev = k
 			s = s + len
@@ -98,7 +100,7 @@ local function slowest(nodes : {alignment.Sample}, speeds : {number}, keep : fun
 	return v
 end
 
--- A badge at each curve's arc middle. speeds (m/s per piece, nil where unknown) is nil until the
+-- A badge at each curve's arc middle, with its radius. speeds (m/s per piece, nil where unknown) is nil until the
 -- game has made the ghost's data.
 function M.badges(nodes : {alignment.Sample}, z : {number}, speeds : {number}, curves : {Curve}) : {Badge}
 	local out : {Badge} = {}
@@ -108,7 +110,9 @@ function M.badges(nodes : {alignment.Sample}, z : {number}, speeds : {number}, c
 	for _, c in ipairs(curves) do
 		local v = slowest(nodes, speeds, function(mid : number, sp : number) : boolean return mid >= c.s0 and mid <= c.s1 and sp < NO_LIMIT end)
 		if v ~= nil then slow = math.min(slow, v) end
-		out[#out + 1] = badge("curve", nodes, z, gs, c.sMid, v)
+		local bd = badge("curve", nodes, z, gs, c.sMid, v)
+		bd.radius = c.radius
+		out[#out + 1] = bd
 	end
 	-- (only when there is a choice: one curve is the slowest of one)
 	if #out > 1 and slow < math.huge then

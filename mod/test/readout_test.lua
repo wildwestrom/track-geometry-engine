@@ -47,11 +47,13 @@ check(#cs == 3, "curves: three, touching corners kept apart: " .. #cs)
 check(near(cs[1].s0, 50) and near(cs[1].s1, 130) and near(cs[1].sMid, 90), "curves: first spans its spirals, badge at the arc's middle")
 check(near(cs[2].s0, 130) and near(cs[2].s1, 170) and near(cs[2].sMid, 150), "curves: second starts where the first ends")
 check(near(cs[3].s0, 200) and near(cs[3].s1, 260) and near(cs[3].sMid, 230), "curves: an arc with no spirals")
+check(near(cs[1].radius, 100) and near(cs[3].radius, 100), "curves: the arc's radius")
 
 -- badges on the 300 m line (only chainage is used to find each curve's pieces)
 local bs = R.badges(nodes, z, nil, cs)
 check(#bs == 3 and bs[1].speed == nil and not bs[1].slowest, "badges: one per curve, no speed before the game's data")
 check(near(bs[1].x, 90) and near(bs[1].z, 1.8) and near(bs[1].grade, 0.02), "badges: at the arc's middle, with its height and grade")
+check(near(bs[1].radius, 100), "badges: the curve's radius")
 for i = 1, 30 do speeds[i] = 5000 end
 for i = 6, 13 do speeds[i] = 110 / 3.6 end -- curve 1: pieces 6..13 (mid 55..125)
 speeds[9] = 104 / 3.6

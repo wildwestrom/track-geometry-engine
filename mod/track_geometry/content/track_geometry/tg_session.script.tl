@@ -136,11 +136,14 @@ local record Session
 	closedTick : integer -- tick the confirm window closed (the click that closed it must not open it again)
 	ticks : integer -- ticks so far (the game's os.clock is CPU time over all threads: no use as a timer)
 	rightTick : integer -- tick of a right-button click whose "back" has not come yet
+	lastMouse : string -- the last mouse event but a move ("button 2 clicked"), and its tick: for the log
+	lastMouseTick : integer
 	log : function(string)
 	live : function() : boolean -- is the tool open and ticking (events are ignored when not)
 end
 
 local record SessionMod
+	Session : Session
 	Mode : Mode
 	Request : Request
 	MouseKind : MouseKind
@@ -542,6 +545,14 @@ end
 -- at most, in case the click's "back" never comes.)
 local function takeRight(s : Session) : boolean
 	local right = s.rightTick ~= nil and s.ticks - s.rightTick <= 1
+	if not right then
+		-- (logged, to tell in the game's log a right-click taken for an Esc: its mark too old or missing)
+		local h = s.hit
+		s.log("back: as Esc at tick " .. s.ticks .. " (" .. s.phase .. (s.mode and ", " .. s.mode or "")
+			.. (h and ", over " .. h.kind .. " " .. tostring(h.i) or ", over nothing") .. "); "
+			.. (s.rightTick and "right click at tick " .. s.rightTick or "no right click") .. "; "
+			.. (s.lastMouse and "last mouse: " .. s.lastMouse .. " at tick " .. s.lastMouseTick or "no mouse event"))
+	end
 	s.rightTick = nil
 	return right
 end
@@ -571,6 +582,7 @@ end
 -- the tool takes the event (else it is left to the game).
 function M.mouse(s : Session, w : World, button : integer, kind : MouseKind, y : number) : boolean, {Request}
 	if y ~= nil then s.mouseSY = y end -- (for a Shift-drag's height)
+	if kind ~= "moved" then s.lastMouse, s.lastMouseTick = "button " .. button .. " " .. kind, s.ticks end
 	if button == 2 then
 		-- (only marks the "back" that follows a click as a right-click; the camera keeps the button)
 		if kind == "clicked" then s.rightTick = s.ticks end
