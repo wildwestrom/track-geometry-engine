@@ -12,6 +12,7 @@
 
 local ends = require("westrom_track_geometry::/track_geometry/tg_ends.script.tl")
 local structures = require("westrom_track_geometry::/track_geometry/tg_structures.script.tl")
+local crossings = require("westrom_track_geometry::/track_geometry/tg_crossings.script.tl")
 
 local TAG = "[westrom_track_geometry] "
 
@@ -39,6 +40,13 @@ local record WorldMod
 	piecesAt : function(e : ends.End) : {integer}
 	mergeable : function(joint : integer, from : integer, to : integer) : boolean
 	endsNear : function(x : number, y : number, hovered : integer, skip ?: integer) : {ends.End}, ends.Piece
+	-- town buildings
+	townBuildingConstruction : function(e : integer) : integer
+	townBuildingsIn : function(minX : number, minY : number, maxX : number, maxY : number) : {integer : {number}}
+	allExist : function(es : {integer}) : boolean
+	-- level crossings
+	streetsIn : function(minX : number, minY : number, maxX : number, maxY : number) : {integer : crossings.Street}
+	crossingType : function() : integer
 end
 
 local M : WorldMod = {}
@@ -177,15 +185,20 @@ local function awayFrom(pc : ends.Piece, n : integer) : ends.Dir
 	return { dx = sign * t.x / len, dy = sign * t.y / len, grade = sign * t.z / len }
 end
 
+-- Edge e's curve and nodes as the tool reads them (its BaseEdge be).
+local function curveOf(e : integer, be : Engine.Component.BaseEdge) : ends.Piece
+	local function p(v : Vec3f) : ends.Point return { x = v.x, y = v.y, z = v.z } end
+	return { edge = e, node0 = be.node0, node1 = be.node1, p0 = p(be.position0), t0 = p(be.tangent0),
+		p1 = p(be.position1), t1 = p(be.tangent1) }
+end
+
 -- The track piece e as the tool reads it, or nil (not a live track piece).
 local function piece(e : integer) : ends.Piece
 	return guarded(function() : ends.Piece
 		if e == nil or e <= 0 or not api.engine.entityExists(e) then return nil end
 		local be = api.engine.getComponent(e, api.type.ComponentType.BASE_EDGE) as Engine.Component.BaseEdge
 		if be == nil or be.roadType ~= api.type["enum"].RoadType.TRACK then return nil end
-		local function p(v : Vec3f) : ends.Point return { x = v.x, y = v.y, z = v.z } end
-		return { edge = e, node0 = be.node0, node1 = be.node1, p0 = p(be.position0), t0 = p(be.tangent0),
-			p1 = p(be.position1), t1 = p(be.tangent1) }
+		return curveOf(e, be)
 	end)
 end
 
@@ -313,6 +326,160 @@ function M.mergeable(joint : integer, from : integer, to : integer) : boolean
 		if a == nil or b == nil or #(b.objects or {}) > 0 then return false end
 		return a.type == b.type and a.typeIndex == b.typeIndex and a.roadTemplate == b.roadTemplate
 	end) == true
+end
+
+-- The construction of town building e (what a proposal's constructionsToRemove takes to knock it
+-- down); nil when e is not a town building.
+function M.townBuildingConstruction(e : integer) : integer
+	return guarded(function() : integer
+		if not api.engine.entityExists(e) then return nil end
+		local tb = api.engine.getComponent(e, api.type.ComponentType.TOWN_BUILDING) as Engine.Component.TownBuilding
+		if tb == nil then return nil end
+		local con = tb.construction as integer
+		if con == nil or con < 0 then return nil end
+		return con
+	end)
+end
+
+-- The town buildings whose bounding boxes reach into the area, each with its box seen from above
+-- ({minX, minY, maxX, maxY}: axis aligned, so larger than a house set at an angle); nil when the
+-- map cannot be read.
+function M.townBuildingsIn(minX : number, minY : number, maxX : number, maxY : number) : {integer : {number}}
+	return guarded(function() : {integer : {number}}
+		local out : {integer : {number}} = {}
+		local box = api.type.Box3.new(api.type.Vec3f.new(minX, minY, -2000), api.type.Vec3f.new(maxX, maxY, 6000))
+		api.engine.system.octreeSystem.findIntersectingEntities(box, function(e : Engine.Entity, bv : Engine.Component.BoundingVolume)
+			if bv == nil or bv.bbox == nil or out[e as integer] ~= nil then return end
+			if api.engine.getComponent(e, api.type.ComponentType.TOWN_BUILDING) == nil then return end
+			out[e as integer] = { bv.bbox.min.x, bv.bbox.min.y, bv.bbox.max.x, bv.bbox.max.y }
+		end)
+		return out
+	end)
+end
+
+-- Are all the entities es still there? (A proposal naming one that is gone may kill the game, as
+-- a gone node does.)
+function M.allExist(es : {integer}) : boolean
+	return guarded(function() : boolean
+		for _, e in ipairs(es) do
+			if not api.engine.entityExists(e) then return false end
+		end
+		return true
+	end) == true
+end
+
+------------------------------------------------------------------ level crossings
+
+local crossingTypes : {integer : integer} = {} -- year -> the type the game's menu would pick
+
+-- The level crossing type the game's menu would pick this year (the first of those on offer, as
+-- Network Tools picks it); nil when none can be read.
+function M.crossingType() : integer
+	local y = year()
+	if crossingTypes[y] ~= nil then return crossingTypes[y] end
+	local id = guarded(function() : integer
+		local mcu = ug_require "::/gui/main/menu_category_util.tl" as MenuCategoryUtil
+		local objects = mcu.getAvailableObjectsSorted(api.res.railroadCrossingTypeRep as ResTypeRep<integer, table>, y)
+		return objects ~= nil and objects[1] ~= nil and objects[1].id as integer or nil
+	end)
+	if id ~= nil then crossingTypes[y] = id end
+	say("level crossing type: " .. tostring(id))
+	return id
+end
+
+-- The type of the level crossing at node n (the game's default one when its own cannot be read),
+-- or nil when n is none: a node a track runs through.
+local function crossingAt(n : integer) : integer
+	if not nodeAlive(n) or #segmentsAt(n, true) == 0 then return nil end
+	local t = guarded(function() : integer
+		local CT = api.type.ComponentType
+		local rc = api.engine.getComponent(n, CT.RAILROAD_CROSSING) as Engine.Component.RailroadCrossing
+		if rc ~= nil then return rc.typeIndex end
+		-- (the crossing may be an entity of its own that lists the node)
+		local bn = api.engine.getComponent(n, CT.BASE_NODE) as Engine.Component.BaseNode
+		local at = api.type.Vec2f.new(bn.position.x, bn.position.y)
+		for _, e in ipairs(api.engine.util.octree.findEntitiesInCircle(at, 40, CT.RAILROAD_CROSSING)) do
+			local c = api.engine.getComponent(e, CT.RAILROAD_CROSSING) as Engine.Component.RailroadCrossing
+			for _, cn in ipairs(c ~= nil and c.nodes or {}) do
+				if cn == n then return c.typeIndex end
+			end
+		end
+		return nil
+	end)
+	if t == nil or t < 0 then t = M.crossingType() end
+	return t
+end
+
+-- Street or track edge e on the ground as tg_crossings reads it, with why it cannot be cut (fixed)
+-- and the level crossings at its nodes; nil when it is neither.
+local function streetOf(e : integer) : crossings.Street, Engine.Component.BaseEdge
+	if not api.engine.entityExists(e) then return nil end
+	local be = api.engine.getComponent(e, api.type.ComponentType.BASE_EDGE) as Engine.Component.BaseEdge
+	local RT = api.type["enum"].RoadType
+	if be == nil or (be.roadType ~= RT.STREET and be.roadType ~= RT.TRACK) or be.type ~= api.type["enum"].BaseEdgeType.NORMAL then return nil end
+	local track = be.roadType == RT.TRACK
+	local s = curveOf(e, be) as crossings.Street
+	s.track = track
+	local what = track and "the track" or "the road"
+	if #(be.objects or {}) > 0 or #(be.edgeDecorations or {}) > 0 then
+		s.fixed = what .. (track and " carries signals or other objects" or " carries stops or other objects")
+	elseif (api.engine.system.streetConnectorSystem.getConstructionEntityForEdge(e) or -1) >= 0 then
+		s.fixed = what .. " belongs to a construction"
+	end
+	-- (a track's node is a level crossing only where a street meets it too)
+	local function crossingOf(n : integer) : integer
+		if track and #segmentsAt(n, false) == 0 then return nil end
+		return crossingAt(n)
+	end
+	s.crossing0, s.crossing1 = crossingOf(be.node0 as integer), crossingOf(be.node1 as integer)
+	local function kind(n : integer, crossing : integer) : string
+		if crossing ~= nil then return "crossing" end
+		if #segmentsAt(n, track) >= 3 then return "junction" end
+		return nil
+	end
+	s.kind0, s.kind1 = kind(be.node0 as integer, s.crossing0), kind(be.node1 as integer, s.crossing1)
+	return s, be
+end
+
+-- The road's (or track's) next piece past node n of edge e (be), when n is a plain joint: nothing
+-- else there, and the next piece the same kind of road or track (template, type, lanes), so that
+-- both can be taken as one (tg_crossings.merge, which drops the joint's lane rules); else nil.
+local function beyond(e : integer, be : Engine.Component.BaseEdge, n : integer) : crossings.Street
+	local track = be.roadType == api.type["enum"].RoadType.TRACK
+	local at = segmentsAt(n, track)
+	if #at ~= 2 or #segmentsAt(n, not track) > 0 then return nil end
+	local other = at[1] == e and at[2] or at[1]
+	if other == e then return nil end
+	local s, ob = streetOf(other)
+	if s == nil or ob.roadTemplate ~= be.roadTemplate or ob.typeIndex ~= be.typeIndex
+		or #(ob.laneConfigs or {}) ~= #(be.laneConfigs or {}) then return nil end
+	return s
+end
+
+-- The street and track edges on the ground whose boxes reach into the area, as tg_crossings reads them (streetOf),
+-- each with the road's next pieces past its plain joints (beyond); nil when the map cannot be read.
+function M.streetsIn(minX : number, minY : number, maxX : number, maxY : number) : {integer : crossings.Street}
+	local found = guarded(function() : {integer}
+		local out : {integer} = {}
+		local box = api.type.Box3.new(api.type.Vec3f.new(minX, minY, -2000), api.type.Vec3f.new(maxX, maxY, 6000))
+		api.engine.system.octreeSystem.findIntersectingEntities(box, function(e : Engine.Entity, _bv : Engine.Component.BoundingVolume)
+			out[#out + 1] = e as integer
+		end)
+		return out
+	end)
+	if found == nil then return nil end
+	local out : {integer : crossings.Street} = {}
+	for _, e in ipairs(found) do
+		if out[e] == nil then
+			out[e] = guarded(function() : crossings.Street
+				local s, be = streetOf(e)
+				if s == nil then return nil end
+				s.beyond0, s.beyond1 = beyond(e, be, be.node0 as integer), beyond(e, be, be.node1 as integer)
+				return s
+			end)
+		end
+	end
+	return out
 end
 
 -- Is e a track piece?

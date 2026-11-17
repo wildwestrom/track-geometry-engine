@@ -39,6 +39,7 @@ local record Readout
 	alongBadges : function(nodes : {alignment.Sample}, z : {number}, speeds : {number}, every : number) : {Badge}
 	profileBadges : function(nodes : {alignment.Sample}, p : profiles.Profile, every : number, limit ?: number) : {Badge}
 	summary : function(nodes : {alignment.Sample}, z : {number}, speeds : {number}, trackSpeed : number, minRadius : number) : {string}
+	pieceSpeeds : function(pieceOf : {integer : integer}, m : integer, edgeSpeed : function(edge : integer) : number) : {number}
 end
 
 local M : Readout = {}
@@ -172,6 +173,17 @@ function M.profileBadges(nodes : {alignment.Sample}, p : profiles.Profile, every
 		end
 		if clear then at("grade", s) end
 		s = s + every
+	end
+	return out
+end
+
+-- Each of the m plan pieces' curve speed (m/s; nil where none is known): the slowest of its
+-- edges' (edgeSpeed, nil where unknown), the edges found through pieceOf (tg_proposal).
+function M.pieceSpeeds(pieceOf : {integer : integer}, m : integer, edgeSpeed : function(edge : integer) : number) : {number}
+	local out : {number} = {}
+	for edge, i in pairs(pieceOf) do
+		local v = edgeSpeed(edge)
+		if i >= 1 and i <= m and v ~= nil and (out[i] == nil or v < out[i]) then out[i] = v end
 	end
 	return out
 end

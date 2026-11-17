@@ -110,4 +110,12 @@ local ax, ay = A.pointAt(nodes, 123)
 local ps, pd = A.project(nodes, 123, 7)
 check(near(ax, 123) and near(ay, 0) and near(ps, 123) and near(pd, 7), "point at a chainage, chainage nearest a point")
 
+-- each plan piece's curve speed: the slowest of its edges (piece 2 split in two at a crossing)
+local pieceOf = { [-1] = 1, [-2] = 2, [-4] = 2, [-3] = 3 }
+local edgeSpeed = { [-1] = 50, [-2] = 40, [-4] = 30, [-5] = 1 } -- (-3: none known; -5: no plan piece's)
+local pieceSp = R.pieceSpeeds(pieceOf, 3, function(e) return edgeSpeed[e] end)
+check(pieceSp[1] == 50 and pieceSp[2] == 30 and pieceSp[3] == nil, "piece speeds: the slowest edge of each piece, none where none known")
+pieceSp = R.pieceSpeeds({ [-1] = 1, [-2] = 1 }, 1, function(e) return e == -2 and 20 or nil end)
+check(pieceSp[1] == 20, "piece speeds: a split piece with no speed on one edge takes the other's")
+
 H.done()
