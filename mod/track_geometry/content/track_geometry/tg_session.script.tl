@@ -12,7 +12,6 @@
 --   "askBuild"               : check the ghost and open the confirm window (then confirmOpened,
 --                              or refuse with why not)
 --   "closeConfirm"           : close the confirm window (then confirmClosed)
---   "ghostNow"               : make the ghost again at once (a drag ended, a height was set)
 --   "restart"                : the session started over: drop the ghost and what was read out
 --
 -- What only the game knows comes in as a World with each event. No game API here, so
@@ -38,7 +37,6 @@ local enum Request
 	"closeMode"
 	"askBuild"
 	"closeConfirm"
-	"ghostNow"
 	"restart"
 end
 
@@ -409,7 +407,7 @@ local function release(s : Session) : {Request}
 	local e = s.edit
 	if s.dragEl ~= nil then
 		s.dragEl = nil
-		return { "ghostNow" }
+		return {}
 	end
 	if s.drag == nil then return {} end
 	local h = s.drag
@@ -424,7 +422,7 @@ local function release(s : Session) : {Request}
 			s.log("edit: the " .. M.handleName(h) .. " dropped on " .. ends.name(en))
 		end
 	end
-	return { "ghostNow" } -- (make the ghost of where it ended up now)
+	return {}
 end
 
 -- Right-click on a turn (or an elevation point) removes it; elsewhere it does nothing. true when
@@ -499,7 +497,7 @@ function M.setHeight(s : Session, z : number) : {Request}
 	local pt = i ~= nil and edits.points(e)[i] or nil
 	if pt == nil or pt.z == z or not edits.setHeight(e, i, z) then return {} end -- (the box may echo the height it was given)
 	s.log(string.format("edit: %s set to %.2f m", pointName(e, i), z))
-	return { "ghostNow" }
+	return {}
 end
 
 -- The selected elevation point or ground end, read out against the grade limit; nil when none is.

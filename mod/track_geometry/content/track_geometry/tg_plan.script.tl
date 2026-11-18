@@ -52,47 +52,12 @@ local record PlanMod
 	Readout : Readout
 	BADGE_EVERY : number
 	path : function(a : ends.End, b : ends.End, e : edits.Edit, ground : Ground, water : Water) : Plan, string
-	switches : function(a : ends.End, b : ends.End, nodes : {alignment.Sample}, piecesAt : PiecesAt, mergeable : Mergeable, only ?: integer) : {integer}, {ends.Run}
+	switches : function(a : ends.End, b : ends.End, nodes : {alignment.Sample}, piecesAt : PiecesAt, mergeable : Mergeable) : {integer}, {ends.Run}
 	readout : function(plan : Plan, speeds : {number}) : Readout, string
 	summary : function(r : Readout, trackSpeed : number) : {string}
-	changed : function(ref : {alignment.Sample}, refZ : {number}, nodes : {alignment.Sample}, z : {number}) : integer, integer
 end
 
 local M : PlanMod = {}
-
--- The stretch of built nodes (nodes, heights z) that differs from those of an earlier plan (ref,
--- refZ): from the last node before it that is the same to the first one after it (so the pieces
--- either side of each changed node are in it); nil when none differs. Compared
--- from both ends (by index from each end: a change shifts the indices after it). In plan first:
--- the profile's heights run the length of the path, so a horizontal drag shifts them all a little;
--- only when no node moved in plan, by height (an elevation point dragged changes the stretch
--- between its neighbours).
-local SAME_XY = 1e-3 -- m
-local SAME_HEADING = 1e-6 -- rad
-local SAME_Z = 1e-3 -- m
-function M.changed(ref : {alignment.Sample}, refZ : {number}, nodes : {alignment.Sample}, z : {number}) : integer, integer
-	local n, nr = #nodes, #ref
-	local function same(i : integer, j : integer, byZ : boolean) : boolean
-		local a, b = nodes[i], ref[j]
-		if byZ then return math.abs(z[i] - refZ[j]) <= SAME_Z end
-		return math.abs(a.x - b.x) <= SAME_XY and math.abs(a.y - b.y) <= SAME_XY
-			and math.abs(math.sin(a.heading - b.heading)) <= SAME_HEADING and math.cos(a.heading - b.heading) > 0
-	end
-	local function span(byZ : boolean) : integer, integer
-		local m = math.min(n, nr)
-		local f = 1
-		while f <= m and same(f, f, byZ) do f = f + 1 end
-		if f > m and n == nr then return nil, nil end -- (all the same)
-		local t = 0
-		while t < m - f + 1 and same(n - t, nr - t, byZ) do t = t + 1 end
-		local l = n - t -- the last node that differs (in nodes)
-		if l < f then l = f end
-		return math.max(1, f - 1), math.min(n, l + 1)
-	end
-	local lo, hi = span(false)
-	if lo == nil then lo, hi = span(true) end
-	return lo, hi
-end
 
 -- The path is read every edits.STEP, but built in pieces turning at most this much (straights: one piece).
 local MAX_TURN = math.rad(15)
@@ -193,11 +158,11 @@ end
 -- and the runs of a shallow switch: the track it runs beside, merged through the joints there
 -- (ends.runs), each piece into one run only, and never a piece or node the other end is on. The
 -- world is read through piecesAt and mergeable (tg_world).
-function M.switches(a : ends.End, b : ends.End, nodes : {alignment.Sample}, piecesAt : PiecesAt, mergeable : Mergeable, only ?: integer) : {integer}, {ends.Run}
+function M.switches(a : ends.End, b : ends.End, nodes : {alignment.Sample}, piecesAt : PiecesAt, mergeable : Mergeable) : {integer}, {ends.Run}
 	local replace : {integer} = {}
 	local used : {integer : boolean} = {}
-	for i, en in ipairs({ a, b }) do
-		for _, e in ipairs((only == nil or only == i) and piecesAt(en) or {}) do
+	for _, en in ipairs({ a, b }) do
+		for _, e in ipairs(piecesAt(en)) do
 			if not used[e] then used[e] = true; replace[#replace + 1] = e end
 		end
 	end
@@ -206,19 +171,17 @@ function M.switches(a : ends.End, b : ends.End, nodes : {alignment.Sample}, piec
 		if en.kind == "split" then used[en.piece.edge] = true end
 	end
 	for i, en in ipairs({ a, b }) do
-		if only == nil or only == i then
-			local other = i == 1 and b or a
-			local n0, n1 = nodes[i == 1 and 1 or #nodes - 1], nodes[i == 1 and 2 or #nodes]
-			local T = alignment.tangentLength(n0, n1)
-			local branch : ends.Piece = { edge = -1, p0 = { x = n0.x, y = n0.y, z = 0 }, p1 = { x = n1.x, y = n1.y, z = 0 },
-				t0 = { x = math.cos(n0.heading) * T, y = math.sin(n0.heading) * T, z = 0 },
-				t1 = { x = math.cos(n1.heading) * T, y = math.sin(n1.heading) * T, z = 0 } }
-			for _, r in ipairs(ends.runs(en, branch, function(joint : integer, from : integer, to : integer) : boolean
-				if used[to] or joint == other.node or not mergeable(joint, from, to) then return false end
-				used[to] = true
-				return true
-			end)) do runs[#runs + 1] = r end
-		end
+		local other = i == 1 and b or a
+		local n0, n1 = nodes[i == 1 and 1 or #nodes - 1], nodes[i == 1 and 2 or #nodes]
+		local T = alignment.tangentLength(n0, n1)
+		local branch : ends.Piece = { edge = -1, p0 = { x = n0.x, y = n0.y, z = 0 }, p1 = { x = n1.x, y = n1.y, z = 0 },
+			t0 = { x = math.cos(n0.heading) * T, y = math.sin(n0.heading) * T, z = 0 },
+			t1 = { x = math.cos(n1.heading) * T, y = math.sin(n1.heading) * T, z = 0 } }
+		for _, r in ipairs(ends.runs(en, branch, function(joint : integer, from : integer, to : integer) : boolean
+			if used[to] or joint == other.node or not mergeable(joint, from, to) then return false end
+			used[to] = true
+			return true
+		end)) do runs[#runs + 1] = r end
 	end
 	return replace, runs
 end

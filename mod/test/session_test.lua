@@ -189,7 +189,7 @@ moveTo(t, 420, 350)
 check(to(t).kind == "ground" and to(t).x == 420 and to(t).y == 350 and to(t).z == 6
 	and from(t) == endA, "drag end: the end follows the mouse, at the ground's height")
 letGo(t)
-check(t.s.drag == nil and to(t).x == 420 and asked(t, "ghostNow") == 1 and asked(t, "askBuild") == 0,
+check(t.s.drag == nil and to(t).x == 420 and asked(t, "askBuild") == 0,
 	"drag end: the drop leaves it there, and does not ask to build")
 -- dropped on track it becomes that end, heading as the second click would give it
 t.piece = { edge = 50, node0 = 61, node1 = 62, p0 = { x = -1000, y = 500, z = 4 }, t0 = { x = 2000, y = 0, z = 0 },
@@ -209,7 +209,7 @@ moveTo(t, 400, 530)
 check(to(t).node == 7 and to(t).dy == -1, "drop on track: within SNAP of a free end, it is that end")
 letGo(t)
 moveTo(t, 431, 541)
-check(t.s.drag == nil and to(t).node == 7 and asked(t, "ghostNow") == 1 and (t.s.hit == nil or t.s.hit.kind ~= "end"),
+check(t.s.drag == nil and to(t).node == 7 and (t.s.hit == nil or t.s.hit.kind ~= "end"),
 	"drop on track: let go, it is that end and a handle no more")
 press(t)
 check(t.s.drag == nil or t.s.drag.kind ~= "end", "drop on track: a press on it grabs it no more")
@@ -259,7 +259,7 @@ local grabbed = t.s.drag.i
 moveTo(t, lx + 60, ly - 80)
 check(e.rev > rev + 1 and math.abs(E.polyline(e)[grabbed].x - (lx + 60)) < 1e-9, "edit: the grabbed turn follows the mouse")
 mouse(t, 0, "released")
-check(t.s.drag == nil and asked(t, "ghostNow") == 1, "edit: letting go ends the drag and asks for the ghost at once")
+check(t.s.drag == nil, "edit: letting go ends the drag")
 check(mouse(t, 0, "clicked") == true and asked(t, "askBuild") == 0, "edit: the click of a drag does not ask to build")
 moveTo(t, FAR_X, FAR_Y)
 click(t)
@@ -313,7 +313,7 @@ local further = nodes[math.floor(#nodes / 2) + 10]
 moveTo(t, further.x, further.y)
 check(E.points(e)[2].s > f, "vertical: the point slides along the track with the mouse")
 letGo(t)
-check(t.s.dragEl == nil and asked(t, "ghostNow") == 1 and asked(t, "askBuild") == 0, "vertical: letting go ends the drag; its click does not build")
+check(t.s.dragEl == nil and asked(t, "askBuild") == 0, "vertical: letting go ends the drag; its click does not build")
 -- Shift-drag: its height follows the mouse up the screen
 t.shift = true
 mouse(t, 0, "moved", 500)
@@ -420,9 +420,8 @@ check(t.s.selected == 2 and #E.points(e) == 4, "select: a click on a point selec
 moveTo(t, FAR_X, FAR_Y)
 check(click(t) == true and asked(t, "askBuild") == 1 and t.s.selected == 2, "select: a click on nothing keeps it and asks to build")
 -- setting its height applies at once, past the limit too
-asked(t, "ghostNow")
 note(t, S.setHeight(t.s, 200))
-check(E.points(e)[2].z == 200 and asked(t, "ghostNow") == 1, "select: a height set applies as asked, and the ghost is made at once")
+check(E.points(e)[2].z == 200, "select: a height set applies as asked")
 local rev2 = e.rev
 check(#S.setHeight(t.s, 200) == 0 and e.rev == rev2, "select: the height it has already asks nothing (the box echoing its value)")
 sel = S.selection(t.s, LIMIT)
@@ -496,10 +495,9 @@ for k, m in ipairs(src) do labels[k] = m.label end
 check(table.concat(labels, " | ") == table.concat(want, " | "),
 	"match: Start, the other points and End, in order, labelled: " .. table.concat(labels, " | "))
 -- picking one sets the selected point's height at once
-asked(t, "ghostNow")
 local function pick(k) note(t, S.match(t.s, S.matchSources(t.s)[k])) end
 pick(3)
-check(E.points(e)[3].z == 18.94 and asked(t, "ghostNow") == 1, "match: point 3's height, at once")
+check(E.points(e)[3].z == 18.94, "match: point 3's height, at once")
 pick(1)
 check(E.points(e)[3].z == 36.4, "match: the start's height")
 pick(4)
@@ -559,9 +557,8 @@ local sel = S.selection(t.s, LIMIT)
 check(sel ~= nil and sel.name == "End" and sel.z == 0 and sel.s == E.nodes(e)[#E.nodes(e)].s and sel.grade ~= nil and not sel.tooClose,
 	"ground end: the selection reads it out")
 -- the height box
-asked(t, "ghostNow")
 note(t, S.setHeight(t.s, 9))
-check(to(t).z == 9 and asked(t, "ghostNow") == 1, "ground end: the height box sets its height")
+check(to(t).z == 9, "ground end: the height box sets its height")
 -- the match list: the start and the points, not itself
 moveTo(t, E.nodes(e)[20].x, E.nodes(e)[20].y); press(t); letGo(t)
 note(t, S.setHeight(t.s, 2.5))
@@ -588,7 +585,7 @@ tick(t)
 check(to(t).z < 500 and E.steepest(e) <= LIMIT + 1e-9, string.format("ground end: a Shift-drag stops at the limit (%.1f m)", to(t).z))
 letGo(t)
 t.shift = false
-check(t.s.dragEl == nil and asked(t, "ghostNow") >= 1 and asked(t, "askBuild") == 0, "ground end: letting go ends the drag")
+check(t.s.dragEl == nil and asked(t, "askBuild") == 0, "ground end: letting go ends the drag")
 -- set past the limit: too steep, so no build
 note(t, S.setHeight(t.s, 400))
 moveTo(t, 300, -400)

@@ -25,7 +25,6 @@
 local alignment = require("track_geometry_tool::/track_geometry/tg_alignment.script.tl")
 local ends = require("track_geometry_tool::/track_geometry/tg_ends.script.tl")
 local crossings = require("track_geometry_tool::/track_geometry/tg_crossings.script.tl")
-local timing = require("track_geometry_tool::/track_geometry/tg_timing.script.tl")
 
 local record Options
 	template : string -- track template name (the picked track entry)
@@ -170,9 +169,7 @@ function M.make(nodes : {alignment.Sample}, o : Options) : SimpleProposal, {inte
 		end
 		return true
 	end
-	-- (the job making the ghost gives the frame back between pieces: tg_timing)
 	for i = 1, m do
-		timing.slice()
 		if #streets > 0 and (o.kinds == nil or (o.kinds[i] or "ground") == "ground") then
 			for _, c in ipairs(crossings.find(hermite(i), streets)) do
 				found[#found + 1] = c
@@ -220,7 +217,6 @@ function M.make(nodes : {alignment.Sample}, o : Options) : SimpleProposal, {inte
 	end
 	local function v3(q : ends.Point) : Vec3f return api.type.Vec3f.new(q.x, q.y, q.z) end
 	for i = 1, m do
-		timing.slice()
 		local js = onPiece[i] or {}
 		local us : {number} = {}
 		for _, j in ipairs(js) do us[#us + 1] = level[j].u end
@@ -300,7 +296,6 @@ function M.make(nodes : {alignment.Sample}, o : Options) : SimpleProposal, {inte
 		if not c.street.track then crossingTypeAt[crossNode(j)] = o.crossingType end
 	end
 	for _, st in ipairs(crossed) do
-		timing.slice()
 		local be, own, why = existing(st.edge, st.track and "a track to cross" or "a street to cross")
 		if be == nil then return nil, nil, why, found end
 		for _, e in ipairs(st.pieces or {}) do
@@ -388,7 +383,6 @@ function M.make(nodes : {alignment.Sample}, o : Options) : SimpleProposal, {inte
 		for _, old in ipairs(r.edges) do removed[#removed + 1] = old end
 		for _, j in ipairs(r.nodes) do joints[#joints + 1] = j end
 	end
-	timing.slice()
 	local proposal = api.type.SimpleProposal.new()
 	proposal.streetProposal.nodesToAdd = nodesToAdd
 	proposal.streetProposal.edgesToAdd = edgesToAdd
