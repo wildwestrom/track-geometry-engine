@@ -18,7 +18,7 @@ local mod_entry_point = ug_require "::/gui/main/mod_entry_point.tl" as ModEntryP
 local ends = require("track_geometry_tool::/track_geometry/tg_ends.script.tl")
 local edits = require("track_geometry_tool::/track_geometry/tg_edit.script.tl")
 local gizmos = require("track_geometry_tool::/track_geometry/tg_gizmos.script.tl")
-local proposals = require("track_geometry_tool::/track_geometry/tg_proposal.script.tl")
+local layouts = require("track_geometry_tool::/track_geometry/tg_layout.script.tl")
 local crossings = require("track_geometry_tool::/track_geometry/tg_crossings.script.tl")
 local readout = require("track_geometry_tool::/track_geometry/tg_readout.script.tl")
 local plans = require("track_geometry_tool::/track_geometry/tg_plan.script.tl")
@@ -79,7 +79,7 @@ end
 local record Pending
 	key : string -- ghost key
 	plan : plans.Plan
-	pieceOf : {integer : integer} -- the plan piece of each of the proposal's new edges (tg_proposal)
+	pieceOf : {integer : integer} -- the plan piece of each of the proposal's new edges (tg_layout)
 end
 
 -- The plan read out with those speeds.
@@ -253,7 +253,7 @@ local function viewKey(g : Ghost) : string
 	return g.key .. "#" .. tostring(g.round or 0) .. (g.sketch and "s" or "")
 end
 
--- What the map holds along the track's footprint (pts: tg_proposal.footprint), from one look at
+-- What the map holds along the track's footprint (pts: tg_layout.footprint), from one look at
 -- each stretch of it (tg_world.areaIn), with no check by the game:
 --   the constructions of the town buildings on it. The ghost clears them from the start, so they
 --   show as going (as with the game's own builder), not as collisions found a few at a time
@@ -276,7 +276,7 @@ local function mapAlong(pts : {{number}}) : {integer}, {crossings.Street}
 		-- (one box for both, HOUSE_REACH past the chunk: a street that crosses the track meets its footprint)
 		local boxes, sts = world.areaIn(x0 - HOUSE_REACH, y0 - HOUSE_REACH, x1 + HOUSE_REACH, y1 + HOUSE_REACH)
 		if boxes == nil then break end
-		for _, e in ipairs(proposals.onFootprint(part, boxes, HOUSE_REACH)) do
+		for _, e in ipairs(layouts.onFootprint(part, boxes, HOUSE_REACH)) do
 			local con = world.townBuildingConstruction(e)
 			if con ~= nil and not seenH[con] then seenH[con], houses[#houses + 1] = true, con end
 		end
@@ -329,10 +329,10 @@ local function makeGhost(key : string, a : ends.End, b : ends.End, sketch : bool
 	end
 	local nodes, grades, zs, kinds = plan.built.nodes, plan.grades, plan.built.z, plan.kinds
 	local replace, runs = plans.switches(a, b, nodes, world.piecesAt, world.mergeable)
-	local pts = proposals.footprint(nodes, kinds, 4.0)
+	local pts = layouts.footprint(nodes, kinds, 4.0)
 	local okM, houses, streets = pcall(mapAlong, pts)
 	if not okM then say("ghost: the map along it: " .. tostring(houses)); houses, streets = nil, nil end
-	local ok, p, pieceOf, why, crossed = pcall(proposals.make, nodes, { template = tt.template, z = zs, grades = grades,
+	local ok, p, pieceOf, why, crossed = pcall(layouts.make, nodes, { template = tt.template, z = zs, grades = grades,
 		from = a, to = b, replace = replace, runs = runs,
 		kinds = kinds, bridgeType = bridgeType, tunnelType = tunnelType,
 		streets = streets as {crossings.Street}, crossingType = world.crossingType() })
@@ -491,7 +491,7 @@ end
 -- What is built for ghost g, checked by the game (one dry run): its warning (the town buildings it
 -- knocks down) and its cost are the game's own, unlike the ghost's check (NOTES.md).
 local function checkBuilt(g : Ghost) : Built
-	local q = proposals.gathering(g.proposal)
+	local q = layouts.gathering(g.proposal)
 	if q == nil then return { refused = "the proposal to build came out short" } end
 	local ok, data = pcall(dryRun, q, makeContext(true))
 	local d = ok and data as ProposalData or nil
@@ -506,7 +506,7 @@ end
 -- The game's check of the ghost's proposal removing `cleared` itself, nil if it fails.
 local function checkRemoving(g : Ghost, cleared : {integer}) : ProposalData
 	local ok, d = pcall(function() : ProposalData
-		local q = proposals.gathering(g.proposal)
+		local q = layouts.gathering(g.proposal)
 		if q == nil then return nil end
 		if #cleared > 0 then q.constructionsToRemove = cleared end
 		return dryRun(q, makeContext(false))
@@ -521,12 +521,12 @@ local function checkRemoving(g : Ghost, cleared : {integer}) : ProposalData
 end
 
 -- Find every town building in the settled ghost's way with the game's own checks (dry runs without
--- gathering, each naming only some: tg_proposal.allHouses) and clear just those, so that the ghost
+-- gathering, each naming only some: tg_layout.allHouses) and clear just those, so that the ghost
 -- shows as going exactly what the game knocks down (the lookup on the map takes in a few more:
 -- boxes cover whole lots). All its dry runs at once, in the tick its own check came: each blocks
 -- the frame, and coroutines would not help (they share the game's thread, NOTES.md).
 local function findHouses(g : Ghost)
-	local ok, h, n = pcall(proposals.allHouses, function(cleared : {integer}) : ProposalData
+	local ok, h, n = pcall(layouts.allHouses, function(cleared : {integer}) : ProposalData
 		return checkRemoving(g, cleared)
 	end, world.townBuildingConstruction, CLEAR_CHECKS)
 	if not ok then
@@ -1109,7 +1109,7 @@ end
 -- The game's own curve speed limit of each of the ghost's m plan pieces (m/s; nil where it gives
 -- none): the slowest edge of the transport network its edges would make. ProposalData.entity2tn is
 -- keyed by the proposal's entity ids, and pieceOf says which plan piece each new edge belongs to
--- (tg_proposal). This is the limit from the curve alone, before the track type caps it; the Speed
+-- (tg_layout). This is the limit from the curve alone, before the track type caps it; the Speed
 -- Limit layer only paints built track. (Found in the Gleis- und Straßenbauanzeige mod, mod.io 6418902.)
 local function curveSpeeds(data : ProposalData, pieceOf : {integer : integer}, m : integer) : {number}
 	return readout.pieceSpeeds(pieceOf, m, function(edge : integer) : number
@@ -1514,7 +1514,7 @@ local function toolAction(abort : function()) : TreeNodeId
 				if data == nil or g.key == nil or viewKey(g) ~= gk then return end
 				g.cost = data.costs
 				local others : integer
-				g.houses, g.newHouses, others = proposals.toClear(data, world.townBuildingConstruction, g.cleared)
+				g.houses, g.newHouses, others = layouts.toClear(data, world.townBuildingConstruction, g.cleared)
 				-- (only houses in the way, and rounds left to clear them: no fault)
 				g.housesOnly = others == 0 and g.newHouses > 0 and (g.round or 0) < CLEAR_ROUNDS
 				g.collides = not g.housesOnly and data.collisionInfo ~= nil and #(data.collisionInfo.collisionEntities or {}) > 0

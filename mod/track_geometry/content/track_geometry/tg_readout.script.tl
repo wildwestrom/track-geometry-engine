@@ -178,7 +178,7 @@ function M.profileBadges(nodes : {alignment.Sample}, p : profiles.Profile, every
 end
 
 -- Each of the m plan pieces' curve speed (m/s; nil where none is known): the slowest of its
--- edges' (edgeSpeed, nil where unknown), the edges found through pieceOf (tg_proposal).
+-- edges' (edgeSpeed, nil where unknown), the edges found through pieceOf (tg_layout).
 function M.pieceSpeeds(pieceOf : {integer : integer}, m : integer, edgeSpeed : function(edge : integer) : number) : {number}
 	local out : {number} = {}
 	for edge, i in pairs(pieceOf) do

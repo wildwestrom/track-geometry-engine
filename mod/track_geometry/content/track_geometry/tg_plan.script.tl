@@ -2,7 +2,7 @@
 -- and the edit. A plan holds the path twice:
 --   dense : a node every STEP, following the profile. The ground is read under it, and the
 --           readout (grades, badges, the tooltip's summary) reads it.
---   built : the pieces handed to the game (tg_proposal): long, with a node wherever the track
+--   built : the pieces handed to the game (tg_layout): long, with a node wherever the track
 --           changes (a bridge or tunnel starts or ends, an elevation point), so each piece is one
 --           kind and one span of the profile.
 -- The game's curve speed limits come per built piece, after the ghost is shown; readout() puts
@@ -153,7 +153,7 @@ function M.path(a : ends.End, b : ends.End, e : edits.Edit, ground : Ground, wat
 		minRadius = minRadius, curves = readout.curves(path) }
 end
 
--- The existing track a switch changes, for the built nodes from a to b (tg_proposal): the pieces
+-- The existing track a switch changes, for the built nodes from a to b (tg_layout): the pieces
 -- at a node end, replaced as the game's builder does (each once: two node ends can share a piece),
 -- and the runs of a shallow switch: the track it runs beside, merged through the joints there
 -- (ends.runs), each piece into one run only, and never a piece or node the other end is on. The

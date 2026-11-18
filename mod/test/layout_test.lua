@@ -1,4 +1,4 @@
--- Offline checks for the proposal builder (tg_proposal.script.tl), against a stub of the game's api
+-- Offline checks for the track layout (tg_layout.script.tl), against a stub of the game's api
 -- that keeps only what make() touches.
 local H = dofile("test/harness.lua")
 
@@ -35,7 +35,7 @@ api = {
 	},
 }
 
-local P = H.mod("tg_proposal")
+local P = H.mod("tg_layout")
 local check = H.check
 
 -- a straight path of 3 pieces from ground to ground

@@ -1,5 +1,5 @@
--- Turns sampled nodes (tg_alignment) into a proposal: one Hermite track piece between each pair of
--- neighbouring nodes. Used by the tool's ghost, which is also what it builds (GUI).
+-- Lays the track out as a native proposal: turns sampled nodes (tg_alignment) into one Hermite
+-- track piece between each pair of neighbouring nodes. Used by the tool's ghost, which is also what it builds (GUI).
 -- New entities are numbered as the game wants: edges -1..-m, then nodes -(m+1)..-(m+n). The first
 -- and last node can be the picked ends' existing nodes instead, which joins the new track to them;
 -- those are not added, and their positions must be the nodes' own. A switch (new track joining a
@@ -41,7 +41,7 @@ local record Options
 	crossingType : integer -- api.res.railroadCrossingTypeRep id for the level crossings (nil: the game's)
 end
 
-local record ProposalMod
+local record LayoutMod
 	make : function(nodes : {alignment.Sample}, o : Options) : SimpleProposal, {integer : integer}, string, {crossings.Crossing}
 	gathering : function(p : SimpleProposal) : SimpleProposal
 	footprint : function(nodes : {alignment.Sample}, kinds : {string}, step : number) : {{number}}
@@ -50,7 +50,7 @@ local record ProposalMod
 	toClear : function(data : ProposalData, constructionOf : function(integer) : integer, cleared : {integer}) : {integer}, integer, integer
 end
 
-local M : ProposalMod = {}
+local M : LayoutMod = {}
 
 -- Level crossings closer than this to each other on one piece or one street are not both cut (m):
 -- the game refuses a piece between them this short (tg_crossings, NOTES.md).

@@ -1,5 +1,5 @@
 -- Where a new track piece crosses existing streets or track at grade: the level crossings and
--- diamond crossings the proposal makes (tg_proposal), as the game's own builder does. The engine
+-- diamond crossings the proposal makes (tg_layout), as the game's own builder does. The engine
 -- does not split a crossed street itself (NOTES.md: Roads a proposal crosses are not split), so each
 -- crossing found here becomes a node shared by both: the street (or track) is cut there, and the
 -- new track piece too.

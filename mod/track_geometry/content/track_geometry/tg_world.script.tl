@@ -305,7 +305,7 @@ function M.joinable(e : ends.End) : boolean
 	return false
 end
 
--- The track pieces at a node end's node (a switch replaces them: tg_proposal); none for any
+-- The track pieces at a node end's node (a switch replaces them: tg_layout); none for any
 -- other end.
 function M.piecesAt(e : ends.End) : {integer}
 	if e == nil or e.kind ~= "node" then return {} end
