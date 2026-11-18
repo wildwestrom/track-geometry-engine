@@ -224,37 +224,6 @@ p, _, why = P.make(nodes, { template = "t", z = z, grades = grades, to = to, rep
 check(p ~= nil and #p.streetProposal.edgesToAdd == 4 and #p.streetProposal.edgesToRemove == 1,
 	"make: a piece replaced at the switch is not crossed too: " .. tostring(why))
 
--- the town buildings in the way: each one's construction, once, from both of the dry run's lists;
--- anything else (an industry, a station, track, a field) stays in the way
-local houseOf = { [301] = 801, [302] = 802, [303] = 802 } -- town building -> its construction
-local data = { collisionInfo = {
-	collisionEntities = { { entity = 301 }, { entity = 400 }, { entity = 302 }, { entity = -3 } },
-	buildingEntities = { 303, 301, 500 },
-} }
-local cons = P.toClear(data, function(e) return houseOf[e] end)
-table.sort(cons)
-check(#cons == 2 and cons[1] == 801 and cons[2] == 802, "toClear: the houses' constructions, each once")
-check(#P.toClear({}, function() return 1 end) == 0, "toClear: no collision info, nothing to clear")
-check(#P.toClear({ collisionInfo = { collisionEntities = { { entity = 400 } } } }, function() return nil end) == 0,
-	"toClear: an industry in the way is not cleared")
-
--- a check lists only some of the houses in the way; once those are cleared the next check lists
--- more: those join the ones already cleared
-local more, new = P.toClear({ collisionInfo = { collisionEntities = { { entity = 302 }, { entity = 304 } } } },
-	function(e) return ({ [302] = 802, [304] = 804 })[e] end, { 801, 802 })
-table.sort(more)
-check(new == 1 and #more == 3 and more[1] == 801 and more[2] == 802 and more[3] == 804,
-	"toClear: houses a later check lists join those already cleared")
-local _, none = P.toClear({ collisionInfo = { collisionEntities = { { entity = 301 } } } }, function(e) return houseOf[e] end, { 801 })
-check(none == 0, "toClear: nothing new when the check lists only houses already cleared")
-
--- what else is in the way: the collisions that are no town building (each entity once)
-local _, _, others = P.toClear(data, function(e) return houseOf[e] end, nil)
-check(others == 1, "toClear: the industry is the one other thing in the way (the new piece -3 is not counted)")
-local _, _, onlyHouses = P.toClear({ collisionInfo = { collisionEntities = { { entity = 301 }, { entity = 301 } } } },
-	function(e) return houseOf[e] end, nil)
-check(onlyHouses == 0, "toClear: nothing else in the way when only houses are")
-
 -- what is built: the same track, with the town buildings left for the game to gather
 local ghost = { streetProposal = { nodesToAdd = { "n" }, edgesToAdd = { "e1", "e2" }, edgesToRemove = { 9 }, nodesToRemove = { 8 } },
 	constructionsToRemove = { 801, 802 } }
@@ -302,47 +271,5 @@ local boxes = {
 local hit = P.onFootprint(pts, boxes, 3)
 table.sort(hit)
 check(#hit == 2 and hit[1] == 1 and hit[2] == 3, "onFootprint: the boxes within 3 m of the track")
-
--- every house in the way, by checks that each name only some: check(A) is a dry run with the
--- proposal removing A itself, naming at most two of the houses still in the way
-local function reveal(inWay)
-	local runs = 0
-	return function(A)
-		runs = runs + 1
-		local gone = {}
-		for _, c in ipairs(A or {}) do gone[c] = true end
-		local cols = {}
-		for _, c in ipairs(inWay) do
-			if not gone[c] and #cols < 2 then cols[#cols + 1] = { entity = c + 1000 } end -- (a house; its construction is c)
-		end
-		cols[#cols + 1] = { entity = 7 } -- (a road: stays in the way)
-		return { collisionInfo = { collisionEntities = cols } }
-	end, function() return runs end
-end
-local function sorted(t) table.sort(t) return t end
-local houseCon = function(e) if e > 1000 then return e - 1000 end end
-local chk, runsN = reveal({ 11, 12, 13, 14, 15 })
-local all = sorted(P.allHouses(chk, houseCon, 8))
-check(#all == 5 and all[1] == 11 and all[5] == 15 and runsN() == 4, "allHouses: every house, two a check, until a check names none new (" .. runsN() .. " checks)")
-local none, runs0 = reveal({})
-check(#P.allHouses(none, houseCon, 8) == 0 and runs0() == 1, "allHouses: none in the way: one check")
-local many, runsM = reveal({ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 })
-local some = P.allHouses(many, houseCon, 3)
-check(#some == 6 and runsM() == 3, "allHouses: at most so many checks")
-check(#P.allHouses(function() return nil end, houseCon, 8) == 0, "allHouses: no check from the game: none")
-
--- the same, a check at a time: check may yield, and allHouses carries on when resumed
-local chkY, runsY = reveal({ 11, 12, 13, 14, 15 })
-local co = coroutine.create(function()
-	return P.allHouses(function(A) local d = chkY(A); coroutine.yield(); return d end, houseCon, 8)
-end)
-local resumes, ys, yn = 0
-repeat
-	local _, h, n = coroutine.resume(co)
-	resumes = resumes + 1
-	ys, yn = h, n
-until coroutine.status(co) == "dead"
-ys = sorted(ys)
-check(#ys == 5 and ys[1] == 11 and ys[5] == 15 and yn == 4 and runsY() == 4 and resumes == 5, "allHouses: in a coroutine, a check a resume, the same houses (" .. resumes .. " resumes)")
 
 H.done()

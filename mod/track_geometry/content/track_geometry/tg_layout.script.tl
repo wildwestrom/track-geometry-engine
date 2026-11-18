@@ -45,9 +45,7 @@ local record LayoutMod
 	make : function(nodes : {alignment.Sample}, o : Options) : SimpleProposal, {integer : integer}, string, {crossings.Crossing}
 	gathering : function(p : SimpleProposal) : SimpleProposal
 	footprint : function(nodes : {alignment.Sample}, kinds : {string}, step : number) : {{number}}
-	allHouses : function(check : function({integer}) : ProposalData, constructionOf : function(integer) : integer, maxChecks : integer) : {integer}, integer
 	onFootprint : function(points : {{number}}, boxes : {integer : {number}}, halfWidth : number) : {integer}
-	toClear : function(data : ProposalData, constructionOf : function(integer) : integer, cleared : {integer}) : {integer}, integer, integer
 end
 
 local M : LayoutMod = {}
@@ -414,34 +412,6 @@ function M.make(nodes : {alignment.Sample}, o : Options) : SimpleProposal, {inte
 	return proposal, pieceOf, nil, found
 end
 
--- The constructions to remove so the proposal can run through the town buildings in its way, how
--- many of them are new, and how many other things it runs into: those already `cleared`, then each further house's, once, from a
--- check's collisions and the buildings it gathered. A check lists only some of the houses in the
--- way, and the next check of the proposal with those cleared lists more (NOTES.md, Town buildings
--- in the way), so this is asked again after each check. constructionOf gives a town building's
--- construction and nil for anything else, which stays in the way: only what the game's own builder
--- removes goes (fields it removes itself, with Context.gatherFields).
-function M.toClear(data : ProposalData, constructionOf : function(integer) : integer, cleared : {integer}) : {integer}, integer, integer
-	local out, seen, new, others = {} as {integer}, {} as {integer : boolean}, 0, 0
-	local other : {integer : boolean} = {}
-	for _, con in ipairs(cleared or {}) do
-		if not seen[con] then seen[con], out[#out + 1] = true, con end
-	end
-	local ci = data ~= nil and data.collisionInfo or nil
-	if ci == nil then return out, 0, 0 end
-	local function add(e : integer)
-		if e == nil or e < 0 then return end
-		local con = constructionOf(e)
-		if con == nil then
-			if not other[e] then other[e], others = true, others + 1 end
-		elseif not seen[con] then seen[con], out[#out + 1], new = true, con, new + 1 end
-	end
-	for _, ed in ipairs(ci.collisionEntities or {}) do add(ed.entity) end
-	local collided = others
-	for _, e in ipairs(ci.buildingEntities or {}) do add(e) end
-	return out, new, collided
-end
-
 -- What is built for proposal p: the same track, in a new proposal that removes no constructions
 -- itself; the game gathers the town buildings in the way (Context.gatherBuildings), as its own
 -- builder does. A build that names several houses in constructionsToRemove kills the game
@@ -500,26 +470,6 @@ function M.onFootprint(points : {{number}}, boxes : {integer : {number}}, halfWi
 		end
 	end
 	return out
-end
-
--- The constructions of every town building in the proposal's way, and how many checks found them.
--- check(A) is the game's check of the proposal removing A itself (a dry run without
--- Context.gatherBuildings, nil if there is none), which names only some of the houses still in the
--- way (NOTES.md), so it is asked again with those removed too, until it names none new, at most
--- maxChecks times. constructionOf as in toClear. check may yield (the GUI runs this as a coroutine,
--- a check a tool tick).
-function M.allHouses(check : function({integer}) : ProposalData, constructionOf : function(integer) : integer, maxChecks : integer) : {integer}, integer
-	local found : {integer} = {}
-	local checks = 0
-	while checks < maxChecks do
-		checks = checks + 1
-		local data = check(found)
-		if data == nil then break end
-		local more, new = M.toClear(data, constructionOf, found)
-		if new == 0 then break end
-		found = more
-	end
-	return found, checks
 end
 
 return M

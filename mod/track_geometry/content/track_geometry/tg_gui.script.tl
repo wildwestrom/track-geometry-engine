@@ -19,6 +19,7 @@ local ends = require("track_geometry_tool::/track_geometry/tg_ends.script.tl")
 local edits = require("track_geometry_tool::/track_geometry/tg_edit.script.tl")
 local gizmos = require("track_geometry_tool::/track_geometry/tg_gizmos.script.tl")
 local layouts = require("track_geometry_tool::/track_geometry/tg_layout.script.tl")
+local ghosts = require("track_geometry_tool::/track_geometry/tg_proposal.script.tl")
 local crossings = require("track_geometry_tool::/track_geometry/tg_crossings.script.tl")
 local readout = require("track_geometry_tool::/track_geometry/tg_readout.script.tl")
 local plans = require("track_geometry_tool::/track_geometry/tg_plan.script.tl")
@@ -26,11 +27,7 @@ local sessions = require("track_geometry_tool::/track_geometry/tg_session.script
 local world = require("track_geometry_tool::/track_geometry/tg_world.script.tl")
 
 local TAG = "[track_geometry_tool] "
-local SKETCH_REST_MS = 300.0 -- picking the end: the path is only a line (a sketch: makeGhost) until the mouse has rested this long (ms)
-local SKETCH_REST_TICKS = 6 -- ...or this many tool ticks, without a clock
 local HOUSE_REACH = 3.0 -- a town building this close to the track's centre line is in its way (m; its box, seen from above)
-local CLEAR_CHECKS = 12 -- dry runs at most to find the town buildings in a settled ghost's way
-local CLEAR_ROUNDS = 8 -- remake a settled ghost at most this many times to clear the town buildings in its way
 local GRAB = 0.02 -- grab radius for handles, as a share of the camera's distance
 local RAIL_CURSOR = 1024 -- the track builder's mouse cursor ("Rail" in the game's gui_react_util.tl)
 
@@ -75,7 +72,8 @@ end
 
 ------------------------------------------------------------------ tool state
 
--- The ghost's plan (tg_plan), waiting for the game's proposal data: its curve speed limits.
+-- The ghost's plan (tg_plan), waiting for the game's proposal data: its curve speed limits. Each
+-- ghost made sets it anew (none for a sketch).
 local record Pending
 	key : string -- ghost key
 	plan : plans.Plan
@@ -95,42 +93,6 @@ local record ScreenBadge
 	badge : readout.Badge
 end
 
--- What is built for a settled ghost, as the game checks it: the ghost's track without the town
--- buildings it clears itself (the game gathers them), and one dry run of it.
-local record Built
-	proposal : SimpleProposal
-	data : ProposalData -- nil when the game could not check it
-	refused : string -- why the game will not build it; nil when it will
-end
-
--- The ghost: made anew whenever its key changes (and dropped when the tool starts over).
-local record Ghost
-	key : string
-	proposal : SimpleProposal
-	info : string -- its path: length and layout
-	why : string -- why there is no ghost
-	cost : integer
-	errors : string
-	critical : boolean -- the game refuses it
-	hasErrors : boolean -- the game reports errors on it (warnings do not count)
-	collides : boolean -- its check lists collisions (other than town buildings it is yet to clear)
-	housesOnly : boolean -- all its check runs into is town buildings it is yet to clear: no fault
-	houses : {integer} -- what its last check says to clear: the town buildings' constructions it clears and those the check ran into
-	newHouses : integer -- how many of those the check added
-	found : boolean -- the search for the town buildings in its way is done (findHouses, once it has settled)
-	crossed : {integer} -- the street and track pieces it cuts for its level and diamond crossings (tg_crossings)
-	cleared : {integer} -- the town buildings' constructions it removes (its constructionsToRemove); nil: none yet
-	round : integer -- bumped each time it is made again in place (with more houses cleared): a new view, a new check
-	dataKey : string -- set to its view key when its data (cost, errors) has come
-	logged : boolean -- its problems are logged
-	refusalLogged : boolean -- the game's refusal of it is logged
-	searchRefusalLogged : boolean -- a refusal in its house search is logged (this round)
-	roundsLogged : boolean -- running out of clearing rounds is logged
-	pending : Pending -- its plan, until the game's data for it comes
-	built : Built -- what is built, checked once the ghost has settled (this round)
-	sketch : boolean -- no proposal, only the path as a line (tool.sketchEdges), while the mouse moves it: never built
-end
-
 local record ToolState
 	active : boolean
 	mounted : integer -- the tools open (two for a moment when another track entry is picked)
@@ -146,7 +108,7 @@ local record ToolState
 	terrY : number
 	terrZ : number
 	eye : Vec3f -- the camera, as of that frame (the view ray runs from it through the ground point)
-	g : Ghost
+	pending : Pending -- the ghost's plan, until the game's check of it comes
 	vbadges : {readout.Badge} -- the profile's badges (vertical mode)
 	modeOpen : boolean -- the mode window is open
 	buildMsg : string -- how the last build went (kept when the tool starts over)
@@ -160,12 +122,10 @@ local record ToolState
 	vbadgesKey : string -- the edit and grade limit the profile's badges were made for
 	placedView : string -- the camera, screen and badges the badges were last placed for
 	sketchEdges : {Builtin.Type.EdgeRenderable.Edge} -- the sketch's line: the whole path, while the mouse moves it
-	movedKey : string -- the last ghost key seen, and when it changed (the mouse moved the path)
-	movedMs : number
-	movedTick : integer
+	ghostKey : string -- the key of the ghost being made (for its readout)
 end
 
-local tool : ToolState = { g = {} }
+local tool : ToolState = {}
 
 -- The tool counts as ticking while its last tick was at most this many frames ago. Its timer
 -- ticks every 50 ms, a few frames apart; counted in frames, not os.clock() (CPU time, see GUI
@@ -181,9 +141,15 @@ end
 -- dragged (tg_session). Read here, changed only through its events.
 local sess = sessions.new(say, toolLive)
 
+-- The ghost (tg_proposal): the GUI reads its fields, and this script is the game's side of it
+-- (port, below, with the ghost). Made anew when the tool starts over.
+local port : ghosts.Port
+local G : ghosts.State
+
 -- Drop the ghost and what was read out (the session starts over by itself).
 local function resetTool()
-	tool.g, tool.hovered, tool.vbadges, tool.line, tool.screen, tool.screenKey, tool.matchRedraws = {}, nil, nil, nil, nil, nil, nil
+	G = ghosts.new(say, port)
+	tool.pending, tool.hovered, tool.vbadges, tool.line, tool.screen, tool.screenKey, tool.matchRedraws = nil, nil, nil, nil, nil, nil, nil
 	tool.sketchEdges = nil
 end
 
@@ -246,18 +212,11 @@ local function structureType(key : string, auto : integer) : integer
 	return math.floor(v + 0.5)
 end
 
--- The ghost's view as the game sees it: its key, and the round it is in (each round is a new
--- ProposalViewer and a new check).
--- (its kind too: a sketch and the ghost of one key are each a new view)
-local function viewKey(g : Ghost) : string
-	return g.key .. "#" .. tostring(g.round or 0) .. (g.sketch and "s" or "")
-end
-
 -- What the map holds along the track's footprint (pts: tg_layout.footprint), from one look at
 -- each stretch of it (tg_world.areaIn), with no check by the game:
 --   the constructions of the town buildings on it. The ghost clears them from the start, so they
 --   show as going (as with the game's own builder), not as collisions found a few at a time
---   (clearHouses mops up the rest);
+--   (tg_proposal's clearing rounds mop up the rest);
 --   the street and track edges near it, for its level and diamond crossings (tg_crossings finds
 --   where it crosses them).
 -- What was found before the map could not be read.
@@ -301,16 +260,15 @@ local function ghostKey(a : ends.End, b : ends.End) : string
 	return key .. ":" .. tostring(panelValue("bridgeType")) .. ":" .. tostring(panelValue("tunnelType"))
 end
 
--- Make the ghost of the path from a to b (none without both) for key, and put it up. sketch: the
--- mouse is moving the path, so no proposal, only the path as a line: the game's check and drawing
--- of each new ghost hold up a frame for 90-160 ms (NOTES.md). A sketch plans the
--- path without the ground and water (no bridges or tunnels): its line needs only the plan's dense
--- nodes and their heights, which do not depend on them.
-local function makeGhost(key : string, a : ends.End, b : ends.End, sketch : boolean)
-	local g : Ghost = { key = key, sketch = sketch or nil }
-	tool.g, tool.sketchEdges = g, nil
+-- Make the ghost of the path from a to b (none without both): the port's make. sketch: the mouse
+-- is moving the path, so no proposal, only the path as a line (tool.sketchEdges). A sketch plans
+-- the path without the ground and water (no bridges or tunnels): its line needs only the plan's
+-- dense nodes and their heights, which do not depend on them.
+local function makeGhost(a : ends.End, b : ends.End, sketch : boolean) : ghosts.Made
+	local g : ghosts.Made = {}
+	tool.sketchEdges, tool.pending = nil, nil
 	-- (a path's line stays until the next ghost of it is read out; a sketch has none)
-	if a == nil or b == nil then tool.line = nil; return end
+	if a == nil or b == nil then tool.line = nil; return g end
 	-- bridges and tunnels where the track is far off the ground: their types first (without them,
 	-- or when the ground cannot be read, the plan has none)
 	local tt = trackType()
@@ -318,14 +276,14 @@ local function makeGhost(key : string, a : ends.End, b : ends.End, sketch : bool
 	local bridgeType, tunnelType = structureType("bridgeType", tt.bridgeType), structureType("tunnelType", tt.tunnelType)
 	if sketch or tt.structuresWhy ~= nil then ground, water = nil, nil end -- (tg_world logged why)
 	local plan, pwhy = plans.path(a, b, sess.edit, ground, water)
-	if plan == nil then g.why = pwhy; tool.line = nil; return end
+	if plan == nil then g.why = pwhy; tool.line = nil; return g end
 	if plan.note ~= nil then say("ghost: no structures: " .. plan.note) end
 	g.info = plan.structures ~= nil and (plan.info .. "; " .. plan.structures) or plan.info
 	if sketch then
 		local okL, l = pcall(sketchLine, plan)
 		if okL then tool.sketchEdges = l as {Builtin.Type.EdgeRenderable.Edge} else say("ghost: the path's line: " .. tostring(l)) end
 		tool.line = nil
-		return
+		return g
 	end
 	local nodes, grades, zs, kinds = plan.built.nodes, plan.grades, plan.built.z, plan.kinds
 	local replace, runs = plans.switches(a, b, nodes, world.piecesAt, world.mergeable)
@@ -336,8 +294,8 @@ local function makeGhost(key : string, a : ends.End, b : ends.End, sketch : bool
 		from = a, to = b, replace = replace, runs = runs,
 		kinds = kinds, bridgeType = bridgeType, tunnelType = tunnelType,
 		streets = streets as {crossings.Street}, crossingType = world.crossingType() })
-	if not ok then g.why = "error: " .. tostring(p); say("ghost: " .. g.why); return end
-	if p == nil then g.why = why; return end
+	if not ok then g.why = "error: " .. tostring(p); say("ghost: " .. g.why); return g end
+	if p == nil then g.why = why; return g end
 	g.proposal = p as SimpleProposal
 	g.crossed = {}
 	for _, c in ipairs((crossed or {}) as {crossings.Crossing}) do
@@ -350,7 +308,7 @@ local function makeGhost(key : string, a : ends.End, b : ends.End, sketch : bool
 		local okC, err = pcall(function() : string g.proposal.constructionsToRemove = hs; return nil end)
 		if okC then g.cleared = hs else say("ghost: cannot clear the buildings: " .. tostring(err)) end
 	end
-	g.pending = { key = key, plan = plan, pieceOf = pieceOf as {integer : integer} }
+	tool.pending = { key = tool.ghostKey, plan = plan, pieceOf = pieceOf as {integer : integer} }
 	if sess.phase == "done" then
 		say(string.format("tool: path %s: from %s (%.1f, %.1f) leaving %.2f deg, to %s (%.1f, %.1f) arriving %.2f deg, %d pieces, %d merged runs, grade %+.1f ‰ to %+.1f ‰",
 			plan.info, ends.name(a), a.x, a.y, math.deg(nodes[1].heading), ends.name(b), b.x, b.y, math.deg(nodes[#nodes].heading), #nodes - 1, #runs, grades[1] * 1000, grades[#grades] * 1000))
@@ -361,30 +319,18 @@ local function makeGhost(key : string, a : ends.End, b : ends.End, sketch : bool
 				c.x, c.y, c.z, c.why == nil and (c.street.track and "a diamond crossing" or "a level crossing") or ("not cut: " .. c.why)))
 		end
 	end
+	return g
 end
 
--- Every tool tick: make the ghost again, in one go, when what it shows has changed. While the
--- mouse moves the path it is only a sketch: a drag's until it is let go, even when it pauses;
--- after the first click, until the mouse has rested on the end SKETCH_REST_MS (SKETCH_REST_TICKS
--- without a clock).
+-- Every tool tick: the ghost of what the session shows now (tg_proposal makes it again when it
+-- has changed, and clears the town buildings in its way once it has settled).
 local function updateGhost()
 	local a, b : ends.End, ends.End = nil, nil
 	if sess.phase == "from" then a = sess.hover
 	elseif sess.phase == "to" then a, b = sess.from, sess.hover
 	else a, b = sessions.ends(sess) end
-	local key = ghostKey(a, b)
-	local now = nowMs()
-	if key ~= tool.movedKey then tool.movedKey, tool.movedMs, tool.movedTick = key, now, sess.ticks or 0 end
-	local moving = now ~= nil and tool.movedMs ~= nil and now - tool.movedMs < SKETCH_REST_MS
-	if now == nil or tool.movedMs == nil then moving = (sess.ticks or 0) - (tool.movedTick or 0) < SKETCH_REST_TICKS end
-	local sketch = sessions.dragging(sess) or (sess.phase == "to" and moving)
-	-- (made again though nothing moved since: a sketch once the mouse rests or the drag ends; not a
-	-- ghost into a sketch, as a press that grabs and lets go without moving would)
-	local g = tool.g
-	if key == g.key and not (g.sketch and not sketch) then return end
-	if guard("ghost", function() : boolean makeGhost(key, a, b, sketch); return true end) == nil then
-		tool.g, tool.sketchEdges, tool.line = { key = key, why = "the ghost could not be made" }, nil, nil
-	end
+	tool.ghostKey = ghostKey(a, b)
+	ghosts.tick(G, { key = tool.ghostKey, a = a, b = b, settled = sess.phase == "done", dragging = sessions.dragging(sess), toPhase = sess.phase == "to" })
 end
 
 -- What kind of entity e is, for the log.
@@ -434,14 +380,6 @@ local function refusalSummary(data : ProposalData) : string
 	return ok and s or ("summary failed: " .. tostring(s))
 end
 
--- Town buildings in the way go, as with the game's own builder. The ghost (a ProposalViewer)
--- takes no Context, so its check lists them as collisions and leaves their demolition out of the
--- cost; once it settles (no drag, the ends picked) and its check has come, the ghost is made again
--- with their constructions in its own constructionsToRemove, so that the ghost, the build gate,
--- the cost and the build all see the same proposal. A check lists only some of the houses in the
--- way, so this repeats after each check while it lists new ones (at most CLEAR_ROUNDS times).
--- During a drag there is no ghost, only a sketch. If a building it clears is gone (the town
--- rebuilt it), the ghost is made anew from scratch.
 -- The context of a dry run or a build, for the player's company. gather: the game gathers the town
 -- buildings in the way itself, as its own builder does (without, its check names them as
 -- collisions); fields it always gathers.
@@ -453,158 +391,63 @@ local function makeContext(gather : boolean) : Context
 	return c
 end
 
--- The ghost was made again in place: a new round, so a new view, and its check is to come.
-local function recheck(g : Ghost)
-	g.round = (g.round or 0) + 1
-	g.cost, g.errors, g.critical, g.hasErrors, g.collides, g.housesOnly, g.dataKey, g.logged, g.refusalLogged, g.searchRefusalLogged = nil, nil, nil, nil, nil, nil, nil, nil, nil, nil
-	g.houses, g.newHouses, g.built = nil, nil, nil
-end
-
--- What the game says is wrong with the ghost: its errors and warnings, and what it runs into.
--- nil when nothing is. houses: the ghost runs into town buildings and nothing else, and they go
--- once it settles (clearHouses), so its collision is no fault: a line saying they go stands in for
--- the game's lone error (Collision) and what it runs into. (No count: a check names only some.)
-local function proposalProblems(data : ProposalData, houses ?: boolean) : string
-	local lines : {string} = {}
-	local es = data.errorState
-	local housesOnly = houses == true and es ~= nil and not es.critical and #(es.messages or {}) <= 1
-	if housesOnly then lines[#lines + 1] = "The town buildings in the way will go." end
+-- The game's check of a proposal (from the viewer or a dry run), boiled down for tg_proposal.
+local function checkOf(data : ProposalData) : ghosts.Check
+	local es, ci = data.errorState, data.collisionInfo
+	local c : ghosts.Check = { cost = data.costs, critical = es ~= nil and es.critical == true, hits = { collides = {}, buildings = {} },
+		detail = function() : string return refusalSummary(data) end }
 	if es ~= nil then
-		local msgs = housesOnly and "" or table.concat(es.messages or {}, ", ")
-		if msgs ~= "" then lines[#lines + 1] = (es.critical and "The game refuses it: " or "Errors: ") .. msgs
-		elseif es.critical then lines[#lines + 1] = "The game refuses it." end
-		local warns = table.concat(es.warnings or {}, ", ")
-		if warns ~= "" then lines[#lines + 1] = "Warnings: " .. warns end
+		c.messages, c.warnings = {}, {}
+		for _, m in ipairs(es.messages or {}) do c.messages[#c.messages + 1] = m end
+		for _, w in ipairs(es.warnings or {}) do c.warnings[#c.warnings + 1] = w end
 	end
-	local cols = data.collisionInfo ~= nil and data.collisionInfo.collisionEntities or {}
-	if #cols > 0 and not housesOnly then lines[#lines + 1] = string.format("Runs into %d thing%s.", #cols, #cols > 1 and "s" or "") end
-	if #lines == 0 then return nil end
-	return table.concat(lines, "\n")
-end
-
--- The game's check of proposal q in context c (makeProposalData: it blocks the frame, a few hundred
--- ms for a long track).
-local function dryRun(q : SimpleProposal, c : Context) : ProposalData
-	return api.engine.util.proposal.makeProposalData(q as any as Proposal, c)
-end
-
--- What is built for ghost g, checked by the game (one dry run): its warning (the town buildings it
--- knocks down) and its cost are the game's own, unlike the ghost's check (NOTES.md).
-local function checkBuilt(g : Ghost) : Built
-	local q = layouts.gathering(g.proposal)
-	if q == nil then return { refused = "the proposal to build came out short" } end
-	local ok, data = pcall(dryRun, q, makeContext(true))
-	local d = ok and data as ProposalData or nil
-	local b : Built = { proposal = q, data = d }
-	if d == nil then b.refused = "the game could not check it (" .. tostring(data) .. ")"
-	elseif d.errorState ~= nil and (d.errorState.critical or #(d.errorState.messages or {}) > 0) then b.refused = "the game refuses it"
-	elseif d.collisionInfo ~= nil and #(d.collisionInfo.collisionEntities or {}) > 0 then b.refused = "it still runs into something" end
-	if b.refused ~= nil then say("build check: refused: " .. b.refused .. ": " .. (d ~= nil and refusalSummary(d) or "no data")) end
-	return b
-end
-
--- The game's check of the ghost's proposal removing `cleared` itself, nil if it fails.
-local function checkRemoving(g : Ghost, cleared : {integer}) : ProposalData
-	local ok, d = pcall(function() : ProposalData
-		local q = layouts.gathering(g.proposal)
-		if q == nil then return nil end
-		if #cleared > 0 then q.constructionsToRemove = cleared end
-		return dryRun(q, makeContext(false))
-	end)
-	if not ok then say("ghost: finding the town buildings: " .. tostring(d)) return nil end
-	local pd = d as ProposalData
-	if pd ~= nil and pd.errorState ~= nil and pd.errorState.critical and not g.searchRefusalLogged then
-		g.searchRefusalLogged = true
-		say(string.format("ghost: house search refused (removing %d constructions): %s", #cleared, refusalSummary(pd)))
+	if ci ~= nil then
+		for _, ed in ipairs(ci.collisionEntities or {}) do c.hits.collides[#c.hits.collides + 1] = ed.entity end
+		for _, e in ipairs(ci.buildingEntities or {}) do c.hits.buildings[#c.hits.buildings + 1] = e end
 	end
-	return pd
+	return c
 end
 
--- Find every town building in the settled ghost's way with the game's own checks (dry runs without
--- gathering, each naming only some: tg_layout.allHouses) and clear just those, so that the ghost
--- shows as going exactly what the game knocks down (the lookup on the map takes in a few more:
--- boxes cover whole lots). All its dry runs at once, in the tick its own check came: each blocks
--- the frame, and coroutines would not help (they share the game's thread, NOTES.md).
-local function findHouses(g : Ghost)
-	local ok, h, n = pcall(layouts.allHouses, function(cleared : {integer}) : ProposalData
-		return checkRemoving(g, cleared)
-	end, world.townBuildingConstruction, CLEAR_CHECKS)
-	if not ok then
-		say("ghost: finding the town buildings: " .. tostring(h))
-		h, n = {}, 0
-	end
-	local houses, checks = h as {integer}, n as integer
-	g.found = true
-	say(string.format("ghost: %d town building%s in the way (%d checks; %d on its footprint)", #houses, #houses == 1 and "" or "s", checks, g.cleared ~= nil and #g.cleared or 0))
-	local okC, err = pcall(function() : string g.proposal.constructionsToRemove = houses; return nil end)
-	if not okC then say("ghost: cannot clear the buildings: " .. tostring(err)); return end
-	g.cleared = houses
-	recheck(g)
-end
-
--- Is a street piece the ghost cuts for a level crossing gone (a town rebuilds its roads)? Naming
--- a gone piece may kill the game, as a gone node does.
-local function crossedGone(g : Ghost) : boolean
-	return g.crossed ~= nil and #g.crossed > 0 and not world.allExist(g.crossed)
-end
-
--- Is a town building that `cleared` knocks down gone (nil: it clears none)?
-local function clearedGone(cleared : {integer}) : boolean
-	return cleared ~= nil and not world.allExist(cleared)
-end
-
-local function clearHouses()
-	local g = tool.g
-	if g.proposal == nil or g.key == nil then return end
-	if clearedGone(g.cleared) then
-		say("ghost: a building it clears is gone: making it anew")
-		tool.g = {}
-		return
-	end
-	if crossedGone(g) then
-		say("ghost: a road or track it crosses has changed: making it anew")
-		tool.g = {}
-		return
-	end
-	if sess.phase ~= "done" or sessions.dragging(sess) or g.sketch then return end
-	-- (settled: its own check has come; no dry run before, as each blocks a frame)
-	if g.dataKey ~= viewKey(g) then return end
-	if not g.found then
-		-- (no town buildings in the way by its own check: nothing to search for; the clearing
-		-- rounds below take the same for done)
-		if (g.newHouses or 0) > 0 then findHouses(g) return end
-		g.found = true
-	end
-	if (g.newHouses or 0) == 0 or (g.round or 0) >= CLEAR_ROUNDS then
-		if (g.newHouses or 0) > 0 and not g.roundsLogged then g.roundsLogged = true; say("ghost: still more town buildings in the way after " .. CLEAR_ROUNDS .. " rounds") end
-		-- settled for good: what is built, checked once (its warning and cost are shown)
-		if g.built == nil then g.built = checkBuilt(g) end
-		return
-	end
-	local ok, err = pcall(function() : string g.proposal.constructionsToRemove = g.houses; return nil end)
-	if not ok then say("ghost: cannot clear the buildings: " .. tostring(err)); g.cleared = {}; return end
-	g.cleared = g.houses
-	say(string.format("ghost: clearing %d more town building%s in the way (%d in all)", g.newHouses, g.newHouses > 1 and "s" or "", #g.cleared))
-	recheck(g)
-end
-
--- Why the ghost cannot be built now, or nil when it can.
-local function cannotBuild() : string
-	local g = tool.g
-	if g.proposal == nil then return g.why or "there is no path" end
-	if g.sketch or g.dataKey ~= viewKey(g) or g.cost == nil or not g.found then return "the game is still checking it" end
-	if clearedGone(g.cleared) then return "a building in the way has changed" end
-	if crossedGone(g) then return "a road or track it crosses has changed" end
-	if g.critical then return "the game refuses it" end
-	if g.housesOnly then return "the town buildings in the way are still being cleared" end
-	if g.hasErrors then return "the game reports errors on it" end
-	local a, b = sessions.ends(sess)
-	if not (world.joinable(a) and world.joinable(b)) then return "an end is gone or its track has changed" end
-	local ok, bal = pcall(function() : integer return api.engine.util.finance.getPlayersBalance(api.engine.util.getPlayer()) end)
-	-- (the game itself lets the account go negative)
-	if ok and bal ~= nil and g.cost > (bal as integer) then return "not enough money" end
-	return nil
-end
+-- The ghost's side in the game (tg_proposal.Port).
+port = {
+	make = function(a : ends.End, b : ends.End, sketch : boolean) : ghosts.Made
+		local m = guard("ghost", function() : ghosts.Made return makeGhost(a, b, sketch) end)
+		if m == nil then
+			tool.sketchEdges, tool.line, tool.pending = nil, nil, nil
+			return { why = "the ghost could not be made" }
+		end
+		return m
+	end,
+	-- (what is built: the ghost's track, the town buildings it clears left out unless `removing`
+	-- names them; makeProposalData blocks the frame, a few hundred ms for a long track)
+	dryRun = function(p : SimpleProposal, removing : {integer}, gather : boolean) : ghosts.Check, string
+		local okQ, q = pcall(layouts.gathering, p)
+		if not okQ then return nil, "the game could not check it (" .. tostring(q) .. ")" end
+		if q == nil then return nil, "the proposal to build came out short" end
+		local ok, d = pcall(function() : ProposalData
+			if removing ~= nil and #removing > 0 then q.constructionsToRemove = removing end
+			return api.engine.util.proposal.makeProposalData(q as any as Proposal, makeContext(gather))
+		end)
+		if not ok then return nil, "the game could not check it (" .. tostring(d) .. ")" end
+		if d == nil then return nil, "the game could not check it" end
+		return checkOf(d as ProposalData), nil
+	end,
+	setCleared = function(p : SimpleProposal, list : {integer}) : boolean, string
+		local ok, err = pcall(function() : string p.constructionsToRemove = list; return nil end)
+		if ok then return true, nil end
+		return false, tostring(err)
+	end,
+	constructionOf = world.townBuildingConstruction,
+	allExist = world.allExist,
+	joinable = world.joinable,
+	balance = function() : integer
+		local ok, bal = pcall(function() : integer return api.engine.util.finance.getPlayersBalance(api.engine.util.getPlayer()) end)
+		if ok then return bal as integer end
+		return nil
+	end,
+	now = nowMs,
+}
+G = ghosts.new(say, port)
 
 local closeConfirm, closeModeWindow : function(), function() -- (below, with the windows)
 
@@ -616,10 +459,14 @@ local function startOver()
 	resetTool()
 end
 
--- Builds the proposal p (the ghost when the confirm window opened), and starts over.
+-- Builds the ghost's proposal p (the confirm window's offer), and starts over. What is built is
+-- its track without the town buildings it clears itself, the game gathering them, as its own
+-- builder does: a build that names several houses in constructionsToRemove kills the game (NOTES.md).
 local function build(p : SimpleProposal, info : string, cost : integer)
 	local ok, err : boolean, any = pcall(function()
-		local cmd = api.cmd.makeWorldBuildProposalCmd(p, makeContext(true), false, true)
+		local q = layouts.gathering(p)
+		if q == nil then error("the proposal to build came out short", 0) end
+		local cmd = api.cmd.makeWorldBuildProposalCmd(q, makeContext(true), false, true)
 		api.cmd.sendCommand(cmd, function(r : WorldBuildProposalCommandData, success : boolean, _ : {{Engine.Entity, Engine.Revision}})
 			local rd = r ~= nil and r.resultProposalData or nil
 			if success then
@@ -811,8 +658,8 @@ end
 
 -- The ghost's path (its length and layout) and the readout l sums up, added to lines.
 local function pathLines(lines : {string}, l : PlanLine)
-	if tool.g.info == nil then return end
-	lines[#lines + 1] = "Path: " .. tool.g.info
+	if G.ghost.info == nil then return end
+	lines[#lines + 1] = "Path: " .. G.ghost.info
 	if l == nil then return end
 	local ok, more = pcall(plans.summary, l.readout, trackType().speed)
 	if ok then for _, m in ipairs(more as {string}) do lines[#lines + 1] = m end end
@@ -823,8 +670,8 @@ local function confirmText(cost : integer, problems : string) : string
 	local a, b = sessions.ends(sess)
 	local lines : {string} = { "New track from " .. ends.name(a) .. " to " .. ends.name(b),
 		"Track: " .. trackType().name }
-	local l, g = tool.line, tool.g
-	pathLines(lines, l ~= nil and l.key == g.key and l or nil)
+	local l = tool.line
+	pathLines(lines, l ~= nil and l.key == G.ghost.key and l or nil)
 	if problems ~= nil then
 		lines[#lines + 1] = ""
 		for line in problems:gmatch("[^\n]+") do lines[#lines + 1] = line end
@@ -837,30 +684,14 @@ end
 -- The session asks to build (a click while editing that grabbed nothing): a window shows what
 -- would be built and asks first.
 local function openConfirm()
-	local why = cannotBuild()
+	local from, to = sessions.ends(sess)
+	local why, offer = ghosts.gate(G, from, to)
 	if why ~= nil then
 		sessions.refuse(sess, "Cannot build: " .. why .. ".")
 		say("build: not sent: " .. why)
 		return
 	end
-	-- what is built is the ghost's track without the town buildings it clears itself, the game
-	-- gathering them (checkBuilt; checked when the ghost settled, else now)
-	local g = tool.g
-	if g.built == nil then g.built = checkBuilt(g) end
-	local bt = g.built
-	if bt.refused ~= nil then
-		sessions.refuse(sess, "Cannot build: " .. bt.refused .. ".")
-		say("build: not sent: " .. bt.refused .. (bt.data ~= nil and ("; " .. (proposalProblems(bt.data) or "")):gsub("\n", "; ") or ""))
-		return
-	end
-	local p, info, cost, cleared, problems = bt.proposal, g.info, bt.data.costs, g.cleared, proposalProblems(bt.data)
-	local okB, bal = pcall(function() : integer return api.engine.util.finance.getPlayersBalance(api.engine.util.getPlayer()) end)
-	if okB and bal ~= nil and cost > (bal as integer) then
-		sessions.refuse(sess, "Cannot build: not enough money.")
-		say("build: not sent: not enough money")
-		return
-	end
-	local from, to = sessions.ends(sess)
+	local p, info, cost, problems = offer.proposal, offer.info, offer.cost, offer.problems
 	if openWindow(dialog_react_util.DialogWindow, {
 			windowTitle = "Build this track?",
 			displayText = confirmText(cost, problems),
@@ -873,16 +704,13 @@ local function openConfirm()
 					text = "Build",
 					onClick = function()
 						closeConfirm()
-						-- (an end may have gone, or been built on, while the window was open)
-						if not (world.joinable(from) and world.joinable(to)) then
-							sessions.refuse(sess, "Cannot build: an end is gone or its track has changed.")
-							say("build: not sent: an end is gone or its track has changed")
-							return
-						end
-						-- (and a town building it clears may have been rebuilt meanwhile)
-						if clearedGone(cleared) then
-							sessions.refuse(sess, "Cannot build: a building in the way has changed.")
-							say("build: not sent: a building it clears is gone")
+						-- (asked again: an end may have gone, or a building it clears been rebuilt,
+						-- while the window was open; only the ghost offered is built)
+						local whyNow, now = ghosts.gate(G, from, to)
+						if whyNow == nil and now.proposal ~= p then whyNow = "the track has changed" end
+						if whyNow ~= nil then
+							sessions.refuse(sess, "Cannot build: " .. whyNow .. ".")
+							say("build: not sent: " .. whyNow)
 							return
 						end
 						build(p, info, cost)
@@ -1017,9 +845,8 @@ local function toolTick() : string
 	run(sessions.tick(sess, worldNow(true)))
 	if sess.phase == "done" and sessions.vertical(sess) then updateVBadges() else tool.vbadges = nil end
 	updateGhost()
-	clearHouses()
 	local u, h = sess.drag, sess.hit
-	return table.concat({ tostring(tool.opens or 0), sess.phase, tool.g.key ~= nil and viewKey(tool.g) or "-", tool.screenKey or "-", sess.hoverMsg or "", tostring(tool.g.cost), tool.g.errors or "", tostring(tool.g.built ~= nil),
+	return table.concat({ tostring(tool.opens or 0), sess.phase, G.ghost.key ~= nil and ghosts.viewKey(G) or "-", tool.screenKey or "-", sess.hoverMsg or "", tostring(G.ghost.cost), G.ghost.errors or "", tostring(G.ghost.built ~= nil),
 		sess.edit ~= nil and tostring(sess.edit.rev) or "-", u ~= nil and (u.kind .. u.i) or "-", h ~= nil and (h.kind .. tostring(h.i)) or "-",
 		string.format("%.0f", sess.grab or 0), sess.editMsg or "",
 		sess.mode as string or "-", tostring(sess.dragEl ~= nil), cursorKey() }, "|")
@@ -1028,7 +855,7 @@ end
 local function tooltip() : Builtin.ActionTooltipParam<any>
 	local lines : {string} = {}
 	local good, bad = false, false
-	local vertical, g = sessions.vertical(sess), tool.g
+	local vertical, g = sessions.vertical(sess), G.ghost
 	local function path()
 		local spacing = sess.edit ~= nil and edits.spacingProblem(sess.edit) or nil
 		if spacing ~= nil then
@@ -1044,9 +871,9 @@ local function tooltip() : Builtin.ActionTooltipParam<any>
 		pathLines(lines, tool.line)
 		if g.why ~= nil then lines[#lines + 1] = "No path: " .. g.why; bad = true end
 		local bt = g.built
-		if bt ~= nil and bt.data ~= nil then
+		if bt ~= nil and bt.check ~= nil then
 			-- settled: what the game says of what is built (its warning: the buildings that go)
-			local problems = proposalProblems(bt.data)
+			local problems = ghosts.problems(bt.check)
 			if problems ~= nil then for line in problems:gmatch("[^\n]+") do lines[#lines + 1] = line end end
 			if bt.refused ~= nil then bad = true end
 		elseif g.errors ~= nil then
@@ -1101,7 +928,7 @@ local function tooltip() : Builtin.ActionTooltipParam<any>
 	if hint ~= nil then lines[#lines + 1] = hint end
 	local param : ConstructionReactUtil.SimpleTooltipRecipeParams = {
 		message = { message = table.concat(lines, "\n"), good = good and not bad, bad = bad },
-		cost = g.built ~= nil and g.built.data ~= nil and g.built.data.costs or g.cost,
+		cost = g.built ~= nil and g.built.check ~= nil and g.built.check.cost or g.cost,
 	}
 	return { recipe = construction_react_util.SimpleTooltipRecipe as Recipe<any>, param = param }
 end
@@ -1211,7 +1038,7 @@ local function placeBadges()
 	local list, key : {readout.Badge}, string
 	if sessions.vertical(sess) and sess.phase == "done" then
 		list, key = tool.vbadges, "v" .. tostring(sess.edit.rev)
-	elseif l ~= nil and tool.g.info ~= nil then
+	elseif l ~= nil and G.ghost.info ~= nil then
 		list, key = l.readout.badges, l.key
 	end
 	if list == nil or #list == 0 then
@@ -1500,42 +1327,23 @@ local function toolAction(abort : function()) : TreeNodeId
 	-- the cursor: the control point (none when making it fails)
 	local cur = fresh and sessions.cursor(sess) or nil
 	local cp = cur ~= nil and guard("cursor", function() : Builtin.Type.ControlPointInfo return controlPoint(cur) end) or nil
-	local gh = tool.g
+	local gh = G.ghost
 	local viewer = false
 	local a, b = sessions.ends(sess)
 	if fresh and gh.proposal ~= nil and world.joinable(a) and world.joinable(b) and world.joinable(sess.hover) then
-		local gk = viewKey(gh)
+		local gk = ghosts.viewKey(G)
 		viewer = true
 		children[#children + 1] = builtin.ProposalViewer{
 			simpleProposal = gh.proposal,
 			controlPointInfo = cp,
 			onCreateProposalData = function(data : ProposalData, _p : Proposal)
-				local g = tool.g
-				if data == nil or g.key == nil or viewKey(g) ~= gk then return end
-				g.cost = data.costs
-				local others : integer
-				g.houses, g.newHouses, others = layouts.toClear(data, world.townBuildingConstruction, g.cleared)
-				-- (only houses in the way, and rounds left to clear them: no fault)
-				g.housesOnly = others == 0 and g.newHouses > 0 and (g.round or 0) < CLEAR_ROUNDS
-				g.collides = not g.housesOnly and data.collisionInfo ~= nil and #(data.collisionInfo.collisionEntities or {}) > 0
-				g.errors = proposalProblems(data, g.housesOnly)
-				g.critical = data.errorState ~= nil and data.errorState.critical == true
-				g.hasErrors = data.errorState ~= nil and #(data.errorState.messages or {}) > 0
-				g.dataKey = gk
-				local l = g.pending
-				if l ~= nil and l.key == g.key then
+				if data == nil or not ghosts.onData(G, gk, checkOf(data)) then return end
+				-- (the readout: the ghost's own first check gives its curve speeds)
+				local l = tool.pending
+				if l ~= nil and l.key == G.ghost.key then
 					local r, bwhy = plans.readout(l.plan, curveSpeeds(data, l.pieceOf, #l.plan.built.nodes - 1))
 					if bwhy ~= nil then say("badges: " .. bwhy) end
-					tool.line, g.pending = { key = g.key, readout = r }, nil
-				end
-				-- every refusal, mid-drag too, once per view
-				if g.critical and not g.refusalLogged then
-					g.refusalLogged = true
-					say("ghost: refused" .. (sess.drag ~= nil and " (mid-drag)" or "") .. ": " .. refusalSummary(data))
-				end
-				if g.errors ~= nil and sess.drag == nil and not g.logged then
-					g.logged = true
-					say("ghost: " .. g.errors:gsub("\n", "; "))
+					tool.line, tool.pending = { key = G.ghost.key, readout = r }, nil
 				end
 			end,
 			entityForRefundableContext = api.engine.util.getPlayer(),
@@ -1551,7 +1359,7 @@ local function toolAction(abort : function()) : TreeNodeId
 		}
 	end
 	local edges = fresh and sess.phase == "done" and guard("gizmo", gizmoEdges) or {}
-	if fresh and tool.sketchEdges ~= nil and #tool.sketchEdges > 0 and tool.g.sketch then
+	if fresh and tool.sketchEdges ~= nil and #tool.sketchEdges > 0 and G.ghost.sketch then
 		-- (the gizmos' own list is kept between builds: a new one, the sketch first, under them)
 		local all : {Builtin.Type.EdgeRenderable.Edge} = {}
 		for _, ed in ipairs(tool.sketchEdges) do all[#all + 1] = ed end
