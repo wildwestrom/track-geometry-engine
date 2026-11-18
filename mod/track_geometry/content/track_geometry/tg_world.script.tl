@@ -42,10 +42,9 @@ local record WorldMod
 	endsNear : function(x : number, y : number, hovered : integer, skip ?: integer) : {ends.End}, ends.Piece
 	-- town buildings
 	townBuildingConstruction : function(e : integer) : integer
-	townBuildingsIn : function(minX : number, minY : number, maxX : number, maxY : number) : {integer : {number}}
 	allExist : function(es : {integer}) : boolean
-	-- level crossings
-	streetsIn : function(minX : number, minY : number, maxX : number, maxY : number) : {integer : crossings.Street}
+	-- town buildings and level crossings
+	areaIn : function(minX : number, minY : number, maxX : number, maxY : number) : {integer : {number}}, {integer : crossings.Street}
 	crossingType : function() : integer
 end
 
@@ -341,22 +340,6 @@ function M.townBuildingConstruction(e : integer) : integer
 	end)
 end
 
--- The town buildings whose bounding boxes reach into the area, each with its box seen from above
--- ({minX, minY, maxX, maxY}: axis aligned, so larger than a house set at an angle); nil when the
--- map cannot be read.
-function M.townBuildingsIn(minX : number, minY : number, maxX : number, maxY : number) : {integer : {number}}
-	return guarded(function() : {integer : {number}}
-		local out : {integer : {number}} = {}
-		local box = api.type.Box3.new(api.type.Vec3f.new(minX, minY, -2000), api.type.Vec3f.new(maxX, maxY, 6000))
-		api.engine.system.octreeSystem.findIntersectingEntities(box, function(e : Engine.Entity, bv : Engine.Component.BoundingVolume)
-			if bv == nil or bv.bbox == nil or out[e as integer] ~= nil then return end
-			if api.engine.getComponent(e, api.type.ComponentType.TOWN_BUILDING) == nil then return end
-			out[e as integer] = { bv.bbox.min.x, bv.bbox.min.y, bv.bbox.max.x, bv.bbox.max.y }
-		end)
-		return out
-	end)
-end
-
 -- Are all the entities es still there? (A proposal naming one that is gone may kill the game, as
 -- a gone node does.)
 function M.allExist(es : {integer}) : boolean
@@ -371,19 +354,29 @@ end
 ------------------------------------------------------------------ level crossings
 
 local crossingTypes : {integer : integer} = {} -- year -> the type the game's menu would pick
+local crossingAsked : {integer : boolean} = {} -- year -> asked (also when it could not be read)
+-- The game's menu helper, required now: ug_require works only while a script loads (later it
+-- throws "Invalid number of parameters", NOTES.md). nil where there is none (the offline tests).
+local menuUtilOk, menuUtil = pcall(function() : MenuCategoryUtil
+	return ug_require "::/gui/main/menu_category_util.tl" as MenuCategoryUtil
+end)
 
 -- The level crossing type the game's menu would pick this year (the first of those on offer, as
--- Network Tools picks it); nil when none can be read.
+-- Network Tools picks it); nil when none can be read. Asked once a year, also when it fails: a
+-- game call that throws costs about 300 ms even inside a pcall (NOTES.md), and this one was asked
+-- for every ghost.
 function M.crossingType() : integer
 	local y = year()
-	if crossingTypes[y] ~= nil then return crossingTypes[y] end
-	local id = guarded(function() : integer
-		local mcu = ug_require "::/gui/main/menu_category_util.tl" as MenuCategoryUtil
-		local objects = mcu.getAvailableObjectsSorted(api.res.railroadCrossingTypeRep as ResTypeRep<integer, table>, y)
+	if crossingAsked[y] then return crossingTypes[y] end
+	crossingAsked[y] = true
+	local ok, r = pcall(function() : integer
+		if not menuUtilOk then error("the menu helper did not load: " .. tostring(menuUtil)) end
+		local objects = menuUtil.getAvailableObjectsSorted(api.res.railroadCrossingTypeRep as ResTypeRep<integer, table>, y)
 		return objects ~= nil and objects[1] ~= nil and objects[1].id as integer or nil
 	end)
-	if id ~= nil then crossingTypes[y] = id end
-	say("level crossing type: " .. tostring(id))
+	local id = ok and r as integer or nil
+	crossingTypes[y] = id
+	say("level crossing type: " .. tostring(id) .. (ok and "" or " (" .. tostring(r) .. ")"))
 	return id
 end
 
@@ -456,30 +449,43 @@ local function beyond(e : integer, be : Engine.Component.BaseEdge, n : integer) 
 	return s
 end
 
--- The street and track edges on the ground whose boxes reach into the area, as tg_crossings reads them (streetOf),
--- each with the road's next pieces past its plain joints (beyond); nil when the map cannot be read.
-function M.streetsIn(minX : number, minY : number, maxX : number, maxY : number) : {integer : crossings.Street}
-	local found = guarded(function() : {integer}
-		local out : {integer} = {}
+-- What reaches into the area, from one look at the map (nil, nil when it cannot be read):
+--   the town buildings whose bounding boxes do, each with its box seen from above ({minX, minY,
+--   maxX, maxY}: axis aligned, so larger than a house set at an angle);
+--   the street and track edges on the ground whose boxes do, as tg_crossings reads them (streetOf),
+--   each with the road's next pieces past its plain joints (beyond).
+-- The octree holds every tree and asset too, so each entity it finds costs one component read
+-- here and no more: only the houses and edges are looked at further.
+function M.areaIn(minX : number, minY : number, maxX : number, maxY : number) : {integer : {number}}, {integer : crossings.Street}
+	local houses : {integer : {number}} = {}
+	local edges : {integer} = {}
+	local ok = guarded(function() : boolean
+		local CT = api.type.ComponentType
+		local seen : {integer : boolean} = {}
 		local box = api.type.Box3.new(api.type.Vec3f.new(minX, minY, -2000), api.type.Vec3f.new(maxX, maxY, 6000))
-		api.engine.system.octreeSystem.findIntersectingEntities(box, function(e : Engine.Entity, _bv : Engine.Component.BoundingVolume)
-			out[#out + 1] = e as integer
+		api.engine.system.octreeSystem.findIntersectingEntities(box, function(e : Engine.Entity, bv : Engine.Component.BoundingVolume)
+			local id = e as integer
+			if seen[id] then return end
+			seen[id] = true
+			if api.engine.getComponent(e, CT.BASE_EDGE) ~= nil then
+				edges[#edges + 1] = id
+			elseif bv ~= nil and bv.bbox ~= nil and api.engine.getComponent(e, CT.TOWN_BUILDING) ~= nil then
+				houses[id] = { bv.bbox.min.x, bv.bbox.min.y, bv.bbox.max.x, bv.bbox.max.y }
+			end
 		end)
-		return out
+		return true
 	end)
-	if found == nil then return nil end
-	local out : {integer : crossings.Street} = {}
-	for _, e in ipairs(found) do
-		if out[e] == nil then
-			out[e] = guarded(function() : crossings.Street
-				local s, be = streetOf(e)
-				if s == nil then return nil end
-				s.beyond0, s.beyond1 = beyond(e, be, be.node0 as integer), beyond(e, be, be.node1 as integer)
-				return s
-			end)
-		end
+	if not ok then return nil, nil end
+	local streets : {integer : crossings.Street} = {}
+	for _, e in ipairs(edges) do
+		streets[e] = guarded(function() : crossings.Street
+			local s, be = streetOf(e)
+			if s == nil then return nil end
+			s.beyond0, s.beyond1 = beyond(e, be, be.node0 as integer), beyond(e, be, be.node1 as integer)
+			return s
+		end)
 	end
-	return out
+	return houses, streets
 end
 
 -- Is e a track piece?

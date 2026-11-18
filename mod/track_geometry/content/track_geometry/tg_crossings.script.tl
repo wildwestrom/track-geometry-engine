@@ -32,6 +32,9 @@ local record Street
 	joint : integer -- the node between them, which goes
 	edge0 : integer -- the piece at node0
 	edge1 : integer -- the piece at node1
+	box : {number} -- its curve's box in plan, and its samples (crossingsOf; kept, as the street is kept while a drag lasts)
+	su : {number}
+	spts : {ends.Point}
 end
 
 -- Where a track piece crosses a street: u along the track piece, v along the street (curve
@@ -102,6 +105,22 @@ function M.asPiece(s : Street) : ends.Piece
 	return { edge = s.edge, node0 = s.node0, node1 = s.node1, p0 = s.p0, t0 = s.t0, p1 = s.p1, t1 = s.t1 }
 end
 
+-- The box round Hermite pc in plan ({minX, minY, maxX, maxY}): round its Bézier control points
+-- (p0, p0 + t0/3, p1 - t1/3, p1), whose hull holds the whole curve.
+local function hullBox(pc : ends.Piece) : {number}
+	local p0, t0, p1, t1 = pc.p0, pc.t0, pc.p1, pc.t1
+	local xs = { p0.x, p0.x + t0.x / 3, p1.x - t1.x / 3, p1.x }
+	local ys = { p0.y, p0.y + t0.y / 3, p1.y - t1.y / 3, p1.y }
+	return { math.min(xs[1], xs[2], xs[3], xs[4]), math.min(ys[1], ys[2], ys[3], ys[4]),
+		math.max(xs[1], xs[2], xs[3], xs[4]), math.max(ys[1], ys[2], ys[3], ys[4]) }
+end
+
+local BOX_SLACK = 0.5 -- (m: two boxes this close count as meeting)
+
+local function boxesMeet(a : {number}, b : {number}) : boolean
+	return a[1] <= b[3] + BOX_SLACK and b[1] <= a[3] + BOX_SLACK and a[2] <= b[4] + BOX_SLACK and b[2] <= a[4] + BOX_SLACK
+end
+
 -- Points along pc at even u, at most CHORD apart (by its tangents and chord: a bound on its length).
 local function samples(pc : ends.Piece) : {number}, {ends.Point}
 	local chord = math.sqrt((pc.p1.x - pc.p0.x) ^ 2 + (pc.p1.y - pc.p0.y) ^ 2)
@@ -150,10 +169,18 @@ end
 -- why it cannot be cut (whyNot), if it cannot.
 local function crossingsOf(track : ends.Piece, tu : {number}, tp : {ends.Point}, s : Street) : {Crossing}
 	local out : {Crossing} = {}
+	-- (none where their boxes are apart: most streets near a long track are nowhere near this piece)
+	s.box = s.box or hullBox(M.asPiece(s))
+	if not boxesMeet(hullBox(track), s.box) then return out end
 	local sp = M.asPiece(s)
-	local su, spts = samples(sp)
+	if s.su == nil then s.su, s.spts = samples(sp) end
+	local su, spts = s.su, s.spts
+	local bx = s.box
 	local found : {{number}} = {}
 	for i = 1, #tp - 1 do
+		-- (the street's chords lie in its box: a track chord clear of it crosses none of them)
+		local a0, a1 = tp[i], tp[i + 1]
+		if boxesMeet({ math.min(a0.x, a1.x), math.min(a0.y, a1.y), math.max(a0.x, a1.x), math.max(a0.y, a1.y) }, bx) then
 		for j = 1, #spts - 1 do
 			local a, b = chordsCross(tp[i], tp[i + 1], spts[j], spts[j + 1])
 			if a ~= nil then
@@ -173,6 +200,7 @@ local function crossingsOf(track : ends.Piece, tu : {number}, tp : {ends.Point},
 					end
 				end
 			end
+		end
 		end
 	end
 	return out

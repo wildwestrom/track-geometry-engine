@@ -539,7 +539,7 @@ function M.chainageOnRay(e : Edit, ray : Ray) : number, number
 	end
 	local best, bestD = 0.0, math.huge
 	for _, nd in ipairs(c.nodes) do
-		local d = off(nd.s)
+		local d = offRay(ray, nd.x, nd.y, profiles.heightAt(p, nd.s)) -- (a node is where it is: no lookup)
 		if d < bestD then best, bestD = nd.s, d end
 	end
 	-- (then every 0.5 m, a STEP either side of the nearest node)

@@ -264,4 +264,55 @@ check(plain ~= nil and plain.built.nodes[2].s < bn[#bn].s - bn[#bn - 1].s,
 plan, why = P.path(endAt(0, 0, 1, 0, 0, 0), endAt(1, 0, -1, 0, 0, 0), nil, flat, dry)
 check(plan == nil and type(why) == "string", "ends 1 m apart: no plan, " .. tostring(why))
 
+------------------------------------------------------------------ the stretch a drag changes
+do
+	-- a long path with four turns; then one turn in the middle moved
+	local a, b = endAt(0, 0, 1, 0, 0, 0), endAt(4000, 0, -1, 0, 10, 0)
+	local e = assert(E.new(a, b))
+	for _, x in ipairs({ 800, 1600, 2400, 3200 }) do
+		local leg = #E.polyline(e) - 1
+		for k = 1, #E.polyline(e) - 1 do
+			local p, q = E.polyline(e)[k], E.polyline(e)[k + 1]
+			if p.x <= x and q.x >= x then leg = k end
+		end
+		local i = assert(E.insertOnLeg(e, leg, x, 0)) -- (on the leg; then out to the side)
+		assert(E.movePi(e, i, x, (x % 1600 == 0) and 150 or -150))
+	end
+	local before = assert(P.path(a, b, e, nil, nil))
+	local ref, refZ = before.built.nodes, before.built.z
+	local lo, hi = P.changed(ref, refZ, ref, refZ)
+	check(lo == nil and hi == nil, "changed: the same plan: nothing")
+	local mid = 4 -- (the turn at x = 1600: the path's own turns at 200 and 3800 come first and last)
+	local pos = E.polyline(e)[mid]
+	assert(E.movePi(e, mid, pos.x + 40, pos.y + 30))
+	local after = assert(P.path(a, b, e, nil, nil))
+	local nodes = after.built.nodes
+	lo, hi = P.changed(ref, refZ, nodes, after.built.z)
+	check(lo ~= nil and lo > 1 and hi < #nodes, string.format("changed: a turn in the middle moved: a stretch inside the path (%s..%s of %d)", tostring(lo), tostring(hi), #nodes))
+	local function sameAt(i, j)
+		return math.abs(nodes[i].x - ref[j].x) < 1e-3 and math.abs(nodes[i].y - ref[j].y) < 1e-3
+	end
+	check(lo ~= nil and sameAt(lo, lo) and sameAt(hi, #ref - (#nodes - hi)),
+		"changed: the stretch starts and ends on nodes that did not move")
+	check(lo ~= nil and nodes[lo].x < 1600 and nodes[hi].x > 1600 and nodes[lo].x > 0 and nodes[hi].x < 4000,
+		"changed: the stretch is round the moved turn, short of the ends")
+	-- (the heights shift along the whole path when its length changes: not taken for a change)
+	local shifted = false
+	for i = 1, lo - 1 do if math.abs(after.built.z[i] - refZ[i]) > 1e-3 then shifted = true end end
+	check(shifted, "changed: (the heights before the stretch did shift: the test sees it)")
+	-- an elevation point moved: nothing moves in plan, so by height
+	local flatE = assert(E.new(a, b))
+	local k = E.insertElevation(flatE, 1000)
+	local p1 = assert(P.path(a, b, flatE, nil, nil))
+	k = E.insertElevation(flatE, 3000)
+	local p2 = assert(P.path(a, b, flatE, nil, nil))
+	assert(E.movePoint(flatE, k, 3000, 4, 1.0))
+	local p3 = assert(P.path(a, b, flatE, nil, nil))
+	lo, hi = P.changed(p2.built.nodes, p2.built.z, p3.built.nodes, p3.built.z)
+	check(lo ~= nil and p3.built.nodes[lo].s < 3000 and p3.built.nodes[hi].s > 3000 and p3.built.nodes[lo].s >= 1000 - 1e-6,
+		string.format("changed: an elevation point raised: by height, round it, from its neighbour on (%s..%s)",
+			lo and string.format("%.0f", p3.built.nodes[lo].s) or "nil", hi and string.format("%.0f", p3.built.nodes[hi].s) or "nil"))
+	local _ = p1
+end
+
 H.done()
