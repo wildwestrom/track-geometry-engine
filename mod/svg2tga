@@ -1,0 +1,10 @@
+#!/bin/sh
+# turn my icon into a tga
+
+in='track_curve_icon.svg'
+out='track_geometry/content/gui/icons/tg_radius@2x.tga'
+size=48
+
+rsvg-convert -w "$size" -h "$size" "$in" |
+	magick png:- -define tga:image-origin=top -compress RLE "tga:$out"
+file "$out"
