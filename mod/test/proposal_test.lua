@@ -10,13 +10,20 @@ local function fakePort()
 	local f = { clock = 0, made = 0, gone = {}, ends = {}, runs = 0, balance = nil }
 	f.footprint, f.crossed = nil, nil -- (what make says it clears and crosses)
 	f.dry = function(removing, gather) return { cost = 100, critical = false, messages = {}, warnings = {}, hits = { collides = {}, buildings = {} } } end
+	f.pieces, f.sections, f.sectionDry = 8, 0, nil -- (a section's token is { j =, k = }; sectionDry(j, k) is its check)
 	f.port = {
 		make = function(a, b, sketch)
 			f.made = f.made + 1
 			if a == nil or b == nil then return {} end
-			return { proposal = { n = f.made, sketch = sketch }, info = "path " .. f.made, crossed = f.crossed, cleared = f.footprint, account = f.account }
+			return { proposal = { n = f.made, sketch = sketch }, info = "path " .. f.made, crossed = f.crossed, cleared = f.footprint, account = f.account, pieces = f.pieces }
 		end,
-		dryRun = function(_, removing, gather) f.runs = f.runs + 1; return f.dry(removing or {}, gather) end,
+		section = function(j, k) f.sections = f.sections + 1; return { j = j, k = k }, {} end,
+		describe = function(i) return string.format("piece %d: 10.0 m at (%d.0, 0.0)", i, i) end,
+		dryRun = function(p, removing, gather)
+			f.runs = f.runs + 1
+			if p ~= nil and p.j ~= nil then return f.sectionDry(p.j, p.k) end
+			return f.dry(removing or {}, gather)
+		end,
 		setCleared = function() return true end,
 		constructionOf = function(e) if e > 1000 then return e - 1000 end end,
 		allExist = function(list) for _, e in ipairs(list) do if f.gone[e] then return false end end return true end,
@@ -321,5 +328,102 @@ check(#P.allHouses(noneIn, houseCon, 8) == 0 and runs0() == 1, "allHouses: none 
 local many, runsM = reveal({ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 })
 check(#P.allHouses(many, houseCon, 3) == 6 and runsM() == 3, "allHouses: at most so many checks")
 check(#P.allHouses(function() return nil end, houseCon, 8) == 0, "allHouses: no check from the game: none")
+
+------------------------------------------------------------------ the search for a bare refusal's section
+
+local function bare() return chk({ critical = true, messages = { "Construction Not Possible" } }) end
+
+-- a settled ghost of m pieces whose build check refuses bare; the section j..k refuses bare when
+-- refuses(j, k). Returns the ghost's state, its log and the fake.
+local function bareGhost(m, refuses)
+	local f = fakePort()
+	f.pieces = m
+	f.dry = function() return bare() end
+	f.sectionDry = function(j, k) if refuses(j, k) then return bare() else return chk() end end
+	local G, logs = settledGhost(f)
+	P.onData(G, P.viewKey(G), chk())
+	P.tick(G, { key = "s", a = A, b = B, settled = true })
+	return G, logs, f
+end
+local function has(t, j, k) return j <= t and t <= k end
+local function logged(logs, text)
+	for _, l in ipairs(logs) do if l:find(text, 1, true) then return true end end
+	return false
+end
+
+-- one bad piece: the search reports that piece alone
+G, logs, f = bareGhost(8, function(j, k) return has(5, j, k) end)
+check(G.ghost.offending ~= nil and G.ghost.offending.first == 5 and G.ghost.offending.last == 5, "search: one bad piece: reported alone")
+check(logged(logs, "search: offending section 5..5"), "search: the section is in the log")
+check(logged(logs, "search: piece 5: 10.0 m at (5.0, 0.0)"), "search: each piece is in the log, with its index, length and position")
+check(logged(logs, "refusal#2 search: "), "search: its lines are numbered like the refusals' (a number after the build check's)")
+
+-- two pieces that refuse only together: the section between them
+G, logs, f = bareGhost(8, function(j, k) return has(3, j, k) and has(6, j, k) end)
+check(G.ghost.offending ~= nil and G.ghost.offending.first == 3 and G.ghost.offending.last == 6, "search: two pieces that refuse together: the section between them")
+check(logged(logs, "piece 3:") and logged(logs, "piece 6:") and not logged(logs, "piece 2:") and not logged(logs, "piece 7:"), "search: the log has the section's pieces only")
+
+-- the whole path is one bad piece, and the first piece is
+G = bareGhost(8, function(j, k) return has(8, j, k) end)
+check(G.ghost.offending.first == 8 and G.ghost.offending.last == 8, "search: the last piece is at fault")
+G = bareGhost(8, function(j, k) return has(1, j, k) end)
+check(G.ghost.offending.first == 1 and G.ghost.offending.last == 1, "search: the first piece is at fault")
+G, logs, f = bareGhost(1, function() return true end)
+check(G.ghost.offending.first == 1 and G.ghost.offending.last == 1 and f.sections == 0, "search: a path of one piece needs no dry run")
+
+-- about log2 n dry runs, not n
+G, logs, f = bareGhost(64, function(j, k) return has(37, j, k) end)
+check(G.ghost.offending.first == 37 and G.ghost.offending.last == 37, "search: 64 pieces, the bad one found")
+check(f.sections <= 14 and f.sections == f.runs - 1, "search: about log2 n dry runs (" .. f.sections .. " of 64)")
+
+-- a refusal that is not bare stops the search, with that dry run's detail in the log
+f = fakePort()
+f.dry = function() return bare() end
+f.sectionDry = function(j, k)
+	if has(5, j, k) and k >= 5 then return chk({ critical = true, messages = { "Too steep" }, lines = { "messages: Too steep" } }) end
+	return chk()
+end
+G, logs = settledGhost(f)
+P.onData(G, P.viewKey(G), chk())
+P.tick(G, { key = "s", a = A, b = B, settled = true })
+check(G.ghost.offending == nil and logged(logs, "inconclusive at"), "search: a refusal that names something: inconclusive, nothing highlighted")
+check(logged(logs, "search: messages: Too steep"), "search: ...with that dry run's detail")
+check(not logged(logs, "search: offending"), "search: ...and no section")
+
+-- a build check that refuses, but not bare, starts no search
+f = fakePort()
+f.dry = function() return chk({ critical = true, messages = { "Too steep" } }) end
+G = settledGhost(f)
+P.onData(G, P.viewKey(G), chk())
+P.tick(G, { key = "s", a = A, b = B, settled = true })
+check(f.sections == 0 and G.ghost.offending == nil, "search: a refusal that is not bare starts none")
+f = fakePort()
+G = settledGhost(f)
+P.onData(G, P.viewKey(G), chk())
+P.tick(G, { key = "s", a = A, b = B, settled = true })
+check(f.sections == 0, "search: a build check that passes starts none")
+
+-- a prefix refuses that the next one does not: not monotone, and the prefixes are walked one at a time
+G, logs, f = bareGhost(8, function(j, k) return (j == 1 and k == 4) or (j <= 7 and k >= 7) end)
+check(logged(logs, "not monotone"), "search: a prefix that passes after one that refused is logged: not monotone")
+check(G.ghost.offending ~= nil and G.ghost.offending.first == 1 and G.ghost.offending.last == 4, "search: the walk gives the first prefix that refuses, narrowed")
+
+-- a monotone fake does not say so
+G, logs = bareGhost(8, function(j, k) return has(5, j, k) end)
+check(not logged(logs, "not monotone"), "search: a monotone fake is not logged as not monotone")
+
+-- once per ghost key, however many times it is built-checked
+G, logs, f = bareGhost(8, function(j, k) return has(5, j, k) end)
+local sections = f.sections
+G.ghost.built = nil
+P.gate(G, A, B)
+G.ghost.built = nil
+P.gate(G, A, B)
+check(sections > 0 and f.sections == sections, "search: once per ghost key, even with more build checks (" .. sections .. ", " .. f.sections .. ")")
+local searches = 0
+for _, l in ipairs(logs) do if l:find("search: offending", 1, true) then searches = searches + 1 end end
+check(searches == 1, "search: its result is logged once")
+P.tick(G, { key = "s2", a = A, b = B, settled = true })
+check(G.ghost.offending == nil, "search: a new key forgets the section")
 
 H.done()

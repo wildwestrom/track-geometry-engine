@@ -48,6 +48,7 @@ local record Made
 	crossed : {integer} -- the street and track pieces it cuts for its level and diamond crossings
 	cleared : {integer} -- the town buildings' constructions it removes from the start (its footprint)
 	account : {string} -- our own account of the track (its path, the roads it crosses and why not), logged with a refusal
+	pieces : integer -- how many track pieces its plan has (the search for a bare refusal's section counts in them)
 end
 
 -- The game's side.
@@ -57,6 +58,11 @@ local record Port
 	-- the game's check of what is built for the proposal, removing `removing` itself, the game
 	-- gathering the town buildings in the way when `gather`; nil and why when there is none
 	dryRun : function(proposal : SimpleProposal, removing : {integer}, gather : boolean) : Check, string
+	-- pieces j..k of the current ghost's plan, laid out again as a proposal of their own (the
+	-- crossings in them cut anew) and the town buildings it removes; nil and why when it cannot
+	section : function(j : integer, k : integer) : SimpleProposal, {integer}, string
+	-- piece i of the plan: its index, length and position, as a log line
+	describe : function(i : integer) : string
 	-- the proposal removes the constructions in list itself; false and why when it cannot
 	setCleared : function(proposal : SimpleProposal, list : {integer}) : boolean, string
 	constructionOf : function(entity : integer) : integer -- a town building's construction; nil for anything else
@@ -71,6 +77,12 @@ end
 local record Built
 	check : Check -- nil when the game could not check it
 	refused : string -- why the game will not build it; nil when it will
+end
+
+-- A run of the plan's pieces, first to last.
+local record Section
+	first : integer
+	last : integer
 end
 
 -- The ghost: made anew whenever its key changes.
@@ -92,6 +104,9 @@ local record Ghost
 	crossed : {integer}
 	cleared : {integer} -- the town buildings' constructions it removes; nil: none yet
 	account : {string}
+	pieces : integer
+	searched : boolean -- the search for the section a bare refusal comes from has run (once per key)
+	offending : Section -- what it found; nil: nothing, or it could not tell
 	round : integer -- bumped each time it is made again in place (more houses cleared): a new view, a new check
 	dataKey : string -- set to its view key when its check has come
 	logged : boolean -- its problems are logged
@@ -137,6 +152,7 @@ local record ProposalMod
 	Made : Made
 	Port : Port
 	Ghost : Ghost
+	Section : Section
 	State : State
 	Tick : Tick
 	Offer : Offer
@@ -145,7 +161,8 @@ local record ProposalMod
 	tick : function(G : State, t : Tick)
 	viewKey : function(G : State) : string
 	onData : function(G : State, viewKey : string, check : Check) : boolean
-	logRefusal : function(G : State, point : string, check : Check, note ?: string, account ?: {string})
+	logRefusal : function(G : State, point : string, check : Check, note ?: string, account ?: {string}) : boolean
+	search : function(G : State)
 	gate : function(G : State, a : ends.End, b : ends.End) : string, Offer
 	problems : function(check : Check, houses ?: boolean) : string
 	toClear : function(check : Check, constructionOf : function(integer) : integer, cleared : {integer}) : {integer}, integer, integer
@@ -166,23 +183,23 @@ local function reports(check : Check, housesOnly : boolean) : boolean
 		or (check.hits ~= nil and #(check.hits.collides or {}) > 0)
 end
 
--- The game's refusal of a proposal, in the log, as lines that all start `refusal#<n> <point>:`
--- (tflog 'refusal#' shows all of it): the cost and critical (and `bare` when the game names
--- nothing), what the game said (check.detail), then our own account of the track (the ghost's
--- unless given). note: more for the header.
-function M.logRefusal(G : State, point : string, check : Check, note ?: string, account ?: {string})
-	G.refusals = (G.refusals or 0) + 1
-	local prefix = string.format("refusal#%d %s: ", G.refusals, point)
+-- What the game said besides the cost and critical (check.detail), without failing.
+local function detailOf(check : Check) : {string}
 	local ok, d = pcall(function() : {string} return check.detail ~= nil and check.detail() or {} end)
-	local detail : {string} = ok and d or { "detail failed: " .. tostring(d) }
+	return ok and d or { "detail failed: " .. tostring(d) }
+end
+
+-- Is the refusal bare: "Construction Not Possible" (critical) and nothing else named, in the text
+-- or in its detail lines?
+local function bareOf(check : Check, detail : {string}) : boolean
 	local msgs = #(check.messages or {})
 	local named = check.hits ~= nil and (#(check.hits.collides or {}) > 0 or #(check.hits.buildings or {}) > 0)
-	-- bare: refused as "Construction Not Possible" and nothing else named (the text or its key)
 	local only = msgs == 1 and (check.messages[1]:lower():gsub("[^%w]", "")) == "constructionnotpossible"
-	local bare = check.critical == true and not named and (msgs == 0 or only) and #(check.warnings or {}) == 0 and #detail <= msgs
-	local lines : {string} = { string.format("cost %s; critical %s%s%s", tostring(check.cost), tostring(check.critical == true), bare and "; bare" or "", note ~= nil and ("; " .. note) or "") }
-	for _, l in ipairs(detail) do lines[#lines + 1] = l end
-	for _, l in ipairs(account or G.ghost.account or {}) do lines[#lines + 1] = l end
+	return check.critical == true and not named and (msgs == 0 or only) and #(check.warnings or {}) == 0 and #detail <= msgs
+end
+
+-- Say lines in the log, each after prefix, cut to LINE_BYTES, and a flood to REFUSAL_LINES.
+local function emit(G : State, prefix : string, lines : {string})
 	for i, l in ipairs(lines) do
 		if i > REFUSAL_LINES then
 			G.say(prefix .. string.format("... %d more lines", #lines - REFUSAL_LINES + 1))
@@ -190,6 +207,143 @@ function M.logRefusal(G : State, point : string, check : Check, note ?: string, 
 		end
 		G.say((prefix .. l):sub(1, LINE_BYTES))
 	end
+end
+
+-- The game's refusal of a proposal, in the log, as lines that all start `refusal#<n> <point>:`
+-- (tflog 'refusal#' shows all of it): the cost and critical (and `bare` when the game names
+-- nothing), what the game said (check.detail), then our own account of the track (the ghost's
+-- unless given). note: more for the header. Says whether the refusal is bare.
+function M.logRefusal(G : State, point : string, check : Check, note ?: string, account ?: {string}) : boolean
+	G.refusals = (G.refusals or 0) + 1
+	local prefix = string.format("refusal#%d %s: ", G.refusals, point)
+	local detail = detailOf(check)
+	local bare = bareOf(check, detail)
+	local lines : {string} = { string.format("cost %s; critical %s%s%s", tostring(check.cost), tostring(check.critical == true), bare and "; bare" or "", note ~= nil and ("; " .. note) or "") }
+	for _, l in ipairs(detail) do lines[#lines + 1] = l end
+	for _, l in ipairs(account or G.ghost.account or {}) do lines[#lines + 1] = l end
+	emit(G, prefix, lines)
+	return bare
+end
+
+------------------------------------------------------------------ the search for a bare refusal's section
+
+-- A bare refusal names nothing, so the section it comes from is found by dry runs of sections of the
+-- plan (Port.section, laid out again, not cut out of the proposal: the crossed streets are cut
+-- when a section is laid out). Bisection, which assumes a prefix that refuses keeps refusing as
+-- pieces are added; that does not always hold (a prefix may end in a short piece the whole path
+-- does not have), so the prefixes are walked one at a time when it fails.
+
+local record Search
+	G : State
+	runs : integer
+	known : {string : boolean} -- section "j:k" -> it refuses (bare)
+end
+
+-- Does the section j..k refuse bare (true), or pass (false)? nil when the search cannot go on:
+-- the layout or the check failed, or the refusal names something (inconclusive: that dry run's
+-- detail is in the log).
+local function refuses(s : Search, j : integer, k : integer) : boolean
+	local key = j .. ":" .. k
+	if s.known[key] ~= nil then return s.known[key] end
+	local G = s.G
+	local name = j == 1 and tostring(k) or (j .. ".." .. k)
+	local function stop(why : string) : boolean
+		G.say(string.format("search: pieces %s: %s", name, why))
+		return nil
+	end
+	local ok, p, _, why = pcall(G.port.section, j, k)
+	if not ok then return stop("cannot lay out: " .. tostring(p)) end
+	if p == nil then return stop("cannot lay out: " .. tostring(why)) end
+	local okC, c, whyC = pcall(G.port.dryRun, p as SimpleProposal, nil, true)
+	if not okC then return stop("cannot check: " .. tostring(c)) end
+	if c == nil then return stop("cannot check: " .. tostring(whyC)) end
+	s.runs = s.runs + 1
+	local refused = (c as Check).critical == true
+	if refused and not bareOf(c as Check, detailOf(c as Check)) then
+		M.logRefusal(G, "search", c as Check, "inconclusive at " .. name, {})
+		return nil
+	end
+	s.known[key] = refused
+	return refused
+end
+
+-- The first k whose prefix 1..k refuses, by bisection (m refuses: the whole path). nil: stopped.
+local function firstPrefix(s : Search, m : integer) : integer
+	local lo, hi = 1, m
+	while lo < hi do
+		local mid = math.floor((lo + hi) / 2)
+		local r = refuses(s, 1, mid)
+		if r == nil then return nil end
+		if r then hi = mid else lo = mid + 1 end
+	end
+	return lo
+end
+
+-- ...the same, one prefix at a time.
+local function walkPrefix(s : Search, m : integer) : integer
+	for k = 1, m - 1 do
+		local r = refuses(s, 1, k)
+		if r == nil then return nil end
+		if r then return k end
+	end
+	return m
+end
+
+-- The latest start j for which j..k still refuses (1..k does), by bisection. nil: stopped.
+local function lastStart(s : Search, k : integer) : integer
+	local lo, hi = 1, k
+	while lo < hi do
+		local mid = math.floor((lo + hi + 1) / 2)
+		local r = refuses(s, mid, k)
+		if r == nil then return nil end
+		if r then lo = mid else hi = mid - 1 end
+	end
+	return lo
+end
+
+-- ...the same, one start at a time, from k back.
+local function walkStart(s : Search, k : integer) : integer
+	for j = k, 2, -1 do
+		local r = refuses(s, j, k)
+		if r == nil then return nil end
+		if r then return j end
+	end
+	return 1
+end
+
+-- Find the section of the settled ghost's plan its bare refusal comes from: the first prefix 1..k
+-- that refuses, then the latest start j for which j..k still does. Sets G.ghost.offending and logs
+-- it (as numbered lines, with each piece); a refusal that names something stops it (inconclusive).
+function M.search(G : State)
+	local g = G.ghost
+	local m = g.pieces
+	if m == nil or m < 1 then return end
+	local s : Search = { G = G, runs = 0, known = { ["1:" .. m] = true } } -- (the whole path refused: the build check)
+	local k = firstPrefix(s, m)
+	if k == nil then return end
+	local walk = false
+	if k < m then
+		-- (a prefix that ends just past a road can refuse where the next does not)
+		local r = refuses(s, 1, k + 1)
+		if r == nil then return end
+		if not r then
+			walk = true
+			G.say(string.format("search: not monotone: prefix %d refuses and %d passes: walking the prefixes one at a time", k, k + 1))
+			k = walkPrefix(s, m)
+			if k == nil then return end
+		end
+	end
+	local j = walk and walkStart(s, k) or lastStart(s, k)
+	if j == nil then return end
+	g.offending = { first = j, last = k }
+	G.refusals = (G.refusals or 0) + 1
+	local lines : {string} = { string.format("offending section %s of %d pieces (%d dry runs%s)",
+		j == k and (j .. ".." .. k .. ", piece " .. k .. " alone") or (j .. ".." .. k), m, s.runs, walk and ", walked" or "") }
+	for i = j, k do
+		local ok, l = pcall(G.port.describe, i)
+		lines[#lines + 1] = ok and tostring(l) or ("piece " .. i)
+	end
+	emit(G, string.format("refusal#%d search: ", G.refusals), lines)
 end
 
 -- The ghost's view as the game sees it: its key, and the round it is in (each round is a new
@@ -300,7 +454,7 @@ end
 local function make(G : State, key : string, a : ends.End, b : ends.End, sketch : boolean)
 	local m = G.port.make(a, b, sketch) or {}
 	G.ghost = { key = key, sketch = sketch or nil, proposal = m.proposal, info = m.info, why = m.why,
-		crossed = m.crossed, cleared = m.cleared, account = m.account }
+		crossed = m.crossed, cleared = m.cleared, account = m.account, pieces = m.pieces }
 end
 
 -- The ghost was made again in place: a new round, so a new view, and its check is to come.
@@ -332,7 +486,15 @@ local function checkBuilt(G : State) : Built
 	elseif c.critical or #(c.messages or {}) > 0 then b.refused = "the game refuses it"
 	elseif #(c.hits ~= nil and c.hits.collides or {}) > 0 then b.refused = "it still runs into something" end
 	if b.refused ~= nil then
-		if c ~= nil then M.logRefusal(G, "build check", c, b.refused) else G.say("build check: refused: " .. b.refused) end
+		if c ~= nil then
+			local bare = M.logRefusal(G, "build check", c, b.refused)
+			-- (kept until the key changes: the build check runs again with each round, and for the gate)
+			if bare and not G.ghost.searched then
+				G.ghost.searched = true
+				local okS, errS = pcall(function() : string M.search(G); return nil end)
+				if not okS then G.say("search: " .. tostring(errS)) end
+			end
+		else G.say("build check: refused: " .. b.refused) end
 	end
 	return b
 end

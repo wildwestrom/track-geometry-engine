@@ -73,6 +73,12 @@ end
 
 ------------------------------------------------------------------ tool state
 
+-- The line drawn over the section a bare refusal comes from, kept while it is the same.
+local record HighlightCache
+	key : string
+	edges : {Builtin.Type.EdgeRenderable.Edge}
+end
+
 -- The ghost's plan (tg_plan), waiting for the game's proposal data: its curve speed limits. Each
 -- ghost made sets it anew (none for a sketch).
 local record Pending
@@ -125,6 +131,10 @@ local record ToolState
 	sketchEdges : {Builtin.Type.EdgeRenderable.Edge} -- the sketch's line: the whole path, while the mouse moves it
 	ghostKey : string -- the key of the ghost being made (for its readout)
 	nearest : function(x : number, y : number) : integer, number -- the ghost's piece nearest a point and its distance (m), for the refusal log
+	section : function(j : integer, k : integer) : SimpleProposal, {integer}, string -- the ghost's pieces j..k laid out as a proposal of their own, for the search for a bare refusal's section
+	describe : function(i : integer) : string -- piece i of the ghost's plan, for the log
+	sectionEdges : function(j : integer, k : integer) : {Builtin.Type.EdgeRenderable.Edge} -- pieces j..k of the ghost's plan as a line
+	hl : HighlightCache -- the highlighted section's line, as last drawn
 end
 
 local tool : ToolState = {}
@@ -152,7 +162,7 @@ local G : ghosts.State
 local function resetTool()
 	G = ghosts.new(say, port)
 	tool.pending, tool.hovered, tool.vbadges, tool.line, tool.screen, tool.screenKey, tool.matchRedraws = nil, nil, nil, nil, nil, nil, nil
-	tool.sketchEdges = nil
+	tool.sketchEdges, tool.section, tool.describe, tool.sectionEdges, tool.hl = nil, nil, nil, nil, nil
 end
 
 ------------------------------------------------------------------ track type
@@ -249,6 +259,7 @@ local function mapAlong(pts : {{number}}) : {integer}, {crossings.Street}
 end
 
 local sketchLine : function(plan : plans.Plan) : {Builtin.Type.EdgeRenderable.Edge} -- (with the gizmos)
+local pieceLine : function(nodes : {alignment.Sample}, z : {number}, j : integer, k : integer) : {Builtin.Type.EdgeRenderable.Edge} -- (likewise)
 
 -- What the ghost shows now: the path from the start to the end (picked, or under the mouse);
 -- nothing before there are both. Remade only when its ends change.
@@ -284,6 +295,7 @@ end
 local function makeGhost(a : ends.End, b : ends.End, sketch : boolean) : ghosts.Made
 	local g : ghosts.Made = {}
 	tool.sketchEdges, tool.pending, tool.nearest = nil, nil, nil
+	tool.section, tool.describe, tool.sectionEdges, tool.hl = nil, nil, nil, nil
 	-- (a path's line stays until the next ghost of it is read out; a sketch has none)
 	if a == nil or b == nil then tool.line = nil; return g end
 	-- bridges and tunnels where the track is far off the ground: their types first (without them,
@@ -307,10 +319,11 @@ local function makeGhost(a : ends.End, b : ends.End, sketch : boolean) : ghosts.
 	local pts = layouts.footprint(nodes, kinds, 4.0)
 	local okM, houses, streets = pcall(mapAlong, pts)
 	if not okM then say("ghost: the map along it: " .. tostring(houses)); houses, streets = nil, nil end
+	local crossingType = world.crossingType()
 	local ok, p, pieceOf, why, crossed = pcall(layouts.make, nodes, { template = tt.template, z = zs, grades = grades,
 		from = a, to = b, replace = replace, runs = runs,
 		kinds = kinds, bridgeType = bridgeType, tunnelType = tunnelType,
-		streets = streets as {crossings.Street}, crossingType = world.crossingType() })
+		streets = streets as {crossings.Street}, crossingType = crossingType })
 	if not ok then g.why = "error: " .. tostring(p); say("ghost: " .. g.why); return g end
 	if p == nil then g.why = why; return g end
 	g.proposal = p as SimpleProposal
@@ -327,6 +340,45 @@ local function makeGhost(a : ends.End, b : ends.End, sketch : boolean) : ghosts.
 	end
 	tool.pending = { key = tool.ghostKey, plan = plan, pieceOf = pieceOf as {integer : integer} }
 	tool.nearest = function(x : number, y : number) : integer, number return nearestPiece(nodes, x, y) end
+	-- pieces j..k of the plan on their own, for the search for a bare refusal's section: laid out
+	-- again by tg_layout, as the whole is, from the map along them (so their crossings are found and
+	-- cut anew), joined to the picked ends where they are the path's ends. The switches' copies and
+	-- merged runs only belong to the whole path.
+	local m = #nodes - 1
+	g.pieces = m
+	tool.section = function(j : integer, k : integer) : SimpleProposal, {integer}, string
+		local sub, sz, sg : {alignment.Sample}, {number}, {number} = {}, {}, {}
+		for i = j, k + 1 do sub[#sub + 1], sz[#sz + 1], sg[#sg + 1] = nodes[i], zs[i], grades[i] end
+		local sk : {string} = nil
+		if kinds ~= nil then
+			sk = {}
+			for i = j, k do sk[#sk + 1] = kinds[i] end
+		end
+		local okS, sh, ss = pcall(mapAlong, layouts.footprint(sub, sk, 4.0))
+		if not okS then return nil, nil, "the map along it: " .. tostring(sh) end
+		local whole = j == 1 and k == m
+		local from, to : ends.End, ends.End = nil, nil
+		if j == 1 then from = a end
+		if k == m then to = b end
+		local okL, q, _, whyL = pcall(layouts.make, sub, { template = tt.template, z = sz, grades = sg,
+			from = from, to = to, replace = whole and replace or nil, runs = whole and runs or nil,
+			kinds = sk, bridgeType = bridgeType, tunnelType = tunnelType,
+			streets = ss as {crossings.Street}, crossingType = crossingType })
+		if not okL then return nil, nil, "error: " .. tostring(q) end
+		if q == nil then return nil, nil, whyL end
+		local gone = sh as {integer}
+		if #gone > 0 then
+			local okC, err = pcall(function() : string (q as SimpleProposal).constructionsToRemove = gone; return nil end)
+			if not okC then return nil, nil, "cannot clear the buildings: " .. tostring(err) end
+		end
+		return q as SimpleProposal, gone, nil
+	end
+	tool.describe = function(i : integer) : string
+		local n0, n1 = nodes[i], nodes[i + 1]
+		return string.format("piece %d: %.1f m, from (%.1f, %.1f, %.1f) to (%.1f, %.1f, %.1f)", i,
+			math.sqrt((n1.x - n0.x) ^ 2 + (n1.y - n0.y) ^ 2 + (zs[i + 1] - zs[i]) ^ 2), n0.x, n0.y, zs[i], n1.x, n1.y, zs[i + 1])
+	end
+	tool.sectionEdges = function(j : integer, k : integer) : {Builtin.Type.EdgeRenderable.Edge} return pieceLine(nodes, zs, j, k) end
 	-- our own account of the track: said when it is made settled, and logged with a refusal of it
 	local account : {string} = {}
 	account[#account + 1] = string.format("path %s: from %s (%.1f, %.1f) leaving %.2f deg, to %s (%.1f, %.1f) arriving %.2f deg, %d pieces, %d merged runs, grade %+.1f ‰ to %+.1f ‰",
@@ -529,6 +581,14 @@ port = {
 		if not ok then return nil, "the game could not check it (" .. tostring(d) .. ")" end
 		if d == nil then return nil, "the game could not check it" end
 		return checkOf(d as ProposalData, nil), nil
+	end,
+	section = function(j : integer, k : integer) : SimpleProposal, {integer}, string
+		if tool.section == nil then return nil, nil, "there is no plan" end
+		return tool.section(j, k)
+	end,
+	describe = function(i : integer) : string
+		if tool.describe == nil then return "piece " .. i end
+		return tool.describe(i)
 	end,
 	setCleared = function(p : SimpleProposal, list : {integer}) : boolean, string
 		local ok, err = pcall(function() : string p.constructionsToRemove = list; return nil end)
@@ -946,6 +1006,7 @@ local function toolTick() : string
 	updateGhost()
 	local u, h = sess.drag, sess.hit
 	return table.concat({ tostring(tool.opens or 0), sess.phase, G.ghost.key ~= nil and ghosts.viewKey(G) or "-", tool.screenKey or "-", sess.hoverMsg or "", tostring(G.ghost.cost), G.ghost.errors or "", tostring(G.ghost.built ~= nil),
+		G.ghost.offending ~= nil and (G.ghost.offending.first .. ":" .. G.ghost.offending.last) or "-",
 		sess.edit ~= nil and tostring(sess.edit.rev) or "-", u ~= nil and (u.kind .. u.i) or "-", h ~= nil and (h.kind .. tostring(h.i)) or "-",
 		string.format("%.0f", sess.grab or 0), sess.editMsg or "",
 		sess.mode as string or "-", tostring(sess.dragEl ~= nil), cursorKey() }, "|")
@@ -1194,6 +1255,7 @@ local COLORS : {string : {number}} = {
 	osculating = { 0.8, 0.95, 1.0, 0.5 }, -- a curve's osculating circle
 	spiral = { 1.0, 0.35, 0.85, 0.5 }, -- a transition spiral
 	sketch = { 0.55, 0.85, 1.0, 0.9 }, -- the path while the mouse moves it (no ghost)
+	refused = { 1.0, 0.15, 0.15, 0.9 }, -- the section a bare refusal comes from (the game's error colour)
 }
 
 -- e in colour c, width wide, drawn in steps `step` long (m).
@@ -1315,6 +1377,17 @@ sketchLine = function(plan : plans.Plan) : {Builtin.Type.EdgeRenderable.Edge}
 			end
 			last, lastS = q, nd.s
 		end
+	end
+	return out
+end
+
+-- Pieces j..k of a plan's nodes as a line in the error colour, at the track's height.
+pieceLine = function(nodes : {alignment.Sample}, z : {number}, j : integer, k : integer) : {Builtin.Type.EdgeRenderable.Edge}
+	local out : {Builtin.Type.EdgeRenderable.Edge} = {}
+	for i = j, k do
+		local p, q = nodes[i], nodes[i + 1]
+		local len = math.sqrt((q.x - p.x) ^ 2 + (q.y - p.y) ^ 2 + (z[i + 1] - z[i]) ^ 2)
+		if len > 0.01 then out[#out + 1] = straightEdge(p.x, p.y, z[i], q.x, q.y, z[i + 1], COLORS.refused, SKETCH_WIDTH, len) end
 	end
 	return out
 end
@@ -1463,6 +1536,20 @@ local function toolAction(abort : function()) : TreeNodeId
 		local all : {Builtin.Type.EdgeRenderable.Edge} = {}
 		for _, ed in ipairs(tool.sketchEdges) do all[#all + 1] = ed end
 		for _, ed in ipairs(edges) do all[#all + 1] = ed end
+		edges = all
+	end
+	local off = gh.offending
+	if fresh and off ~= nil and tool.sectionEdges ~= nil and not gh.sketch then
+		-- (the section a bare refusal comes from, over the ghost)
+		local hk = string.format("%s|%d:%d|%s", tostring(gh.key), off.first, off.last, tostring(tool.sectionEdges)) -- (a ghost made again in place has new closures)
+		if tool.hl == nil or tool.hl.key ~= hk then
+			local okH, hl = pcall(tool.sectionEdges, off.first, off.last)
+			tool.hl = { key = hk, edges = okH and hl as {Builtin.Type.EdgeRenderable.Edge} or {} }
+			if not okH then say("ghost: the highlight: " .. tostring(hl)) end
+		end
+		local all : {Builtin.Type.EdgeRenderable.Edge} = {}
+		for _, ed in ipairs(edges) do all[#all + 1] = ed end
+		for _, ed in ipairs(tool.hl.edges) do all[#all + 1] = ed end
 		edges = all
 	end
 	if #edges > 0 then
