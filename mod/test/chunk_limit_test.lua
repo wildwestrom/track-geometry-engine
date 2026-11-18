@@ -38,7 +38,7 @@ end
 
 local env = assert(tl.new_env({ defaults = { gen_target = "5.1", gen_compat = "optional" } }))
 for _, f in ipairs(files) do
-	local src = assert(io.open(f, "rb")):read("a")
+	local src = assert(io.open(f, "rb")):read("*a")
 	local name = f:gsub("^.*[/\\]track_geometry[/\\]content[/\\]", ""):gsub("\\", "/")
 	local code = tl.gen(src, env)
 	if code == nil then

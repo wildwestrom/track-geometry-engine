@@ -1,15 +1,14 @@
 {
-    "authors": [
-        {
-            "name": "Christian Westrom",
-            "role": "CREATOR"
-        }
-    ],
-    "description": "Track Geometry is a mode of the game's own track builder. It lays new track between two ends, with clothoid transition spirals into and out of every curve, and a vertical profile you shape yourself.\n\nHOW IT WORKS\n- In the game's track builder, set the Geometry row to Yes. The track entry you pick is the track it builds, and the panel's bridge, tunnel and Snapping rows apply; the drag builder's other rows are greyed. Set it to No for the game's own builder.\n- Click where the new track starts, then where it ends. Each end can be a free track end, a node or a point along existing track (the new track leaves there as a switch), or open ground. With Snapping on No, or while Shift is held, every end is open ground.\n- The game's see-through ghost shows the track and its cost.\n- Press on the track and drag to add a turn. Drag a turn to move it, drag a curve's brackets to make it wider or tighter, and drag an end on open ground to move it. Right-click a turn to remove it.\n- A small window switches to the vertical profile. Press on the track to add an elevation point, drag it along the track, and Shift-drag it up or down; select a point to type its height or copy another point's. Right-click a point to remove it.\n- A badge at each curve shows the game's speed limit there and the grade. The tooltip sums up the slowest curve, the grades and the smallest radius.\n- Bridges and tunnels go where the track runs far above or below the ground, of the types picked in the panel.\n- Click anywhere off the track to build. A window shows the path and its cost and asks first. Esc goes back a step.\n\nGOOD TO KNOW\n- It won't build while the game reports errors on the track, or what you can't pay for.\n- It won't build while the profile is steeper than the track type allows, or while elevation points sit too close together; the tooltip says where.\n- Everything it builds is normal game track and stays if you remove the mod.\n\nCredits: much of the tool is based on code from Auto Track Connector by Smokeystatue (https://mod.io/g/transportfever3/m/auto-track-connector): picking track ends, building track as a proposal, the tool's ghost, tooltip and controls, and the build confirm window. Thank you!",
-    "name": "Track Geometry",
-    "summary": "A Geometry mode for the game's track builder. Lay new track with real transition curves: add turns, drag them, size each curve, shape the profile, see each curve's speed limit and grade, then build.",
-    "tags": [
-        "Script Mod"
-    ],
-    "url": ""
+	"authors": [
+		{
+			"name": "Christian Westrom",
+			"role": "CREATOR"
+		}
+	],
+	"name": "Track Geometry Tool",
+	"summary": "An alternative to the default track builder that lets you build your railway alignment with real civil engineering practices. Railway lines are built from a limited set of primitives: straight lines, circular arcs, clothoid transitions.",
+	"tags": [
+		"Script Mod"
+	],
+	"url": "https://github.com/wildwestrom/track-geometry-engine/tree/tf3-mod"
 }

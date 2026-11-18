@@ -1,6 +1,6 @@
 function data()
 	return {
-		-- adds the "Geometry" row to the track entries of the game's own builder (draws nothing)
+		-- adds the "Geometry Tool" row to the default track builder
 		type = "react-plugin ::ModEntryPointExtension",
 		data = {
 			filePath = "track_geometry_tool::/track_geometry/tg_gui.script@TgMenuPlugin",

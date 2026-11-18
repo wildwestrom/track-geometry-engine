@@ -1,20 +1,20 @@
 {
-    "modId": "track_geometry_tool",
-    "revision": 1,
-    "severityAdd": "None",
-    "severityRemove": "Warning",
-    "visible": true,
-    "cosmetic": false,
-    "dependencies": null,
-    "incompatibilities": null,
-    "params": null,
-    "preRunScript": {
-        "fileName": "track_geometry_tool::/mod.script@preRunFn"
-    },
-    "runScript": {
-        "fileName": ""
-    },
-    "postRunScript": {
-        "fileName": ""
-    }
+	"modId": "track_geometry_tool",
+	"revision": 1,
+	"severityAdd": "None",
+	"severityRemove": "None",
+	"visible": true,
+	"cosmetic": true,
+	"dependencies": null,
+	"incompatibilities": null,
+	"params": null,
+	"preRunScript": {
+		"fileName": ""
+	},
+	"runScript": {
+		"fileName": ""
+	},
+	"postRunScript": {
+		"fileName": ""
+	}
 }

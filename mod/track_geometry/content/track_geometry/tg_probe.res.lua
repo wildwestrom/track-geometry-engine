@@ -1,6 +1,6 @@
 function data()
 	return {
-		-- reads the mouse and places the curve badges for the tool (draws nothing)
+		-- reads the mouse and places the curve badges for the tool
 		type = "react-plugin ::GameBarInfoDisplayExtension",
 		data = {
 			filePath = "track_geometry_tool::/track_geometry/tg_gui.script@TgProbe",
