@@ -12,3 +12,5 @@
 - Game log after an in-game test: `agent-scripts/tflog [ERE...]`.
 - Game API (Teal definitions): `agent-scripts/tfapi PATTERN`.
 - Repo state (status, recent log, diffstat): `agent-scripts/jjctx`.
+
+On Windows, use the PowerShell versions: `check.ps1`, `sync.ps1`, and `agent-scripts/{ship,tflog,tfapi,jjctx}.ps1`. They take the same arguments, but as PowerShell parameters (`tflog.ps1 -All -N 100 REGEX...`, `tfapi.ps1 PATTERN -A 5`). Run `rep` and `show` as `python agent-scripts/rep` and `python agent-scripts/show`, because `python3` there is the Microsoft Store stub. Pipe `rep`'s blocks from PowerShell 7 (`pwsh`): Windows PowerShell 5.1 pipes text to native programs as ASCII.

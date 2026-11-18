@@ -5,10 +5,11 @@
 set -eu
 cd "$(dirname "$0")"
 modId=$(sed -n 's/.*"modId": *"\([^"]*\)".*/\1/p' track_geometry/mod.json)
+case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) sep=__ ;; *) sep=:: ;; esac # see tlconfig.lua
 rm -rf .tlpath
 find track_geometry/content -name '*.script.tl' | while read -r f; do
 	rel=${f#track_geometry/content/}
-	link=".tlpath/$modId::/${rel%.script.tl}/script/tl.tl"
+	link=".tlpath/$modId$sep/${rel%.script.tl}/script/tl.tl"
 	mkdir -p "$(dirname "$link")"
 	ln -s "$PWD/$f" "$link"
 done

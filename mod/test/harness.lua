@@ -1,5 +1,6 @@
 -- What every test shares. Run a test from mod/ after check.sh builds .tlpath/: lua test/X_test.lua
 local tl = require("tl")
+dofile("tlconfig.lua") -- Windows module-name mapping; a no-op elsewhere
 tl.loader()
 package.path = ".tlpath/?.tl;" .. package.path
 local H = { failures = 0 }

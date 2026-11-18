@@ -41,16 +41,22 @@ def parse(text):
             sys.exit(f"rep: empty old text for {b['path']}")
     return blocks
 
+def read(p):
+    # UTF-8 whatever the locale (Windows defaults to cp1252); edit with LF, write back the file's own endings.
+    raw = open(p, encoding="utf-8", newline="").read()
+    return raw.replace("\r\n", "\n"), "\r\n" in raw
+
 def main():
-    blocks = parse(sys.stdin.read())
+    # Bytes, so a PowerShell pipe (CRLF, maybe a BOM) reads the same as a sh heredoc.
+    blocks = parse(sys.stdin.buffer.read().decode("utf-8-sig").replace("\r\n", "\n"))
     if not blocks:
         sys.exit("rep: no blocks on stdin")
-    files, counts, errors = {}, {}, []
+    files, crlf, counts, errors = {}, {}, {}, []
     for i, b in enumerate(blocks, 1):
         p = b["path"]
         if p not in files:
             try:
-                files[p] = open(p).read()
+                files[p], crlf[p] = read(p)
             except OSError as e:
                 errors.append(f"block {i}: {e}"); continue
         n = files[p].count(b["old"])
@@ -63,7 +69,7 @@ def main():
     if errors:
         sys.exit("rep: nothing written.\n" + "\n---\n".join(errors))
     for p, s in files.items():
-        open(p, "w").write(s)
+        open(p, "w", encoding="utf-8", newline="").write(s.replace("\n", "\r\n") if crlf[p] else s)
     for p, n in counts.items():
         print(f"{p}: {n} edit{'s' * (n != 1)}")
 

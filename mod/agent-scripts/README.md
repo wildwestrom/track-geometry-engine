@@ -8,3 +8,5 @@ Helpers so the agent runs one command instead of rebuilding the same tool calls.
 - `tflog [ERE...]`: the game log since the last mod load, filtered to the mod's lines.
 - `tfapi PATTERN`: grep the game's Teal API definitions.
 - `jjctx [N]`: `jj st`, recent log, and diffstat.
+
+Windows: `ship.ps1`, `tflog.ps1`, `tfapi.ps1` and `jjctx.ps1` do the same jobs in PowerShell (5.1 or 7). They find Steam and the game install through `../tfpaths.ps1`. `rep` and `show` are Python and run on either OS, as `python agent-scripts/rep`.

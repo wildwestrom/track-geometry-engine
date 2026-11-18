@@ -9,14 +9,15 @@ local TOL = 1e-9 -- m, rad, 1/m, m/s
 local check = H.check
 
 -- IEEE-754 double from its 16-digit hex bit pattern (Lua 5.2 has no string.unpack).
+local ldexp = math.ldexp or function(m, e) return m * 2.0 ^ e end -- gone in 5.3+; exact either way
 local function f64(h)
 	local hi, lo = tonumber(h:sub(1, 8), 16), tonumber(h:sub(9, 16), 16)
 	local sign = 1
 	if hi >= 0x80000000 then sign, hi = -1, hi - 0x80000000 end
 	local e, m = math.floor(hi / 0x100000), (hi % 0x100000) * 2 ^ 32 + lo
 	if e == 0x7ff then return m == 0 and sign * math.huge or 0 / 0 end
-	if e == 0 then return sign * math.ldexp(m, -1074) end
-	return sign * math.ldexp(m + 2 ^ 52, e - 1075)
+	if e == 0 then return sign * ldexp(m, -1074) end
+	return sign * ldexp(m + 2 ^ 52, e - 1075)
 end
 
 for _, fx in ipairs(fixtures) do
