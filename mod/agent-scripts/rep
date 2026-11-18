@@ -1,0 +1,70 @@
+#!/usr/bin/env python3
+"""Exact-text replacement across files, all-or-nothing.
+
+Reads edit blocks from stdin:
+
+    @@ path/to/file
+    old text (one or more lines)
+    ====
+    new text (may be empty to delete)
+    @@ another/file
+    ...
+
+`@@ path` expects the old text exactly once; `@@! path` replaces every occurrence
+(at least one). Old/new are the lines between the markers, joined with newlines, with
+no trailing newline added. Paths are relative to the cwd. Blocks apply in order
+(a later block sees earlier ones' results). Nothing is written unless every block matches.
+"""
+import sys
+
+def parse(text):
+    blocks, cur = [], None
+    for line in text.split("\n"):
+        if line.startswith("@@! ") or line.startswith("@@ "):
+            cur = {"all": line.startswith("@@!"), "path": line.split(" ", 1)[1].strip(), "old": [], "new": None}
+            blocks.append(cur)
+        elif cur is None:
+            if line.strip():
+                sys.exit(f"rep: text before the first '@@ path' line: {line!r}")
+        elif line == "====" and cur["new"] is None:
+            cur["new"] = []
+        else:
+            (cur["old"] if cur["new"] is None else cur["new"]).append(line)
+    for b in blocks:
+        if b["new"] is None:
+            sys.exit(f"rep: block for {b['path']} has no '====' line")
+        # The last block picks up the heredoc's final newline as an empty line; drop it.
+        if b is blocks[-1] and b["new"] and b["new"][-1] == "":
+            b["new"].pop()
+        b["old"], b["new"] = "\n".join(b["old"]), "\n".join(b["new"])
+        if not b["old"]:
+            sys.exit(f"rep: empty old text for {b['path']}")
+    return blocks
+
+def main():
+    blocks = parse(sys.stdin.read())
+    if not blocks:
+        sys.exit("rep: no blocks on stdin")
+    files, counts, errors = {}, {}, []
+    for i, b in enumerate(blocks, 1):
+        p = b["path"]
+        if p not in files:
+            try:
+                files[p] = open(p).read()
+            except OSError as e:
+                errors.append(f"block {i}: {e}"); continue
+        n = files[p].count(b["old"])
+        if n == 0 or (n > 1 and not b["all"]):
+            snippet = b["old"] if len(b["old"]) < 200 else b["old"][:200] + "..."
+            errors.append(f"block {i} ({p}): old text found {n} times\n{snippet}")
+            continue
+        files[p] = files[p].replace(b["old"], b["new"])
+        counts[p] = counts.get(p, 0) + 1
+    if errors:
+        sys.exit("rep: nothing written.\n" + "\n---\n".join(errors))
+    for p, s in files.items():
+        open(p, "w").write(s)
+    for p, n in counts.items():
+        print(f"{p}: {n} edit{'s' * (n != 1)}")
+
+main()

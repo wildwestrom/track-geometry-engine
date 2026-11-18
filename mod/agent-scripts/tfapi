@@ -1,0 +1,8 @@
+#!/bin/sh
+# Grep TF3's Teal API definitions (api/tealdef and base/tealdef in the game install).
+#   tfapi [grep options...] PATTERN     e.g. tfapi -A5 'record WindowAPI'
+# Runs grep -rnE over both trees with paths shown relative to the install; first 60 lines.
+set -eu
+g="$HOME/.local/share/guix-sandbox-home/.local/share/Steam/steamapps/common/Transport Fever 3"
+cd "$g"
+grep -rnE --include='*.tl' "$@" api/tealdef base/tealdef | cut -c1-300 | head -60

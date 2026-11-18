@@ -1,0 +1,23 @@
+#!/bin/sh
+# Read TF3's game log (crash_dump/stdout.txt) for the mod.
+#   tflog [-a] [-n N] [ERE...]
+# By default: only lines after the last mod (re)load ("preRunFn: mod loaded" or
+# "Reloading Lua StateProvider"), filtered to the mod's tag and error lines, Texture errors
+# dropped, cut to 300 chars, last N=40 shown with line numbers.
+# Each ERE given replaces the default filter (lines matching any of them are kept).
+# -a  search the whole log instead of since the last load.
+set -eu
+log="$HOME/.local/share/guix-sandbox-home/.local/share/Steam/userdata/75515556/3493540/local/crash_dump/stdout.txt"
+all=0; n=40
+while getopts an: o; do case $o in a) all=1 ;; n) n=$OPTARG ;; *) exit 2 ;; esac; done
+shift $((OPTIND - 1))
+[ -f "$log" ] || { echo "tflog: no log at $log" >&2; exit 1; }
+start=1
+if [ $all = 0 ]; then
+	l=$(grep -an 'preRunFn: mod loaded\|Reloading Lua StateProvider' "$log" | tail -1 | cut -d: -f1)
+	[ -n "$l" ] && start=$l
+fi
+if [ $# -gt 0 ]; then pat=$(printf '%s|' "$@"); pat=${pat%|}; else pat='westrom_track_geometry|[Ee]rror|stack traceback'; fi
+echo "== $log (from line $start, modified $(date -r "$log" '+%H:%M:%S'))"
+tail -n +"$start" "$log" | grep -an -E "$pat" | grep -av 'Texture error' |
+	awk -F: -v s="$start" '{ $1 = $1 + s - 1; print }' OFS=: | cut -c1-300 | tail -n "$n"

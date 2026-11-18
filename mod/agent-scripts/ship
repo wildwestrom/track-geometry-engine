@@ -1,0 +1,16 @@
+#!/bin/sh
+# Run the mod's check.sh quietly; if it passes, run sync.sh (CLAUDE.md asks for both after
+# every change under track_geometry/). On failure prints the failing lines (tl errors, FAIL
+# lines, Lua errors) and the per-test summaries, then exits 1 without syncing.
+# Full output is kept in ${TMPDIR:-/tmp}/tg-check.out for when the summary isn't enough.
+set -u
+mod="$(cd "$(dirname "$0")/.." && pwd)"
+out="${TMPDIR:-/tmp}/tg-check.out"
+if "$mod/check.sh" >"$out" 2>&1; then
+	echo "check: $(grep -c '^ok ' "$out") ok, $(grep -c '^all passed' "$out") test files passed"
+	"$mod/sync.sh"
+else
+	grep -E '^FAIL |error|^lua: |[0-9]+ failed$|^== ' "$out" | grep -v '^\s*no file' | head -60
+	echo "check failed; not synced (full output: $out)"
+	exit 1
+fi

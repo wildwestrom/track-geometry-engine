@@ -1,0 +1,60 @@
+#!/usr/bin/env python3
+"""Print regex matches with line numbers and context, so a grep -n + sed -n pair is one call.
+
+    show PATTERN FILE... [-A N] [-B N] [--block] [--max M]
+
+-A/-B  lines after/before each match (defaults 15/0).
+--block  print each match's whole indented block instead: from the match to the first later
+         line indented no deeper, including it when it closes the block
+         (end, }, ), end), until, else...). Works for Teal/Lua functions and tables.
+--max  stop after M matches per file (default 10).
+Overlapping ranges are merged; each range starts with a `== file:line` header.
+"""
+import re, sys, argparse
+
+CLOSERS = re.compile(r"^\s*(end\b|[}\])]|until\b)")
+
+def block_end(lines, i):
+    indent = len(lines[i]) - len(lines[i].lstrip())
+    for j in range(i + 1, min(len(lines), i + 400)):
+        l = lines[j]
+        if not l.strip():
+            continue
+        if len(l) - len(l.lstrip()) <= indent:
+            return j if CLOSERS.match(l) else j - 1
+    return min(len(lines), i + 400) - 1
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("pattern"); ap.add_argument("files", nargs="+")
+    ap.add_argument("-A", type=int, default=15); ap.add_argument("-B", type=int, default=0)
+    ap.add_argument("--block", action="store_true"); ap.add_argument("--max", type=int, default=10)
+    a = ap.parse_args()
+    rx = re.compile(a.pattern)
+    found = False
+    for f in a.files:
+        try:
+            lines = open(f, errors="replace").read().split("\n")
+        except OSError as e:
+            print(f"show: {e}", file=sys.stderr); continue
+        ranges = []
+        for i, l in enumerate(lines):
+            if rx.search(l):
+                end = block_end(lines, i) if a.block else min(len(lines) - 1, i + a.A)
+                ranges.append([max(0, i - a.B), end])
+                if len(ranges) >= a.max:
+                    break
+        merged = []
+        for r in ranges:
+            if merged and r[0] <= merged[-1][1] + 1:
+                merged[-1][1] = max(merged[-1][1], r[1])
+            else:
+                merged.append(r)
+        for s, e in merged:
+            found = True
+            print(f"== {f}:{s + 1}")
+            for k in range(s, e + 1):
+                print(f"{k + 1:5}\t{lines[k]}")
+    sys.exit(0 if found else 1)
+
+main()

@@ -1,0 +1,7 @@
+#!/bin/sh
+# Orientation for the repo in one call: jj st, the last N (default 6) changes, and a diffstat
+# of the working copy.  jjctx [N]
+set -eu
+echo "== status"; jj st
+echo "== log"; jj log -n "${1:-6}"
+echo "== diff --stat"; jj diff --stat
