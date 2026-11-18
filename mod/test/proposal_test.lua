@@ -14,7 +14,7 @@ local function fakePort()
 		make = function(a, b, sketch)
 			f.made = f.made + 1
 			if a == nil or b == nil then return {} end
-			return { proposal = { n = f.made, sketch = sketch }, info = "path " .. f.made, crossed = f.crossed, cleared = f.footprint }
+			return { proposal = { n = f.made, sketch = sketch }, info = "path " .. f.made, crossed = f.crossed, cleared = f.footprint, account = f.account }
 		end,
 		dryRun = function(_, removing, gather) f.runs = f.runs + 1; return f.dry(removing or {}, gather) end,
 		setCleared = function() return true end,
@@ -32,7 +32,7 @@ local A, B = "A", "B" -- (the ends: plain values the module only hands back to t
 local function chk(t)
 	t = t or {}
 	return { cost = t.cost or 100, critical = t.critical or false, messages = t.messages or {}, warnings = t.warnings or {},
-		hits = { collides = t.collides or {}, buildings = t.buildings or {} }, detail = function() return "detail" end }
+		hits = { collides = t.collides or {}, buildings = t.buildings or {} }, detail = function() return t.lines or {} end }
 end
 
 ------------------------------------------------------------------ the rest rule
@@ -191,6 +191,93 @@ f = fakePort()
 G = settledGhost(f)
 P.onData(G, P.viewKey(G), chk({ messages = { "Collision" }, collides = { 1011 } }))
 check(P.gate(G, A, B) == "the game is still checking it", "gate: refused: houses still to be searched for")
+
+------------------------------------------------------------------ refusals in the log
+
+local function refusalLines(logs)
+	local out = {}
+	for _, l in ipairs(logs) do if l:find("^refusal#") then out[#out + 1] = l end end
+	return out
+end
+
+-- a refusal is logged as numbered lines with the log point's prefix; the counter goes up per refusal
+f = fakePort()
+f.account = { "path 2 pieces", "road 9 crossed at (1, 2, 3): not cut: too shallow" }
+G, logs = settledGhost(f)
+P.onData(G, P.viewKey(G), chk({ cost = 40, critical = true, messages = { "Too steep" }, collides = { 7 },
+	lines = { "messages: Too steep", "collision street 7 at (1.0, 2.0); nearest piece 3, 4.5 m" } }))
+local ls = refusalLines(logs)
+check(#ls == 5 and ls[1] == "refusal#1 ghost: cost 40; critical true" and ls[2] == "refusal#1 ghost: messages: Too steep"
+	and ls[3] == "refusal#1 ghost: collision street 7 at (1.0, 2.0); nearest piece 3, 4.5 m"
+	and ls[4] == "refusal#1 ghost: path 2 pieces" and ls[5]:find("^refusal#1 ghost: road 9 crossed"),
+	"refusal: numbered lines with the log point's prefix, then our own account (" .. #ls .. " lines)")
+P.tick(G, { key = "s2", a = A, b = B, settled = true })
+P.onData(G, P.viewKey(G), chk({ critical = true, messages = { "Too steep" }, lines = { "messages: Too steep" } }))
+ls = refusalLines(logs)
+local second = false
+for _, l in ipairs(ls) do second = second or l == "refusal#2 ghost: cost 100; critical true" end
+check(second,
+	"refusal: the counter goes up per refusal")
+
+-- the detail is logged once per view
+f = fakePort()
+G, logs = settledGhost(f)
+local vk = P.viewKey(G)
+P.onData(G, vk, chk({ critical = true, messages = { "Too steep" }, lines = { "messages: Too steep" } }))
+P.onData(G, vk, chk({ critical = true, messages = { "Too steep" }, lines = { "messages: Too steep" } }))
+check(#refusalLines(logs) == 2, "refusal: the same view logs its detail once (" .. #refusalLines(logs) .. " lines)")
+
+-- errors that are not critical, and warnings, get the full detail
+f = fakePort()
+G, logs = settledGhost(f)
+P.onData(G, P.viewKey(G), chk({ messages = { "Too steep" }, lines = { "messages: Too steep" } }))
+check(#refusalLines(logs) == 2 and refusalLines(logs)[1] == "refusal#1 ghost: cost 100; critical false", "refusal: errors that are not critical get the detail")
+f = fakePort()
+G, logs = settledGhost(f)
+P.onData(G, P.viewKey(G), chk({ warnings = { "Buildings" }, lines = { "warnings: Buildings" } }))
+check(#refusalLines(logs) == 2, "refusal: warnings get the detail")
+
+-- houses only, and a clean ghost, keep the short line
+f = fakePort()
+G, logs = settledGhost(f)
+P.onData(G, P.viewKey(G), chk({ messages = { "Collision" }, collides = { 1011 }, lines = { "collision" } }))
+check(#refusalLines(logs) == 0 and logs[#logs] == "ghost: The town buildings in the way will go.", "refusal: houses only keep the short line")
+f = fakePort()
+G, logs = settledGhost(f)
+P.onData(G, P.viewKey(G), chk())
+check(#logs == 0 or #refusalLines(logs) == 0, "refusal: a clean ghost logs no refusal")
+
+-- a bare refusal is tagged; one that names anything is not
+f = fakePort()
+G, logs = settledGhost(f)
+P.onData(G, P.viewKey(G), chk({ critical = true, messages = { "Construction Not Possible" }, lines = { "messages: Construction Not Possible" } }))
+check(refusalLines(logs)[1] == "refusal#1 ghost: cost 100; critical true; bare", "refusal: a bare refusal says so: " .. tostring(refusalLines(logs)[1]))
+f = fakePort()
+G, logs = settledGhost(f)
+P.onData(G, P.viewKey(G), chk({ critical = true, messages = { "Construction Not Possible" }, collides = { 7 }, lines = { "messages: x", "collision" } }))
+check(not refusalLines(logs)[1]:find("bare"), "refusal: one that names a collision is not bare")
+
+-- the other log points
+f = fakePort()
+f.dry = function() return chk({ critical = true, messages = { "Too steep" }, lines = { "messages: Too steep" } }) end
+G, logs = settledGhost(f)
+P.onData(G, P.viewKey(G), chk({ cost = 100 }))
+P.tick(G, { key = "s", a = A, b = B, settled = true })
+local sawBuild = false
+for _, l in ipairs(refusalLines(logs)) do sawBuild = sawBuild or l:find("^refusal#1 build check") ~= nil end
+check(sawBuild, "refusal: the build check logs its detail")
+P.logRefusal(G, "build", chk({ critical = true, lines = { "x" } }))
+check(refusalLines(logs)[#refusalLines(logs) - 1]:find("^refusal#2 build:"), "refusal: the adapter logs a failed build through the module")
+
+-- no line is long, and a flood is cut
+f = fakePort()
+G, logs = settledGhost(f)
+local flood = { string.rep("x", 500) }
+for i = 1, 200 do flood[#flood + 1] = "entity " .. i end
+P.onData(G, P.viewKey(G), chk({ critical = true, messages = { "a" }, lines = flood }))
+local longest = 0
+for _, l in ipairs(refusalLines(logs)) do longest = math.max(longest, #l) end
+check(longest <= 280 and #refusalLines(logs) < 100, "refusal: lines stay under 300 characters, and a flood is cut (" .. longest .. ", " .. #refusalLines(logs) .. ")")
 
 ------------------------------------------------------------------ toClear and allHouses
 

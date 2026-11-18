@@ -14,6 +14,10 @@ local ends = require("track_geometry_tool::/track_geometry/tg_ends.script.tl")
 local CLEAR_ROUNDS = 8
 -- Dry runs at most to find the town buildings in a settled ghost's way.
 local CLEAR_CHECKS = 12
+-- A refusal's log lines are cut to this many bytes (tflog cuts a line at 300), and a refusal to
+-- this many lines.
+local LINE_BYTES = 280
+local REFUSAL_LINES = 60
 -- Picking the end: the path is a sketch until the mouse has rested this long (ms)...
 local SKETCH_REST_MS = 300.0
 -- ...or this many ticks, without a clock.
@@ -31,7 +35,9 @@ local record Check
 	messages : {string} -- its errors; nil: the game gave no error state
 	warnings : {string}
 	hits : Hits
-	detail : function() : string -- everything the game said, on one line, for the log (only called to log a refusal)
+	-- everything the game said besides the cost and critical, a line for each non-empty message
+	-- list and for each entity it names, with where it is (only called to log a refusal)
+	detail : function() : {string}
 end
 
 -- A ghost as the port makes it.
@@ -41,6 +47,7 @@ local record Made
 	why : string -- why there is no ghost
 	crossed : {integer} -- the street and track pieces it cuts for its level and diamond crossings
 	cleared : {integer} -- the town buildings' constructions it removes from the start (its footprint)
+	account : {string} -- our own account of the track (its path, the roads it crosses and why not), logged with a refusal
 end
 
 -- The game's side.
@@ -84,6 +91,7 @@ local record Ghost
 	found : boolean -- the search for the town buildings in its way is done (once it has settled)
 	crossed : {integer}
 	cleared : {integer} -- the town buildings' constructions it removes; nil: none yet
+	account : {string}
 	round : integer -- bumped each time it is made again in place (more houses cleared): a new view, a new check
 	dataKey : string -- set to its view key when its check has come
 	logged : boolean -- its problems are logged
@@ -97,6 +105,7 @@ local record State
 	ghost : Ghost -- never nil ({} before the first, or when dropped)
 	port : Port
 	say : function(string)
+	refusals : integer -- refusals logged so far (their numbers)
 	ticks : integer
 	dragging : boolean -- as of the last tick
 	movedKey : string -- the last key seen, and when it changed (the mouse moved the path)
@@ -136,6 +145,7 @@ local record ProposalMod
 	tick : function(G : State, t : Tick)
 	viewKey : function(G : State) : string
 	onData : function(G : State, viewKey : string, check : Check) : boolean
+	logRefusal : function(G : State, point : string, check : Check, note ?: string, account ?: {string})
 	gate : function(G : State, a : ends.End, b : ends.End) : string, Offer
 	problems : function(check : Check, houses ?: boolean) : string
 	toClear : function(check : Check, constructionOf : function(integer) : integer, cleared : {integer}) : {integer}, integer, integer
@@ -145,7 +155,41 @@ end
 local M : ProposalMod = { CLEAR_ROUNDS = CLEAR_ROUNDS }
 
 function M.new(say : function(string), port : Port) : State
-	return { ghost = {}, port = port, say = say, ticks = 0 }
+	return { ghost = {}, port = port, say = say, refusals = 0, ticks = 0 }
+end
+
+-- Does the game's check report something worth the full detail in the log? Not when all it runs
+-- into is town buildings that go (housesOnly).
+local function reports(check : Check, housesOnly : boolean) : boolean
+	if housesOnly then return false end
+	return check.critical == true or #(check.messages or {}) > 0 or #(check.warnings or {}) > 0
+		or (check.hits ~= nil and #(check.hits.collides or {}) > 0)
+end
+
+-- The game's refusal of a proposal, in the log, as lines that all start `refusal#<n> <point>:`
+-- (tflog 'refusal#' shows all of it): the cost and critical (and `bare` when the game names
+-- nothing), what the game said (check.detail), then our own account of the track (the ghost's
+-- unless given). note: more for the header.
+function M.logRefusal(G : State, point : string, check : Check, note ?: string, account ?: {string})
+	G.refusals = (G.refusals or 0) + 1
+	local prefix = string.format("refusal#%d %s: ", G.refusals, point)
+	local ok, d = pcall(function() : {string} return check.detail ~= nil and check.detail() or {} end)
+	local detail : {string} = ok and d or { "detail failed: " .. tostring(d) }
+	local msgs = #(check.messages or {})
+	local named = check.hits ~= nil and (#(check.hits.collides or {}) > 0 or #(check.hits.buildings or {}) > 0)
+	-- bare: refused as "Construction Not Possible" and nothing else named (the text or its key)
+	local only = msgs == 1 and (check.messages[1]:lower():gsub("[^%w]", "")) == "constructionnotpossible"
+	local bare = check.critical == true and not named and (msgs == 0 or only) and #(check.warnings or {}) == 0 and #detail <= msgs
+	local lines : {string} = { string.format("cost %s; critical %s%s%s", tostring(check.cost), tostring(check.critical == true), bare and "; bare" or "", note ~= nil and ("; " .. note) or "") }
+	for _, l in ipairs(detail) do lines[#lines + 1] = l end
+	for _, l in ipairs(account or G.ghost.account or {}) do lines[#lines + 1] = l end
+	for i, l in ipairs(lines) do
+		if i > REFUSAL_LINES then
+			G.say(prefix .. string.format("... %d more lines", #lines - REFUSAL_LINES + 1))
+			break
+		end
+		G.say((prefix .. l):sub(1, LINE_BYTES))
+	end
 end
 
 -- The ghost's view as the game sees it: its key, and the round it is in (each round is a new
@@ -241,9 +285,9 @@ function M.onData(G : State, viewKey : string, check : Check) : boolean
 	g.hasErrors = #(check.messages or {}) > 0
 	g.dataKey = viewKey
 	-- every refusal, mid-drag too, once per view
-	if g.critical and not g.refusalLogged then
+	if reports(check, g.housesOnly) and not g.refusalLogged then
 		g.refusalLogged = true
-		G.say("ghost: refused" .. (G.dragging and " (mid-drag)" or "") .. ": " .. (check.detail ~= nil and check.detail() or "no detail"))
+		M.logRefusal(G, "ghost" .. (G.dragging and " mid-drag" or ""), check)
 	end
 	if g.errors ~= nil and not G.dragging and not g.logged then
 		g.logged = true
@@ -256,7 +300,7 @@ end
 local function make(G : State, key : string, a : ends.End, b : ends.End, sketch : boolean)
 	local m = G.port.make(a, b, sketch) or {}
 	G.ghost = { key = key, sketch = sketch or nil, proposal = m.proposal, info = m.info, why = m.why,
-		crossed = m.crossed, cleared = m.cleared }
+		crossed = m.crossed, cleared = m.cleared, account = m.account }
 end
 
 -- The ghost was made again in place: a new round, so a new view, and its check is to come.
@@ -287,7 +331,9 @@ local function checkBuilt(G : State) : Built
 	if c == nil then b.refused = why or "the game could not check it"
 	elseif c.critical or #(c.messages or {}) > 0 then b.refused = "the game refuses it"
 	elseif #(c.hits ~= nil and c.hits.collides or {}) > 0 then b.refused = "it still runs into something" end
-	if b.refused ~= nil then G.say("build check: refused: " .. b.refused .. ": " .. (c ~= nil and c.detail ~= nil and c.detail() or "no data")) end
+	if b.refused ~= nil then
+		if c ~= nil then M.logRefusal(G, "build check", c, b.refused) else G.say("build check: refused: " .. b.refused) end
+	end
 	return b
 end
 
@@ -299,9 +345,9 @@ local function checkRemoving(G : State, cleared : {integer}) : Check
 		G.say("ghost: finding the town buildings: " .. tostring(ok and why or c))
 		return nil
 	end
-	if c.critical and not g.searchRefusalLogged then
+	if reports(c, false) and not g.searchRefusalLogged then
 		g.searchRefusalLogged = true
-		G.say(string.format("ghost: house search refused (removing %d constructions): %s", #cleared, c.detail ~= nil and c.detail() or "no detail"))
+		M.logRefusal(G, "house search", c, string.format("removing %d constructions", #cleared))
 	end
 	return c
 end

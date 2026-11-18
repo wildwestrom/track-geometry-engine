@@ -23,6 +23,7 @@ local ghosts = require("track_geometry_tool::/track_geometry/tg_proposal.script.
 local crossings = require("track_geometry_tool::/track_geometry/tg_crossings.script.tl")
 local readout = require("track_geometry_tool::/track_geometry/tg_readout.script.tl")
 local plans = require("track_geometry_tool::/track_geometry/tg_plan.script.tl")
+local alignment = require("track_geometry_tool::/track_geometry/tg_alignment.script.tl")
 local sessions = require("track_geometry_tool::/track_geometry/tg_session.script.tl")
 local world = require("track_geometry_tool::/track_geometry/tg_world.script.tl")
 
@@ -123,6 +124,7 @@ local record ToolState
 	placedView : string -- the camera, screen and badges the badges were last placed for
 	sketchEdges : {Builtin.Type.EdgeRenderable.Edge} -- the sketch's line: the whole path, while the mouse moves it
 	ghostKey : string -- the key of the ghost being made (for its readout)
+	nearest : function(x : number, y : number) : integer, number -- the ghost's piece nearest a point and its distance (m), for the refusal log
 end
 
 local tool : ToolState = {}
@@ -260,13 +262,28 @@ local function ghostKey(a : ends.End, b : ends.End) : string
 	return key .. ":" .. tostring(panelValue("bridgeType")) .. ":" .. tostring(panelValue("tunnelType"))
 end
 
+-- The piece of the path (nodes: its plan's) nearest the point, and how far (m): the index of the
+-- chord from node i to node i + 1.
+local function nearestPiece(nodes : {alignment.Sample}, x : number, y : number) : integer, number
+	local best, bestD = nil as integer, math.huge
+	for i = 1, #nodes - 1 do
+		local ax, ay, bx, by = nodes[i].x, nodes[i].y, nodes[i + 1].x, nodes[i + 1].y
+		local dx, dy = bx - ax, by - ay
+		local len2 = dx * dx + dy * dy
+		local t = len2 > 0 and math.max(0, math.min(1, ((x - ax) * dx + (y - ay) * dy) / len2)) or 0
+		local d = math.sqrt((x - ax - t * dx) ^ 2 + (y - ay - t * dy) ^ 2)
+		if d < bestD then best, bestD = i, d end
+	end
+	return best, bestD
+end
+
 -- Make the ghost of the path from a to b (none without both): the port's make. sketch: the mouse
 -- is moving the path, so no proposal, only the path as a line (tool.sketchEdges). A sketch plans
 -- the path without the ground and water (no bridges or tunnels): its line needs only the plan's
 -- dense nodes and their heights, which do not depend on them.
 local function makeGhost(a : ends.End, b : ends.End, sketch : boolean) : ghosts.Made
 	local g : ghosts.Made = {}
-	tool.sketchEdges, tool.pending = nil, nil
+	tool.sketchEdges, tool.pending, tool.nearest = nil, nil, nil
 	-- (a path's line stays until the next ghost of it is read out; a sketch has none)
 	if a == nil or b == nil then tool.line = nil; return g end
 	-- bridges and tunnels where the track is far off the ground: their types first (without them,
@@ -309,15 +326,21 @@ local function makeGhost(a : ends.End, b : ends.End, sketch : boolean) : ghosts.
 		if okC then g.cleared = hs else say("ghost: cannot clear the buildings: " .. tostring(err)) end
 	end
 	tool.pending = { key = tool.ghostKey, plan = plan, pieceOf = pieceOf as {integer : integer} }
+	tool.nearest = function(x : number, y : number) : integer, number return nearestPiece(nodes, x, y) end
+	-- our own account of the track: said when it is made settled, and logged with a refusal of it
+	local account : {string} = {}
+	account[#account + 1] = string.format("path %s: from %s (%.1f, %.1f) leaving %.2f deg, to %s (%.1f, %.1f) arriving %.2f deg, %d pieces, %d merged runs, grade %+.1f ‰ to %+.1f ‰",
+		plan.info, ends.name(a), a.x, a.y, math.deg(nodes[1].heading), ends.name(b), b.x, b.y, math.deg(nodes[#nodes].heading), #nodes - 1, #runs, grades[1] * 1000, grades[#grades] * 1000)
+	if g.cleared ~= nil then account[#account + 1] = string.format("%d town building%s on its footprint (within %.1f m)", #g.cleared, #g.cleared > 1 and "s" or "", HOUSE_REACH) end
+	for _, c in ipairs((crossed or {}) as {crossings.Crossing}) do
+		account[#account + 1] = string.format("%s %d%s crossed at (%.1f, %.1f, %.1f): %s", c.street.track and "track" or "road", c.street.edge,
+			c.street.joint ~= nil and string.format(" (with %d, across their joint %d)", c.street.edge1 == c.street.edge and c.street.edge0 or c.street.edge1, c.street.joint) or "",
+			c.x, c.y, c.z, c.why == nil and (c.street.track and "a diamond crossing" or "a level crossing") or ("not cut: " .. c.why))
+	end
+	g.account = account
 	if sess.phase == "done" then
-		say(string.format("tool: path %s: from %s (%.1f, %.1f) leaving %.2f deg, to %s (%.1f, %.1f) arriving %.2f deg, %d pieces, %d merged runs, grade %+.1f ‰ to %+.1f ‰",
-			plan.info, ends.name(a), a.x, a.y, math.deg(nodes[1].heading), ends.name(b), b.x, b.y, math.deg(nodes[#nodes].heading), #nodes - 1, #runs, grades[1] * 1000, grades[#grades] * 1000))
-		if g.cleared ~= nil then say(string.format("ghost: %d town building%s on its footprint (within %.1f m)", #g.cleared, #g.cleared > 1 and "s" or "", HOUSE_REACH)) end
-		for _, c in ipairs((crossed or {}) as {crossings.Crossing}) do
-			say(string.format("ghost: %s %d%s crossed at (%.1f, %.1f, %.1f): %s", c.street.track and "track" or "road", c.street.edge,
-				c.street.joint ~= nil and string.format(" (with %d, across their joint %d)", c.street.edge1 == c.street.edge and c.street.edge0 or c.street.edge1, c.street.joint) or "",
-				c.x, c.y, c.z, c.why == nil and (c.street.track and "a diamond crossing" or "a level crossing") or ("not cut: " .. c.why)))
-		end
+		say("tool: " .. account[1])
+		for i = 2, #account do say("ghost: " .. account[i]) end
 	end
 	return g
 end
@@ -346,38 +369,112 @@ local function entityKind(e : integer) : string
 		if is(CT.FIELD) then return "field " .. tostring(e) end
 		if is(CT.CONSTRUCTION) then return "construction " .. tostring(e) end
 		if is(CT.SUBCONSTRUCTION) then return "subconstruction " .. tostring(e) end
-		return "other " .. tostring(e)
+		-- (none of those: say which components it has, to tell what it is)
+		local has : {string} = {}
+		for _, name in ipairs({ "AIRCRAFT", "ANIMAL", "BASE_PARALLEL_STRIP", "EDGE_OBJECT", "FIELD", "STATION", "STATION_GROUP", "TOWN", "INDUSTRY",
+			"TRAIN", "VEHICLE_DEPOT", "BOUNDING_VOLUME", "CONSTRUCTION", "SUBCONSTRUCTION", "WAREHOUSE", "RAILROAD_CROSSING", "BRIDGE",
+			"LAND_VEHICLE", "SHIP", "NAME", "PLAYER_OWNED", "TRANSPORT_NETWORK", "MODEL_INSTANCE_LIST", "STOCK_LIST", "SIGNAL_LIST", "TERRAIN" }) do
+			local okc, hit = pcall(function() : boolean return is((CT as {string : any})[name]) end)
+			if okc and hit then has[#has + 1] = name end
+		end
+		return "other " .. tostring(e) .. " [" .. table.concat(has, ",") .. "]"
 	end)
 	return ok and k or ("? " .. tostring(e))
 end
 
--- What the game says about a proposal it refuses, for the log, on one line: its errors, and what it
--- runs into and removes, by kind.
-local function refusalSummary(data : ProposalData) : string
-	local ok, s = pcall(function() : string
-		local p : {string} = { "cost " .. tostring(data.costs) }
+-- Where entity e is (x, y), for the log: an edge at the midpoint of its nodes, a node, a town
+-- building or construction at its construction's position; nil for anything else or when gone.
+local function entityXY(e : integer) : number, number
+	local ok, x, y = pcall(function() : number, number
+		if e == nil or e < 0 or not api.engine.entityExists(e) then return nil, nil end
+		local CT = api.type.ComponentType
+		local function nodeAt(n : integer) : Vec3f
+			local bn = api.engine.getComponent(n, CT.BASE_NODE) as Engine.Component.BaseNode
+			return bn ~= nil and bn.position or nil
+		end
+		local be = api.engine.getComponent(e, CT.BASE_EDGE) as Engine.Component.BaseEdge
+		if be ~= nil then
+			local p0, p1 = nodeAt(be.node0), nodeAt(be.node1)
+			if p0 == nil or p1 == nil then return nil, nil end
+			return (p0.x + p1.x) / 2, (p0.y + p1.y) / 2
+		end
+		local p = nodeAt(e)
+		if p ~= nil then return p.x, p.y end
+		local con = e
+		local tb = api.engine.getComponent(e, CT.TOWN_BUILDING) as Engine.Component.TownBuilding
+		if tb ~= nil then con = tb.construction as integer end
+		local c = con ~= nil and con >= 0 and api.engine.getComponent(con, CT.CONSTRUCTION) as Engine.Component.Construction or nil
+		if c == nil then
+			-- anything else with a box (what the game removes by itself): the box's centre
+			local bv = api.engine.getComponent(e, CT.BOUNDING_VOLUME) as Engine.Component.BoundingVolume
+			if bv == nil or bv.bbox == nil then return nil, nil end
+			return (bv.bbox.min.x + bv.bbox.max.x) / 2, (bv.bbox.min.y + bv.bbox.max.y) / 2
+		end
+		local t = c.transf:getTransl()
+		return t.x, t.y
+	end)
+	if ok then return x, y end
+	return nil, nil
+end
+
+-- One line about an entity the game names in a refusal: what it is, where, and our nearest piece
+-- (near: the ghost's lookup as it was when the check came).
+local function entityLine(label : string, e : integer, suffix : string, near : function(number, number) : integer, number) : string
+	local s = label .. " " .. entityKind(e) .. (suffix or "")
+	-- (its box, when it has one: a big box's centre says little)
+	local okB, box = pcall(function() : string
+		if e == nil or e < 0 or not api.engine.entityExists(e) then return nil end
+		local bv = api.engine.getComponent(e, api.type.ComponentType.BOUNDING_VOLUME) as Engine.Component.BoundingVolume
+		if bv == nil or bv.bbox == nil then return nil end
+		local a, b = bv.bbox.min, bv.bbox.max
+		return string.format(" box (%.1f, %.1f)-(%.1f, %.1f) z %.1f..%.1f", a.x, a.y, b.x, b.y, a.z, b.z)
+	end)
+	if okB and box ~= nil then s = s .. box end
+	local x, y = entityXY(e)
+	if x == nil then return s end
+	s = s .. string.format(" at (%.1f, %.1f)", x, y)
+	if near ~= nil then
+		local i, d = near(x, y)
+		if i ~= nil then s = s .. string.format("; nearest piece %d, %.1f m", i, d) end
+	end
+	return s
+end
+
+-- Everything the game says about a proposal it refuses, beyond its cost and critical, as log lines:
+-- each non-empty message list, then each entity it names with its position and our nearest piece.
+local function refusalLines(data : ProposalData, near : function(number, number) : integer, number) : {string}
+	local ok, lines = pcall(function() : {string}
+		local out : {string} = {}
 		local es = data.errorState
 		if es ~= nil then
-			p[#p + 1] = "critical " .. tostring(es.critical)
-			p[#p + 1] = "msgs [" .. table.concat(es.messages or {}, ", ") .. "]"
-			p[#p + 1] = "warns [" .. table.concat(es.warnings or {}, ", ") .. "]"
-			p[#p + 1] = "infos [" .. table.concat(es.infos or {}, ", ") .. "]"
+			local function list(name : string, l : {string})
+				if l ~= nil and #l > 0 then out[#out + 1] = name .. ": " .. table.concat(l, ", ") end
+			end
+			list("messages", es.messages)
+			list("warnings", es.warnings)
+			list("infos", es.infos)
 		end
 		local ci = data.collisionInfo
 		if ci ~= nil then
-			local cols : {string} = {}
-			for _, ed in ipairs(ci.collisionEntities or {}) do cols[#cols + 1] = entityKind(ed.entity) end
-			p[#p + 1] = "collisions [" .. table.concat(cols, ", ") .. "]"
-			local bs : {string} = {}
-			for _, e in ipairs(ci.buildingEntities or {}) do bs[#bs + 1] = entityKind(e) end
-			p[#p + 1] = "buildings [" .. table.concat(bs, ", ") .. "]"
-			local ar : {string} = {}
-			for e, ms in pairs(ci.autoRemovalEntity2models or {}) do ar[#ar + 1] = entityKind(e) .. " x" .. tostring(#ms) end
-			p[#p + 1] = "autoRemoval [" .. table.concat(ar, ", ") .. "]"
+			for _, ed in ipairs(ci.collisionEntities or {}) do out[#out + 1] = entityLine("collision", ed.entity, nil, near) end
+			for _, e in ipairs(ci.buildingEntities or {}) do out[#out + 1] = entityLine("building", e, nil, near) end
+			for e, ms in pairs(ci.autoRemovalEntity2models or {}) do out[#out + 1] = entityLine("auto-removal", e, " x" .. tostring(#ms), near) end
+			for _, e in ipairs(ci.removableModules or {}) do out[#out + 1] = entityLine("removable module", e, nil, near) end
 		end
-		return table.concat(p, "; ")
+		local add = data.toAddData
+		if add ~= nil and #add > 0 then out[#out + 1] = "toAddData: " .. tostring(#add) end
+		-- the game names one entity once per piece it meets: one line, counted
+		local counts, order : {string : integer}, {string} = {}, {}
+		for _, l in ipairs(out) do
+			if counts[l] == nil then order[#order + 1] = l end
+			counts[l] = (counts[l] or 0) + 1
+		end
+		local merged : {string} = {}
+		for _, l in ipairs(order) do merged[#merged + 1] = counts[l] > 1 and (l .. " (x" .. tostring(counts[l]) .. ")") or l end
+		return merged
 	end)
-	return ok and s or ("summary failed: " .. tostring(s))
+	if ok then return lines as {string} end
+	return { "detail failed: " .. tostring(lines) }
 end
 
 -- The context of a dry run or a build, for the player's company. gather: the game gathers the town
@@ -392,10 +489,11 @@ local function makeContext(gather : boolean) : Context
 end
 
 -- The game's check of a proposal (from the viewer or a dry run), boiled down for tg_proposal.
-local function checkOf(data : ProposalData) : ghosts.Check
+local function checkOf(data : ProposalData, near : function(number, number) : integer, number) : ghosts.Check
 	local es, ci = data.errorState, data.collisionInfo
+	near = near or tool.nearest
 	local c : ghosts.Check = { cost = data.costs, critical = es ~= nil and es.critical == true, hits = { collides = {}, buildings = {} },
-		detail = function() : string return refusalSummary(data) end }
+		detail = function() : {string} return refusalLines(data, near) end }
 	if es ~= nil then
 		c.messages, c.warnings = {}, {}
 		for _, m in ipairs(es.messages or {}) do c.messages[#c.messages + 1] = m end
@@ -430,7 +528,7 @@ port = {
 		end)
 		if not ok then return nil, "the game could not check it (" .. tostring(d) .. ")" end
 		if d == nil then return nil, "the game could not check it" end
-		return checkOf(d as ProposalData), nil
+		return checkOf(d as ProposalData, nil), nil
 	end,
 	setCleared = function(p : SimpleProposal, list : {integer}) : boolean, string
 		local ok, err = pcall(function() : string p.constructionsToRemove = list; return nil end)
@@ -463,6 +561,7 @@ end
 -- its track without the town buildings it clears itself, the game gathering them, as its own
 -- builder does: a build that names several houses in constructionsToRemove kills the game (NOTES.md).
 local function build(p : SimpleProposal, info : string, cost : integer)
+	local near, account = tool.nearest, G.ghost.account -- (the ghost is gone when the game answers)
 	local ok, err : boolean, any = pcall(function()
 		local q = layouts.gathering(p)
 		if q == nil then error("the proposal to build came out short", 0) end
@@ -474,7 +573,7 @@ local function build(p : SimpleProposal, info : string, cost : integer)
 				say(string.format("build: built %s for %s", info or "?", tostring(rd ~= nil and rd.costs or cost)))
 			else
 				tool.buildMsg = "The last build failed."
-				say("build: refused: " .. (rd ~= nil and refusalSummary(rd) or "no data"))
+				if rd ~= nil then ghosts.logRefusal(G, "build", checkOf(rd, near), nil, account) else say("build: refused: no data") end
 			end
 		end)
 	end)
@@ -1337,7 +1436,7 @@ local function toolAction(abort : function()) : TreeNodeId
 			simpleProposal = gh.proposal,
 			controlPointInfo = cp,
 			onCreateProposalData = function(data : ProposalData, _p : Proposal)
-				if data == nil or not ghosts.onData(G, gk, checkOf(data)) then return end
+				if data == nil or not ghosts.onData(G, gk, checkOf(data, nil)) then return end
 				-- (the readout: the ghost's own first check gives its curve speeds)
 				local l = tool.pending
 				if l ~= nil and l.key == G.ghost.key then
