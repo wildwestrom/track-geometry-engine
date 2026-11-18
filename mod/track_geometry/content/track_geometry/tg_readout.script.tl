@@ -3,9 +3,9 @@
 -- ghost's proposal data by the GUI. No game API here, so test/readout_test.lua runs it outside the
 -- game.
 
-local geometry = require("westrom_track_geometry::/track_geometry/tg_geometry.script.tl")
-local alignment = require("westrom_track_geometry::/track_geometry/tg_alignment.script.tl")
-local profiles = require("westrom_track_geometry::/track_geometry/tg_profile.script.tl")
+local geometry = require("track_geometry_tool::/track_geometry/tg_geometry.script.tl")
+local alignment = require("track_geometry_tool::/track_geometry/tg_alignment.script.tl")
+local profiles = require("track_geometry_tool::/track_geometry/tg_profile.script.tl")
 
 -- One curve of the path (entry spiral, arc, exit spiral) by chainage.
 local record Curve

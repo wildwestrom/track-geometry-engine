@@ -10,9 +10,9 @@
 -- path before the dragged turn is read at the very same points again), and dropped with the cells.
 -- Each lookup may end the ghost job's slice (tg_timing).
 
-local crossings = require("westrom_track_geometry::/track_geometry/tg_crossings.script.tl")
-local timing = require("westrom_track_geometry::/track_geometry/tg_timing.script.tl")
-local world = require("westrom_track_geometry::/track_geometry/tg_world.script.tl")
+local crossings = require("track_geometry_tool::/track_geometry/tg_crossings.script.tl")
+local timing = require("track_geometry_tool::/track_geometry/tg_timing.script.tl")
+local world = require("track_geometry_tool::/track_geometry/tg_world.script.tl")
 
 local record Cell
 	houses : {integer : {number}}

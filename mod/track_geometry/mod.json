@@ -1,5 +1,5 @@
 {
-    "modId": "westrom_track_geometry",
+    "modId": "track_geometry_tool",
     "revision": 1,
     "severityAdd": "None",
     "severityRemove": "Warning",
@@ -9,7 +9,7 @@
     "incompatibilities": null,
     "params": null,
     "preRunScript": {
-        "fileName": "westrom_track_geometry::/mod.script@preRunFn"
+        "fileName": "track_geometry_tool::/mod.script@preRunFn"
     },
     "runScript": {
         "fileName": ""

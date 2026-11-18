@@ -5,7 +5,7 @@
 -- new track piece too.
 -- No game API here, so test/crossings_test.lua runs it outside the game.
 
-local ends = require("westrom_track_geometry::/track_geometry/tg_ends.script.tl")
+local ends = require("track_geometry_tool::/track_geometry/tg_ends.script.tl")
 
 -- An existing street edge, or track edge (track), as tg_world reads it: its curve and nodes (a
 -- Piece), and what bars cutting it. Or a road of two such pieces taken as one across the joint

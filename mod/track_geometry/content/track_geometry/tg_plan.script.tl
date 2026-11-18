@@ -9,13 +9,13 @@
 -- them on the dense nodes. The ground and the water are handed in as functions, and there is no
 -- game API here, so test/plan_test.lua runs it outside the game.
 
-local geometry = require("westrom_track_geometry::/track_geometry/tg_geometry.script.tl")
-local alignment = require("westrom_track_geometry::/track_geometry/tg_alignment.script.tl")
-local ends = require("westrom_track_geometry::/track_geometry/tg_ends.script.tl")
-local edits = require("westrom_track_geometry::/track_geometry/tg_edit.script.tl")
-local profiles = require("westrom_track_geometry::/track_geometry/tg_profile.script.tl")
-local structures = require("westrom_track_geometry::/track_geometry/tg_structures.script.tl")
-local readout = require("westrom_track_geometry::/track_geometry/tg_readout.script.tl")
+local geometry = require("track_geometry_tool::/track_geometry/tg_geometry.script.tl")
+local alignment = require("track_geometry_tool::/track_geometry/tg_alignment.script.tl")
+local ends = require("track_geometry_tool::/track_geometry/tg_ends.script.tl")
+local edits = require("track_geometry_tool::/track_geometry/tg_edit.script.tl")
+local profiles = require("track_geometry_tool::/track_geometry/tg_profile.script.tl")
+local structures = require("track_geometry_tool::/track_geometry/tg_structures.script.tl")
+local readout = require("track_geometry_tool::/track_geometry/tg_readout.script.tl")
 
 -- The path as nodes, with the height at each.
 local record Track

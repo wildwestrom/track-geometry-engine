@@ -13,7 +13,7 @@
 -- there.
 -- No game API here, so test/ends_test.lua runs it outside the game.
 
-local geometry = require("westrom_track_geometry::/track_geometry/tg_geometry.script.tl")
+local geometry = require("track_geometry_tool::/track_geometry/tg_geometry.script.tl")
 
 -- What an end of the alignment is: "track", a free track end, where a line of track stops (a node
 -- with a single track piece); "node", an existing node with track through it or a junction (the

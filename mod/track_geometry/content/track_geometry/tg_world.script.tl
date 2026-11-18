@@ -10,11 +10,11 @@
 -- (asked again next time) and is logged once per template.
 -- All game API: there is no offline test. The choice of end to snap to is tg_ends.snap.
 
-local ends = require("westrom_track_geometry::/track_geometry/tg_ends.script.tl")
-local structures = require("westrom_track_geometry::/track_geometry/tg_structures.script.tl")
-local crossings = require("westrom_track_geometry::/track_geometry/tg_crossings.script.tl")
+local ends = require("track_geometry_tool::/track_geometry/tg_ends.script.tl")
+local structures = require("track_geometry_tool::/track_geometry/tg_structures.script.tl")
+local crossings = require("track_geometry_tool::/track_geometry/tg_crossings.script.tl")
 
-local TAG = "[westrom_track_geometry] "
+local TAG = "[track_geometry_tool] "
 
 -- What the tool needs to know about a track template.
 local record TrackType

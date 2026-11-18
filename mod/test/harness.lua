@@ -4,7 +4,7 @@ dofile("tlconfig.lua") -- Windows module-name mapping; a no-op elsewhere
 tl.loader()
 package.path = ".tlpath/?.tl;" .. package.path
 local H = { failures = 0 }
-function H.mod(name) return require("westrom_track_geometry::/track_geometry/" .. name .. ".script.tl") end
+function H.mod(name) return require("track_geometry_tool::/track_geometry/" .. name .. ".script.tl") end
 function H.check(ok, what)
 	print((ok and "ok   " or "FAIL ") .. what)
 	if not ok then H.failures = H.failures + 1 end

@@ -4,7 +4,7 @@
 # "Reloading Lua StateProvider"), filtered to the mod's tag and error lines, Texture errors
 # dropped, cut to 300 chars, last N=40 shown with line numbers.
 # Each regex given replaces the default filter (lines matching any of them are kept),
-# e.g. tflog.ps1 -N 200 'westrom_track_geometry' '\[PerfMon\] v=1'
+# e.g. tflog.ps1 -N 200 'track_geometry_tool' '\[PerfMon\] v=1'
 # -All  search the whole log instead of since the last load.
 [CmdletBinding(PositionalBinding = $false)]
 param([switch]$All, [int]$N = 40, [string]$SteamId = "75515556",
@@ -22,7 +22,7 @@ if (-not $All) {
 		if ($lines[$i] -match 'preRunFn: mod loaded|Reloading Lua StateProvider') { $start = $i; break }
 	}
 }
-$pat = if ($Patterns) { ($Patterns | ForEach-Object { "(?:$_)" }) -join '|' } else { 'westrom_track_geometry|[Ee]rror|stack traceback' }
+$pat = if ($Patterns) { ($Patterns | ForEach-Object { "(?:$_)" }) -join '|' } else { 'track_geometry_tool|[Ee]rror|stack traceback' }
 "== $log (from line $($start + 1), modified $((Get-Item $log).LastWriteTime.ToString('HH:mm:ss')))"
 $hits = for ($i = $start; $i -lt $lines.Count; $i++) {
 	$l = $lines[$i]

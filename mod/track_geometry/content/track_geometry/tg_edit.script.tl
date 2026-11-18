@@ -41,10 +41,10 @@
 -- fields are its own: callers read it through the functions below (rev and hrev excepted).
 -- No game API here, so test/edit_test.lua runs it outside the game.
 
-local geometry = require("westrom_track_geometry::/track_geometry/tg_geometry.script.tl")
-local alignment = require("westrom_track_geometry::/track_geometry/tg_alignment.script.tl")
-local ends = require("westrom_track_geometry::/track_geometry/tg_ends.script.tl")
-local profiles = require("westrom_track_geometry::/track_geometry/tg_profile.script.tl")
+local geometry = require("track_geometry_tool::/track_geometry/tg_geometry.script.tl")
+local alignment = require("track_geometry_tool::/track_geometry/tg_alignment.script.tl")
+local ends = require("track_geometry_tool::/track_geometry/tg_ends.script.tl")
+local profiles = require("track_geometry_tool::/track_geometry/tg_profile.script.tl")
 
 -- A turn (Lean: PI): where it is, and the size of its curve, attached to it.
 local record Turn

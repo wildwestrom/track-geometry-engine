@@ -15,20 +15,20 @@ local engine_react_util = ug_require "::/gui/main/engine_react_util.tl" as Engin
 local construction_react_util = ug_require "::/gui/construction/construction_react_util.tl" as ConstructionReactUtil
 local dialog_react_util = ug_require "::/gui/menu/dialog_react_util.tl" as DialogReactUtil
 local mod_entry_point = ug_require "::/gui/main/mod_entry_point.tl" as ModEntryPoint
-local ends = require("westrom_track_geometry::/track_geometry/tg_ends.script.tl")
-local edits = require("westrom_track_geometry::/track_geometry/tg_edit.script.tl")
-local gizmos = require("westrom_track_geometry::/track_geometry/tg_gizmos.script.tl")
-local proposals = require("westrom_track_geometry::/track_geometry/tg_proposal.script.tl")
-local crossings = require("westrom_track_geometry::/track_geometry/tg_crossings.script.tl")
-local readout = require("westrom_track_geometry::/track_geometry/tg_readout.script.tl")
-local alignment = require("westrom_track_geometry::/track_geometry/tg_alignment.script.tl")
-local plans = require("westrom_track_geometry::/track_geometry/tg_plan.script.tl")
-local sessions = require("westrom_track_geometry::/track_geometry/tg_session.script.tl")
-local world = require("westrom_track_geometry::/track_geometry/tg_world.script.tl")
-local timing = require("westrom_track_geometry::/track_geometry/tg_timing.script.tl")
-local kept = require("westrom_track_geometry::/track_geometry/tg_kept.script.tl")
+local ends = require("track_geometry_tool::/track_geometry/tg_ends.script.tl")
+local edits = require("track_geometry_tool::/track_geometry/tg_edit.script.tl")
+local gizmos = require("track_geometry_tool::/track_geometry/tg_gizmos.script.tl")
+local proposals = require("track_geometry_tool::/track_geometry/tg_proposal.script.tl")
+local crossings = require("track_geometry_tool::/track_geometry/tg_crossings.script.tl")
+local readout = require("track_geometry_tool::/track_geometry/tg_readout.script.tl")
+local alignment = require("track_geometry_tool::/track_geometry/tg_alignment.script.tl")
+local plans = require("track_geometry_tool::/track_geometry/tg_plan.script.tl")
+local sessions = require("track_geometry_tool::/track_geometry/tg_session.script.tl")
+local world = require("track_geometry_tool::/track_geometry/tg_world.script.tl")
+local timing = require("track_geometry_tool::/track_geometry/tg_timing.script.tl")
+local kept = require("track_geometry_tool::/track_geometry/tg_kept.script.tl")
 
-local TAG = "[westrom_track_geometry] "
+local TAG = "[track_geometry_tool] "
 local GHOST_TICKS = 4 -- while dragging, remake the ghost at most every this many tool ticks (50 ms)...
 local GHOST_WAIT = 20 -- ...and only once the game has checked the last one, or this many ticks have passed
 local GHOST_REST = 1.0 -- ...and once the game has run smoothly this many times as long as the last one stalled it
@@ -1285,7 +1285,7 @@ local BADGE_SLOW = { 230 / 255, 109 / 255, 149 / 255, 0.95 } -- the slowest curv
 local BADGE_STEEP = { 0.8, 0.12, 0.12, 0.95 } -- a span too steep (past the grade limit)
 local BADGE_TEXT = { 1, 1, 1, 1 }
 local ICONS = "::/gui/construction/build_control/"
-local RADIUS_ICON = "westrom_track_geometry::/gui/icons/tg_radius.tga" -- our own: the game has a curved road icon, not a track one
+local RADIUS_ICON = "track_geometry_tool::/gui/icons/tg_radius.tga" -- our own: the game has a curved road icon, not a track one
 local BADGE_W = 90 -- a badge's size on the screen, about (px): width, and height with three rows, two or one
 local BADGE_H3 = 72
 local BADGE_H2 = 50
@@ -1711,7 +1711,7 @@ local function toolAction(abort : function()) : TreeNodeId
 				end
 			end,
 			entityForRefundableContext = api.engine.util.getPlayer(),
-			proposalId = "westrom_track_geometry_ghost_" .. gk,
+			proposalId = "track_geometry_tool_ghost_" .. gk,
 		}
 	end
 	-- no ghost: an empty proposal holds the control point
@@ -1719,7 +1719,7 @@ local function toolAction(abort : function()) : TreeNodeId
 		children[#children + 1] = builtin.ProposalViewer{
 			simpleProposal = api.type.SimpleProposal.new(),
 			controlPointInfo = cp,
-			proposalId = "westrom_track_geometry_cursor",
+			proposalId = "track_geometry_tool_cursor",
 		}
 	end
 	local edges = fresh and sess.phase == "done" and guard("gizmo", gizmoEdges) or {}

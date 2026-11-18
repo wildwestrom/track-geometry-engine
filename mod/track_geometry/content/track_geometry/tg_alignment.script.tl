@@ -6,7 +6,7 @@
 -- is one piece from break to break (step = math.huge), a curve as many as maxTurn asks for.
 -- No game API here, so test/alignment_test.lua runs it outside the game.
 
-local geometry = require("westrom_track_geometry::/track_geometry/tg_geometry.script.tl")
+local geometry = require("track_geometry_tool::/track_geometry/tg_geometry.script.tl")
 
 local record Sample
 	x : number

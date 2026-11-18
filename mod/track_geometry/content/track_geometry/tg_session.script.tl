@@ -18,9 +18,9 @@
 -- What only the game knows comes in as a World with each event. No game API here, so
 -- test/session_test.lua runs it outside the game.
 
-local ends = require("westrom_track_geometry::/track_geometry/tg_ends.script.tl")
-local edits = require("westrom_track_geometry::/track_geometry/tg_edit.script.tl")
-local profiles = require("westrom_track_geometry::/track_geometry/tg_profile.script.tl")
+local ends = require("track_geometry_tool::/track_geometry/tg_ends.script.tl")
+local edits = require("track_geometry_tool::/track_geometry/tg_edit.script.tl")
+local profiles = require("track_geometry_tool::/track_geometry/tg_profile.script.tl")
 
 local enum Phase
 	"from" -- pick the start

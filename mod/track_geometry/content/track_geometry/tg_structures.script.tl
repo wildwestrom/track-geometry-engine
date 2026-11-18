@@ -12,7 +12,7 @@
 -- No game API here (the ground and water come in as functions), so test/structures_test.lua runs it
 -- outside the game.
 
-local alignment = require("westrom_track_geometry::/track_geometry/tg_alignment.script.tl")
+local alignment = require("track_geometry_tool::/track_geometry/tg_alignment.script.tl")
 
 local BRIDGE_MIN = 12.0 -- clearance above the ground that makes a bridge (m)
 local TUNNEL_MIN = 15.0 -- depth below the ground that makes a tunnel (m)

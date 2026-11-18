@@ -22,10 +22,10 @@
 -- copies and parts and the street's parts belong to none. And the crossings it found, each with
 -- why it is not cut, if it is not.
 
-local alignment = require("westrom_track_geometry::/track_geometry/tg_alignment.script.tl")
-local ends = require("westrom_track_geometry::/track_geometry/tg_ends.script.tl")
-local crossings = require("westrom_track_geometry::/track_geometry/tg_crossings.script.tl")
-local timing = require("westrom_track_geometry::/track_geometry/tg_timing.script.tl")
+local alignment = require("track_geometry_tool::/track_geometry/tg_alignment.script.tl")
+local ends = require("track_geometry_tool::/track_geometry/tg_ends.script.tl")
+local crossings = require("track_geometry_tool::/track_geometry/tg_crossings.script.tl")
+local timing = require("track_geometry_tool::/track_geometry/tg_timing.script.tl")
 
 local record Options
 	template : string -- track template name (the picked track entry)

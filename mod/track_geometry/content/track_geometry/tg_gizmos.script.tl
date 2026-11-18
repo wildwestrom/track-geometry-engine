@@ -11,10 +11,10 @@
 -- Widths and steps are in metres. The width is fixed (Network Toolkit's settings: 1.5, with the
 -- geometry 1 wide and 1 m steps); the circles' radius follows the grab radius.
 
-local edits = require("westrom_track_geometry::/track_geometry/tg_edit.script.tl")
-local geometry = require("westrom_track_geometry::/track_geometry/tg_geometry.script.tl")
-local profiles = require("westrom_track_geometry::/track_geometry/tg_profile.script.tl")
-local sessions = require("westrom_track_geometry::/track_geometry/tg_session.script.tl")
+local edits = require("track_geometry_tool::/track_geometry/tg_edit.script.tl")
+local geometry = require("track_geometry_tool::/track_geometry/tg_geometry.script.tl")
+local profiles = require("track_geometry_tool::/track_geometry/tg_profile.script.tl")
+local sessions = require("track_geometry_tool::/track_geometry/tg_session.script.tl")
 
 local enum ShapeKind
 	"line" -- a polyline through pts, drawn as one straight edge per pair of points
