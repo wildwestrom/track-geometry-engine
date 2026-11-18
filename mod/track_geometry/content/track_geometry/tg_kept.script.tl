@@ -25,7 +25,6 @@ local record KeptMod
 	cellsIn : function(x0 : number, y0 : number, x1 : number, y1 : number) : {Cell}
 	ground : function(x : number, y : number) : number
 	water : function(x : number, y : number) : boolean
-	counts : function() : integer, integer
 end
 
 local M : KeptMod = {}
@@ -39,11 +38,6 @@ local cellCount = 0
 local groundAt : {string : number} = {}
 local waterAt : {string : boolean} = {}
 local terrainCount = 0
-
--- How many cells and terrain points are kept.
-function M.counts() : integer, integer
-	return cellCount, terrainCount
-end
 
 function M.drop()
 	if cellCount > 0 then cells, cellCount = {}, 0 end

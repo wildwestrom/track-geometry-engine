@@ -88,7 +88,6 @@ end
 function M.make(nodes : {alignment.Sample}, o : Options) : SimpleProposal, {integer : integer}, string, {crossings.Crossing}
 	local n = #nodes
 	if n < 2 then return nil, nil, "the path is too short" end
-	timing.lapStart() -- (the stages' times: the "perf:" line)
 	local m = n - 1
 	local z = o.z
 	for i, nd in ipairs(nodes) do
@@ -99,11 +98,9 @@ function M.make(nodes : {alignment.Sample}, o : Options) : SimpleProposal, {inte
 			return nil, nil, "zero-length piece before node " .. i
 		end
 	end
-	timing.lap("checks")
 
 	local tplName = o.template
 	local template = api.res.streetTemplateRep.get(api.res.streetTemplateRep.find(tplName))
-	timing.lap("template")
 	local trackDistance = 0.0
 	pcall(function() trackDistance = (template as {string : any}).trackDistance as number or 0.0 end)
 	local owned : Engine.Component.PlayerOwned = nil
@@ -111,7 +108,6 @@ function M.make(nodes : {alignment.Sample}, o : Options) : SimpleProposal, {inte
 		owned = ((api.type as {string : any})["PlayerOwned"] as {string : function() : Engine.Component.PlayerOwned}).new()
 		owned.player = api.engine.util.getPlayer()
 	end)
-	timing.lap("owner")
 
 	-- Fill plain tables and assign them whole: reading a list field off the native proposal gives
 	-- a copy, so writing proposal.streetProposal.nodesToAdd[i] is lost and the proposal stays empty.
@@ -145,7 +141,6 @@ function M.make(nodes : {alignment.Sample}, o : Options) : SimpleProposal, {inte
 		for _, e in ipairs(st.pieces or { st.edge }) do free = free and not atEnds[e] end
 		if free then streets[#streets + 1] = st end
 	end
-	timing.lap("ends")
 	-- (plan piece i as the Hermite laid for it)
 	local function hermite(i : integer) : ends.Piece
 		local a, b = nodes[i], nodes[i + 1]
@@ -194,7 +189,6 @@ function M.make(nodes : {alignment.Sample}, o : Options) : SimpleProposal, {inte
 			end
 		end
 	end
-	timing.lap("crossings")
 	local streetParts = 0
 	for _, st in ipairs(crossed) do
 		table.sort(onStreet[st.edge], function(a : integer, b : integer) : boolean return level[a].v < level[b].v end)
@@ -224,7 +218,6 @@ function M.make(nodes : {alignment.Sample}, o : Options) : SimpleProposal, {inte
 		ne.comp.position = api.type.Vec3f.new(c.x, c.y, c.z)
 		nodesToAdd[#nodesToAdd + 1] = ne
 	end
-	timing.lap("nodes")
 	local function v3(q : ends.Point) : Vec3f return api.type.Vec3f.new(q.x, q.y, q.z) end
 	for i = 1, m do
 		timing.slice()
@@ -257,7 +250,6 @@ function M.make(nodes : {alignment.Sample}, o : Options) : SimpleProposal, {inte
 			pieceOf[e.entity] = i
 		end
 	end
-	timing.lap("pieces")
 	-- (a copy or part that runs on through the next joints: its far end moves out to the run's)
 	local runOf : {string : ends.Run} = {}
 	for _, r in ipairs(o.runs or {}) do runOf[r.first.edge .. (r.fromStart and "+" or "-")] = r end
@@ -300,7 +292,6 @@ function M.make(nodes : {alignment.Sample}, o : Options) : SimpleProposal, {inte
 		end
 		removed[#removed + 1] = pc.edge
 	end
-	timing.lap("copies and cuts")
 	-- the crossed streets' parts, and what names the street pieces at their nodes
 	local remap : {integer : {integer : integer}} = {} -- street node -> old piece -> its part there
 	local joints : {integer} = {} -- nodes that go: the joints of runs and of roads taken as one
@@ -367,7 +358,6 @@ function M.make(nodes : {alignment.Sample}, o : Options) : SimpleProposal, {inte
 		-- (its lane rules go with it: removing them as well trips the game, as Move It found)
 		if st.joint ~= nil then joints[#joints + 1] = st.joint end
 	end
-	timing.lap("crossed streets")
 	local configsGone : {integer} = {}
 	local configs : {Proposal.BaseNodeLaneConnectionAndEntity} = {}
 	local remapped : {integer} = {}
@@ -398,11 +388,8 @@ function M.make(nodes : {alignment.Sample}, o : Options) : SimpleProposal, {inte
 		for _, old in ipairs(r.edges) do removed[#removed + 1] = old end
 		for _, j in ipairs(r.nodes) do joints[#joints + 1] = j end
 	end
-	timing.lap("lane rules")
 	timing.slice()
-	timing.lap("(slice)")
 	local proposal = api.type.SimpleProposal.new()
-	timing.lap("new proposal")
 	proposal.streetProposal.nodesToAdd = nodesToAdd
 	proposal.streetProposal.edgesToAdd = edgesToAdd
 	if #removed > 0 then proposal.streetProposal.edgesToRemove = removed end
@@ -412,7 +399,6 @@ function M.make(nodes : {alignment.Sample}, o : Options) : SimpleProposal, {inte
 		proposal.streetProposal.nodeConfigsToAdd = configs
 	end
 	if next(crossingTypeAt) ~= nil then proposal.streetProposal.node2rcType = crossingTypeAt end
-	timing.lap("handing over")
 	-- every plan piece, with the edges the map gives it, and the k copies and parts
 	local mapped, others = {} as {integer : integer}, 0
 	for _, i in pairs(pieceOf) do mapped[i] = (mapped[i] or 0) + 1 end
@@ -429,9 +415,7 @@ function M.make(nodes : {alignment.Sample}, o : Options) : SimpleProposal, {inte
 		return nil, nil, string.format("the proposal holds %d of %d pieces and %d of %d copies and street parts", pieces, m, others, k + streetParts), found
 	end
 	-- (read back: a list the game did not take leaves the proposal short)
-	timing.lap("counting")
 	local held = #proposal.streetProposal.edgesToAdd
-	timing.lap("reading back")
 	if held ~= #edgesToAdd then return nil, nil, string.format("the proposal holds %d of %d edges", held, #edgesToAdd), found end
 	return proposal, pieceOf, nil, found
 end
