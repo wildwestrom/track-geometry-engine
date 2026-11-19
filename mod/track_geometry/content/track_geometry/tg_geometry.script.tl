@@ -29,6 +29,7 @@ local record Segment
 	sweep : number -- arc central angle
 	len : number -- transition length
 	opSpeed : number -- design operating speed (m/s)
+	corner : integer -- the corner (index in the path's points) a curve piece belongs to; nil on straights
 end
 
 local record DesignParams
@@ -466,7 +467,10 @@ function M.buildPath(pts : {Vec}, dp : DesignParams, overrides : {integer : numb
 		if layout ~= nil then
 			local sol = M.solveCorner(b, layout.budget, dp, layout.geometry)
 			out[#out + 1] = { kind = "straight", p = cursor, q = sol.entryPoint, opSpeed = straightSpeed }
-			for _, piece in ipairs(sol.pieces) do out[#out + 1] = piece end
+			for _, piece in ipairs(sol.pieces) do
+				piece.corner = i
+				out[#out + 1] = piece
+			end
 			cursor = sol.exitPoint
 		end
 	end

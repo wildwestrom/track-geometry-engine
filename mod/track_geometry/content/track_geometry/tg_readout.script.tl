@@ -13,6 +13,7 @@ local record Curve
 	s1 : number
 	sMid : number -- the middle of its arc
 	radius : number -- its arc's radius (m); nil with no arc
+	turn : integer -- the edit's turn it is the curve of (tg_edit's index)
 end
 
 -- A badge: where it goes and what it says. "curve": at a curve's arc middle, with its speed;
@@ -26,6 +27,7 @@ local record Badge
 	z : number
 	speed : number -- the game's slowest curve limit over the curve (m/s); nil while unknown
 	radius : number -- curves: the arc's radius (m); nil with no arc
+	turn : integer -- curves: the edit's turn it is the curve of (tg_edit's index)
 	grade : number -- rise over run at the badge
 	slowest : boolean -- the path's slowest curve
 	steep : boolean -- spans: too steep (past the grade limit at a node over it)
@@ -69,7 +71,7 @@ function M.curves(path : {geometry.Segment}) : {Curve}
 			if k == "straight" then
 				cur = nil
 			elseif k == "in" or (k == "arc" and prev ~= "in") then
-				cur = { s0 = s, s1 = s + len, sMid = s + len / 2 }
+				cur = { s0 = s, s1 = s + len, sMid = s + len / 2, turn = seg.corner }
 				out[#out + 1] = cur
 			end
 			if cur ~= nil then
@@ -112,7 +114,7 @@ function M.badges(nodes : {alignment.Sample}, z : {number}, speeds : {number}, c
 		local v = slowest(nodes, speeds, function(mid : number, sp : number) : boolean return mid >= c.s0 and mid <= c.s1 and sp < NO_LIMIT end)
 		if v ~= nil then slow = math.min(slow, v) end
 		local bd = badge("curve", nodes, z, gs, c.sMid, v)
-		bd.radius = c.radius
+		bd.radius, bd.turn = c.radius, c.turn
 		out[#out + 1] = bd
 	end
 	-- (only when there is a choice: one curve is the slowest of one)

@@ -63,4 +63,13 @@ for _, fx in ipairs(fixtures) do
 		fx.name, values, exact, worst, worst > 0 and (" (" .. worstWhat .. ")") or ""))
 end
 
+-- a path's curve pieces say which corner they are the curve of
+local cornerPath = G.buildPath({ G.vec(0, 0, 0), G.vec(1000, 0, 0), G.vec(1000, 1000, 0), G.vec(2000, 1000, 0) }, G.DEFAULT_PARAMS, {})
+local corners, straightsPlain = {}, true
+for _, seg in ipairs(cornerPath) do
+	if seg.kind == "straight" then straightsPlain = straightsPlain and seg.corner == nil
+	else corners[seg.corner or 0] = true end
+end
+check(straightsPlain and corners[2] and corners[3] and not corners[0], "corner: curve pieces carry their corner's index, straights none")
+
 H.done()

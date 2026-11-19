@@ -850,4 +850,35 @@ check(n == 1 and line:find("right click at tick", 1, true) ~= nil and line:find(
 	"back log: a back that comes too late after a right click is logged as an Esc, with the click's tick")
 check(lt.s.phase ~= "done", "back log: ...and it leaves editing, as an Esc does")
 
+------------------------------------------------------------------ a curve's badge selects it; its radius and speed
+local ct = editing()
+local ci = 2 -- (the pair of ends makes one corner, turn index 2)
+local function fakeProbe(speedAt, radiusFor)
+	return { top = function() return 100 / 3.6 end, speedAt = speedAt, radiusFor = radiusFor }
+end
+local game = fakeProbe(function(R) return R / 10 end, function(v) return v * 10 end)
+local silent = fakeProbe(function() return nil end, function() return nil end)
+check(S.curveSelection(ct.s, game) == nil and S.selectedTurnIndex(ct.s) == nil, "curve: none selected at first")
+check(#S.pickCurve(ct.s, 1) == 0 and #S.pickCurve(ct.s, 99) == 0 and S.selectedTurnIndex(ct.s) == nil, "curve: a badge with no curve behind it selects nothing")
+local picked = S.pickCurve(ct.s, ci)
+check(#picked == 1 and picked[1] == "openMode" and S.selectedTurnIndex(ct.s) == ci, "curve: a badge selects its turn and asks for the window")
+local sel = S.curveSelection(ct.s, game)
+check(sel ~= nil and sel.i == ci and sel.name == "Turn 1" and math.abs(sel.speed - sel.radius / 10) < 1e-9, "curve: the selection reads the radius and the game's speed on it")
+check(S.curveSelection(ct.s, silent).speed == nil, "curve: no speed when the game cannot say")
+
+S.setRadius(ct.s, 300)
+check(math.abs(S.curveSelection(ct.s, game).radius - 300) < 0.01, "curve: a radius is laid as asked")
+S.setSpeed(ct.s, 20, game) -- 20 m/s: 200 m by the made-up game
+check(math.abs(S.curveSelection(ct.s, game).radius - 200) < 0.01, "curve: a speed is laid as the radius the game gives it")
+S.setSpeed(ct.s, 50, game) -- over the track's 27.8 m/s: held to it
+check(math.abs(S.curveSelection(ct.s, game).radius - 277.78) < 0.01, "curve: a speed over the track's top speed is held to it")
+ct.s.editMsg = nil
+S.setSpeed(ct.s, 15, silent)
+check(math.abs(S.curveSelection(ct.s, game).radius - 277.78) < 0.01 and ct.s.editMsg ~= nil, "curve: with no speed from the game the curve stays, and the reason is given")
+S.setSpeed(ct.s, 0 / 0, game); S.setSpeed(ct.s, -3, game)
+check(math.abs(S.curveSelection(ct.s, game).radius - 277.78) < 0.01, "curve: a speed that is no speed changes nothing")
+
+S.setMode(ct.s, "vertical")
+check(#S.pickCurve(ct.s, ci) == 0, "curve: no picking while the profile is edited")
+
 H.done()

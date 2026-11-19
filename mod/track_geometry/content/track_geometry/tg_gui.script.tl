@@ -26,6 +26,7 @@ local plans = require("track_geometry_tool::/track_geometry/tg_plan.script.tl")
 local alignment = require("track_geometry_tool::/track_geometry/tg_alignment.script.tl")
 local sessions = require("track_geometry_tool::/track_geometry/tg_session.script.tl")
 local world = require("track_geometry_tool::/track_geometry/tg_world.script.tl")
+local speedprobes = require("track_geometry_tool::/track_geometry/tg_speedprobe.script.tl")
 
 local TAG = "[track_geometry_tool] "
 local HOUSE_REACH = 3.0 -- a town building this close to the track's centre line is in its way (m; its box, seen from above)
@@ -698,6 +699,7 @@ end
 ------------------------------------------------------------------ the mode window
 
 local run : function(reqs : {sessions.Request}) -- (below, with the session's adapter)
+local gameSpeeds : speedprobes.Probe -- the game's curve speed on a radius, on the track type (made below)
 
 local record ModeParam -- (none: the window reads the session)
 end
@@ -706,8 +708,8 @@ end
 -- grade limit. (The window gets its params once, so it re-reads the session on a timer.)
 local function modeKey() : string
 	local e = sess.edit
-	return table.concat({ sess.mode as string or "-", tostring(sess.selected), e ~= nil and tostring(e.rev) or "-",
-		string.format("%.4f", gradeLimit()), tostring(tool.matchRedraws or 0) }, "|")
+	return table.concat({ sess.mode as string or "-", tostring(sess.selected), tostring(sessions.selectedTurnIndex(sess)), e ~= nil and tostring(e.rev) or "-",
+		string.format("%.4f", gradeLimit()), string.format("%.1f", trackType().speed), tostring(tool.matchRedraws or 0) }, "|")
 end
 
 local HEIGHT_STEP = 0.1 -- the height box's arrows step this (m)
@@ -779,8 +781,58 @@ local function elevationSection() : TreeNodeId
 	return builtin.BoxLayout{ orientation = builtin.type.Orientation.Vertical, children = rows }
 end
 
--- A small window with the Elevation section, open while the vertical alignment is edited (the
--- menu's Alignment row switches the mode). Opened from a click (the second end's, or the row's;
+local RADIUS_STEP = 1.0 -- the radius box's arrows step this (m)
+local SPEED_STEP = 1.0 -- the speed box's arrows step this (km/h)
+
+-- The Curve section, in horizontal mode: the selected curve's radius (m) and speed (km/h), either
+-- of which sets the radius (the speed through the game's own curve speed, at most the track's top
+-- speed; with no speed from the game the box says so). A radius out of reach is laid as near as the legs and the minimum radius allow, and
+-- the boxes then show what was laid. Greyed out with nothing selected.
+local function curveSection() : TreeNodeId
+	local sel = sessions.curveSelection(sess, gameSpeeds)
+	if sel == nil then
+		return builtin.WithComponentParams{
+			enabled = false,
+			item = line("Curve: click a curve's badge to set its radius or speed."),
+		}
+	end
+	local top = trackType().speed
+	local function box(label : string, value : number, step : number, apply : function(v : number)) : TreeNodeId
+		return builtin.BoxLayout{
+			orientation = builtin.type.Orientation.Horizontal,
+			children = {
+				line(label),
+				builtin.DoubleSpinBox{
+					step = step,
+					value = value,
+					onValueChange = function(v : number)
+						-- (as the height box: a drag owns the curve while it lasts, an echo of the value it was given
+						-- is no edit, and the box is for the selection it was drawn for)
+						if sessions.dragging(sess) or v == nil or v ~= v or sessions.selectedTurnIndex(sess) ~= sel.i then return end
+						if math.abs(v - value) < step / 2 then return end
+						apply(v)
+					end,
+				},
+			},
+		}
+	end
+	local speedLabel = top > 0 and string.format("Speed (km/h; asks max %.0f) ", top * 3.6) or "Speed (km/h) "
+	return builtin.BoxLayout{
+		orientation = builtin.type.Orientation.Vertical,
+		children = {
+			line("Curve: " .. sel.name),
+			box("Radius (m) ", sel.radius, RADIUS_STEP, function(v : number) run(sessions.setRadius(sess, v)) end),
+			sel.speed ~= nil
+				and box(speedLabel, sel.speed * 3.6, SPEED_STEP, function(v : number) run(sessions.setSpeed(sess, v / 3.6, gameSpeeds)) end)
+				or line("Speed: the game gave no curve speed for this track."),
+			line(string.format("Radius %.0f to %.0f m here.", sel.minRadius, sel.maxRadius)),
+		},
+	}
+end
+
+-- A small window with the Elevation section (Profile mode) or the Curve section (Path mode). It opens
+-- when the Alignment row switches to Profile, or a curve's badge is clicked in Path mode, and stays
+-- open until the tool closes or the path is left. Opened from a click (the badge's, or the row's;
 -- opening a window from onStep kills the game). A window recipe must wrap builtin.Window
 -- (RegisterWrapperRecipe, as the game's own windows do): a plain recipe returning one fails a
 -- native assertion in the window container (NodeStorage.cpp:51). It sits at the bottom right of
@@ -796,7 +848,7 @@ local TgModeWindow = react.RegisterWrapperRecipe("TgModeWindow", builtin.Window,
 		title = "Track Geometry",
 		closable = false,
 		movable = true,
-		content = elevationSection(),
+		content = sessions.vertical(sess) and elevationSection() or curveSection(),
 	}
 end)
 
@@ -806,9 +858,9 @@ closeModeWindow = function()
 	closeWindow(TgModeWindow)
 end
 
--- (only while the vertical alignment is edited)
+-- (while the profile is edited, or a curve is selected in Path mode)
 local function openModeWindow()
-	if tool.modeOpen or not (sessions.vertical(sess) and sess.phase == "done") then return end
+	if tool.modeOpen or sess.phase ~= "done" or not (sessions.vertical(sess) or sess.selectedTurn ~= nil) then return end
 	if openWindow(TgModeWindow, {} as ModeParam, "mode window") then
 		tool.modeOpen = true
 		say("mode window: open")
@@ -1114,6 +1166,36 @@ local function curveSpeeds(data : ProposalData, pieceOf : {integer : integer}, m
 	end)
 end
 
+-- The game's curve speed on a radius, for the Curve section (tg_speedprobe): a dry run of a short test
+-- piece of that radius (4 pieces of 20 m, at the edit's start, turning left): the slowest
+-- curveSpeedLimit of its edges, as the ghost's readout reads them. A failure (no data, or the call
+-- throwing) is remembered per track type: the section then says the game gave no speed.
+local PROBE_PIECES, PROBE_PIECE_LENGTH = 4, 20.0
+gameSpeeds = speedprobes.new{
+	key = function() : string return trackType().template end,
+	ready = function() : boolean return sess.edit ~= nil end,
+	minRadius = function() : number return sess.edit.dp.minRadius end,
+	top = function() : number return trackType().speed end,
+	log = say,
+	measure = function(R : number) : number
+		local a = sess.edit.a
+		local nodes = speedprobes.testArc(a.x, a.y, alignment.atan2(a.dy or 0, a.dx or 1), R, PROBE_PIECE_LENGTH, PROBE_PIECES)
+		local zs : {number} = {}
+		local grades : {number} = {}
+		for i = 1, #nodes do zs[i], grades[i] = a.z or 0, 0 end
+		local p, pieceOf = layouts.make(nodes, { template = trackType().template, z = zs, grades = grades })
+		if p == nil then return nil end
+		local q = layouts.gathering(p as SimpleProposal)
+		if q == nil then return nil end
+		local d = api.engine.util.proposal.makeProposalData(q as any as Proposal, makeContext(false)) as ProposalData
+		local best = math.huge
+		for _, v in ipairs(curveSpeeds(d, pieceOf, PROBE_PIECES)) do
+			if v ~= nil and v < best then best = v end
+		end
+		return best < math.huge and best or nil
+	end,
+}
+
 ------------------------------------------------------------------ curve badges
 
 local BADGE_BG = { 0.16, 0.33, 0.55, 0.85 } -- as the track builder's own badges
@@ -1164,13 +1246,23 @@ end
 local function badgeView(b : readout.Badge) : TreeNodeId
 	local style = styleutil.makeStyle{ backgroundColor = b.steep and BADGE_STEEP or b.slowest and BADGE_SLOW or BADGE_BG, anchorPoint = { 1.0, 1.0 } }
 	style.padding = api.type.Vec4f.new(4, 2, 4, 2)
+	local rows = builtin.BoxLayout{
+		orientation = builtin.type.Orientation.Vertical,
+		children = badgeRows(b),
+	}
+	-- (a curve's badge is a button, which takes the click over its whole area: it selects the curve and
+	-- pops out the window. The others, and the curve badges of the profile, let the mouse through.)
+	if b.kind == "curve" and b.turn ~= nil and not sessions.vertical(sess) then
+		return builtin.Button{
+			meta = { styleSheet = style },
+			content = rows,
+			onClick = function() run(sessions.pickCurve(sess, b.turn)) end,
+		}
+	end
 	return builtin.Component{
 		meta = { styleSheet = style },
 		mouseTransparent = true, -- (the recipe's own setMouseTransparent doesn't reach its children)
-		layout = builtin.BoxLayout{
-			orientation = builtin.type.Orientation.Vertical,
-			children = badgeRows(b),
-		},
+		layout = rows,
 	}
 end
 
@@ -1680,8 +1772,8 @@ local function geoParam() : ConstructionMenuParam
 end
 
 -- The "Alignment" row, kept as the Track Geometry row: which alignment the tool edits (the session's
--- mode). Greyed out unless the tool has the builder's place. A switch while editing opens or
--- closes the Elevation window (from the row's click: never from onStep).
+-- mode). Greyed out unless the tool has the builder's place. A switch to Profile while editing opens
+-- the mode window (from the row's click: never from onStep); a switch to Path changes its section.
 local function alignParam() : ConstructionMenuParam
 	local p : ConstructionMenuParam = {
 		key = ALIGN_KEY,
@@ -1706,7 +1798,7 @@ local function alignParam() : ConstructionMenuParam
 			local m = MODES[math.floor(v + 0.5) + 1]
 			if m == nil then return end
 			sessions.setMode(sess, m)
-			if sessions.vertical(sess) then openModeWindow() else closeModeWindow() end
+			if sessions.vertical(sess) then openModeWindow() end
 		end,
 	}
 	;(p as {string : any}).id = ALIGN_KEY

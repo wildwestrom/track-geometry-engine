@@ -625,4 +625,28 @@ check(is(hitAt(bg, 300 + gx * 1.4 * R, 200 + gy * 1.4 * R, R), "exit", 2)
 	and is(hitAt(bg, 300 - gx * 1.4 * R, 200 - gy * 1.4 * R, R), "exit", 2),
 	"a bracket on a ground end: past the circle, either tip picks the bracket")
 
+-- setting a curve's radius: the radius laid is the one asked, within what the legs and the minimum radius allow
+local sr = assert(E.new(endAt(0, 0, 0), endAt(3000, 2000, 90))) -- (one long-legged corner, turn 2)
+local ti = 2
+local r0 = E.curve(sr, ti).radius
+check(r0 >= dp.minRadius - 1e-6, "radius: a curve reads its radius")
+local lo = E.corners(sr)[ti].geometry.minBudget
+for _, want in ipairs({ 120, 250, 400 }) do
+	local ok = E.setRadius(sr, ti, want)
+	local got = E.curve(sr, ti).radius
+	local l = E.corners(sr)[ti]
+	local inReach = l.budget > lo + 1e-6 and l.budget < l.geometry.maxBudget - 1e-6
+	check(ok and inReach and math.abs(got - want) < 0.01, "radius: " .. want .. " m is laid as asked (" .. string.format("%.3f", got) .. ")")
+	joinsSmoothly(sr, "radius " .. want)
+end
+E.setRadius(sr, ti, 1)
+check(math.abs(E.corners(sr)[ti].budget - E.corners(sr)[ti].geometry.minBudget) < 1e-6, "radius: below the minimum gives the minimum size")
+check(E.curve(sr, ti).radius >= dp.minRadius - 1e-6, "radius: never under the minimum radius")
+E.setRadius(sr, ti, 1e9)
+check(math.abs(E.corners(sr)[ti].budget - E.corners(sr)[ti].geometry.maxBudget) < 1e-6, "radius: above the room gives the most room")
+check(not E.setRadius(sr, 1, 100), "radius: no curve at an end")
+check(E.turnIndex(sr, sr.turns[ti]) == ti and E.turnIndex(sr, {}) == nil, "turnIndex: where a turn is now, nil for one that is not there")
+local gone = sr.turns[ti]
+sr.turns = { sr.turns[1], sr.turns[#sr.turns] }
+check(E.turnIndex(sr, gone) == nil, "turnIndex: nil once the turn is gone")
 H.done()

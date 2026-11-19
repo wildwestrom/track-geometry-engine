@@ -156,8 +156,18 @@ local record Point
 	gap : number
 end
 
+-- A curve as laid, read out: its arc radius (m) and the radii it can be set to, from the minimum radius
+-- up to what the legs leave room for (m).
+local record CurveRead
+	radius : number
+	minRadius : number
+	maxRadius : number
+end
+
 local record EditMod
 	Edit : Edit
+	Turn : Turn
+	CurveRead : CurveRead
 	Hit : Hit
 	Ray : Ray
 	BRACKET_BAR : number
@@ -176,6 +186,9 @@ local record EditMod
 	insertOnLeg : function(e : Edit, leg : integer, x : number, y : number) : integer, string
 	removePi : function(e : Edit, i : integer) : boolean, string
 	dragBracket : function(e : Edit, i : integer, isEntry : boolean, x : number, y : number) : boolean
+	curve : function(e : Edit, i : integer) : CurveRead
+	turnIndex : function(e : Edit, t : Turn) : integer
+	setRadius : function(e : Edit, i : integer, r : number) : boolean
 	ends : function(e : Edit) : ends.End, ends.End
 	moveEnd : function(e : Edit, i : integer, to : ends.End) : boolean
 	dropEnd : function(e : Edit)
@@ -365,6 +378,51 @@ function M.dragBracket(e : Edit, i : integer, isEntry : boolean, x : number, y :
 	if isEntry then d = (b.x - x) * g.uIn.x + (b.y - y) * g.uIn.y
 	else d = (x - b.x) * g.uOut.x + (y - b.y) * g.uOut.y end
 	d = math.max(g.minBudget, math.min(g.maxBudget, d))
+	if e.turns[i].budget == d then return true end
+	e.turns[i].budget = d
+	bumpH(e)
+	return true
+end
+
+-- The arc radius of the curve at turn i if its tangent size were `budget` (m).
+local function radiusForBudget(e : Edit, i : integer, l : geometry.CornerLayout, budget : number) : number
+	return geometry.solveCorner(e.turns[i].pos, budget, e.dp, l.geometry).radius
+end
+
+-- The curve at turn i as laid; nil with no curve there.
+function M.curve(e : Edit, i : integer) : CurveRead
+	local l = M.corners(e)[i]
+	if l == nil then return nil end
+	return { radius = radiusForBudget(e, i, l, l.budget), minRadius = radiusForBudget(e, i, l, l.geometry.minBudget),
+		maxRadius = radiusForBudget(e, i, l, l.geometry.maxBudget) }
+end
+
+-- Where turn t is now; nil when it is gone (removed, or the turns were laid afresh).
+function M.turnIndex(e : Edit, t : Turn) : integer
+	for i, x in ipairs(e.turns) do
+		if x == t then return i end
+	end
+	return nil
+end
+
+-- Set the curve at turn i to radius r (m), by the curve size that gives it (found by bisection: the
+-- radius grows with the size). A radius out of reach (below the minimum radius, or above what the
+-- legs leave room for) gives the nearest size that can be. false when there is no curve there or r is
+-- no radius.
+function M.setRadius(e : Edit, i : integer, r : number) : boolean
+	local l = M.corners(e)[i]
+	if l == nil or r == nil or r ~= r or r <= 0 then return false end
+	local lo, hi = l.geometry.minBudget, l.geometry.maxBudget
+	local d : number
+	if r <= radiusForBudget(e, i, l, lo) then d = lo
+	elseif r >= radiusForBudget(e, i, l, hi) then d = hi
+	else
+		for _ = 1, 50 do
+			local mid = (lo + hi) / 2
+			if radiusForBudget(e, i, l, mid) < r then lo = mid else hi = mid end
+		end
+		d = (lo + hi) / 2
+	end
 	if e.turns[i].budget == d then return true end
 	e.turns[i].budget = d
 	bumpH(e)

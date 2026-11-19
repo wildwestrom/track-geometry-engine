@@ -34,13 +34,13 @@ check(R.summary(nodes, z, {}, 0, nil)[1] == "Curve limit (game): the game gave n
 
 -- curves: only lengths and kinds matter here
 local function st(len) return { kind = "straight", p = { x = 0, y = 0, z = 0 }, q = { x = len, y = 0, z = 0 } } end
-local function sp(kind, len) return { kind = kind, len = len } end
-local function arc(len) return { kind = "arc", radius = 100, sweep = len / 100 } end
+local function sp(kind, len, corner) return { kind = kind, len = len, corner = corner } end
+local function arc(len, corner) return { kind = "arc", radius = 100, sweep = len / 100, corner = corner } end
 local path = {
-	st(50), sp("in", 20), arc(40), sp("out", 20), -- curve 1: 50..130, arc middle 90
+	st(50), sp("in", 20, 2), arc(40, 2), sp("out", 20, 2), -- curve 1: 50..130, arc middle 90
 	st(0), -- (zero-length: two corners touching)
-	sp("in", 10), arc(20), sp("out", 10), -- curve 2: 130..170, arc middle 150
-	st(30), arc(60), st(40), -- curve 3, no spirals: 200..260, middle 230
+	sp("in", 10, 3), arc(20, 3), sp("out", 10, 3), -- curve 2: 130..170, arc middle 150
+	st(30), arc(60, 5), st(40), -- curve 3, no spirals: 200..260, middle 230
 }
 local cs = R.curves(path)
 check(#cs == 3, "curves: three, touching corners kept apart: " .. #cs)
@@ -48,12 +48,14 @@ check(near(cs[1].s0, 50) and near(cs[1].s1, 130) and near(cs[1].sMid, 90), "curv
 check(near(cs[2].s0, 130) and near(cs[2].s1, 170) and near(cs[2].sMid, 150), "curves: second starts where the first ends")
 check(near(cs[3].s0, 200) and near(cs[3].s1, 260) and near(cs[3].sMid, 230), "curves: an arc with no spirals")
 check(near(cs[1].radius, 100) and near(cs[3].radius, 100), "curves: the arc's radius")
+check(cs[1].turn == 2 and cs[2].turn == 3 and cs[3].turn == 5, "curves: each carries the turn it is the curve of")
 
 -- badges on the 300 m line (only chainage is used to find each curve's pieces)
 local bs = R.badges(nodes, z, nil, cs)
 check(#bs == 3 and bs[1].speed == nil and not bs[1].slowest, "badges: one per curve, no speed before the game's data")
 check(near(bs[1].x, 90) and near(bs[1].z, 1.8) and near(bs[1].grade, 0.02), "badges: at the arc's middle, with its height and grade")
 check(near(bs[1].radius, 100), "badges: the curve's radius")
+check(bs[1].turn == 2 and bs[2].turn == 3 and bs[3].turn == 5, "badges: each carries its curve's turn")
 for i = 1, 30 do speeds[i] = 5000 end
 for i = 6, 13 do speeds[i] = 110 / 3.6 end -- curve 1: pieces 6..13 (mid 55..125)
 speeds[9] = 104 / 3.6

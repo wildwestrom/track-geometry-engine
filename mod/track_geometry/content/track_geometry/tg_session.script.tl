@@ -20,6 +20,7 @@
 local ends = require("track_geometry_tool::/track_geometry/tg_ends.script.tl")
 local edits = require("track_geometry_tool::/track_geometry/tg_edit.script.tl")
 local profiles = require("track_geometry_tool::/track_geometry/tg_profile.script.tl")
+local speedprobes = require("track_geometry_tool::/track_geometry/tg_speedprobe.script.tl")
 
 local enum Phase
 	"from" -- pick the start
@@ -89,6 +90,17 @@ local record Selection
 	steep : string
 end
 
+-- The selected curve, read out for the mode window: its turn index (tg_edit), name ("Turn 2"),
+-- arc radius (m) and the game's speed on it (m/s; nil when it cannot say), and the radius range it can be set to (m).
+local record CurveSelection
+	i : integer
+	name : string
+	radius : number
+	speed : number
+	minRadius : number
+	maxRadius : number
+end
+
 -- A point of the profile being dragged (tg_edit.points): an elevation point along the path, or
 -- (Shift held at the press) a point's or a ground end's height up and down.
 local record ElevationDrag
@@ -127,6 +139,7 @@ local record Session
 	drag : edits.Hit -- the turn, bracket or ground end being dragged
 	dragEl : ElevationDrag -- the elevation point being dragged
 	selected : integer -- the selected elevation point or ground end (tg_edit.points; the mode window sets its height)
+	selectedTurn : edits.Turn -- the selected curve's turn (picked by its badge; the mode window sets its radius or speed)
 	mouseSY : number -- the mouse's screen y, from its last event (px)
 	editMsg : string -- why the last edit or build did not happen
 	pressGrabbed : boolean -- the last left press grabbed a handle or added a turn (its click must not build)
@@ -161,6 +174,11 @@ local record SessionMod
 	canGoBack : function(s : Session) : boolean
 	setMode : function(s : Session, m : Mode)
 	setHeight : function(s : Session, z : number) : {Request}
+	curveSelection : function(s : Session, probe : speedprobes.Probe) : CurveSelection
+	selectedTurnIndex : function(s : Session) : integer
+	pickCurve : function(s : Session, turn : integer) : {Request}
+	setRadius : function(s : Session, r : number) : {Request}
+	setSpeed : function(s : Session, v : number, probe : speedprobes.Probe) : {Request}
 	selection : function(s : Session, limit : number) : Selection
 	matchSources : function(s : Session) : {MatchSource}
 	match : function(s : Session, m : MatchSource) : {Request}
@@ -205,7 +223,7 @@ end
 -- dragged end stays where it is, as if let go.
 local function dropHandles(s : Session)
 	if s.edit ~= nil then edits.dropEnd(s.edit) end
-	s.drag, s.hit, s.dragEl, s.selected = nil, nil, nil, nil
+	s.drag, s.hit, s.dragEl, s.selected, s.selectedTurn = nil, nil, nil, nil, nil
 end
 
 -- The picked ends: the start alone while picking the end, both (the edit's) while editing.
@@ -498,6 +516,57 @@ function M.setHeight(s : Session, z : number) : {Request}
 	if pt == nil or pt.z == z or not edits.setHeight(e, i, z) then return {} end -- (the box may echo the height it was given)
 	s.log(string.format("edit: %s set to %.2f m", pointName(e, i), z))
 	return {}
+end
+
+-- Where the selected curve's turn is now (tg_edit index); nil when none is selected or it is gone.
+function M.selectedTurnIndex(s : Session) : integer
+	if s.edit == nil or s.selectedTurn == nil then return nil end
+	return edits.turnIndex(s.edit, s.selectedTurn)
+end
+
+-- The selected curve, read out; nil when none is selected or it has no curve now (its turn went
+-- straight or was removed). Its speed is nil when the game cannot say (probe.speedAt).
+function M.curveSelection(s : Session, probe : speedprobes.Probe) : CurveSelection
+	local i = M.selectedTurnIndex(s)
+	local c = i ~= nil and edits.curve(s.edit, i) or nil
+	if c == nil then return nil end
+	-- (the speed as the game gives it, past the track's top speed too: shown capped, a request for the
+	-- top speed on a curve far wider than it needs would look like no change)
+	return { i = i, name = "Turn " .. tostring(i - 1), radius = c.radius, speed = probe.speedAt(c.radius),
+		minRadius = c.minRadius, maxRadius = c.maxRadius }
+end
+
+-- Set the selected curve's radius (m), as near as its legs and the minimum radius allow (the mode
+-- window's radius box). Nothing when none is selected.
+function M.setRadius(s : Session, r : number) : {Request}
+	local i = M.selectedTurnIndex(s)
+	local before = i ~= nil and edits.curve(s.edit, i) or nil
+	if before == nil or not edits.setRadius(s.edit, i, r) then return {} end
+	s.log(string.format("edit: turn %d radius %.0f m asked, %.0f m laid (was %.0f m)", i - 1, r, edits.curve(s.edit, i).radius, before.radius))
+	return {}
+end
+
+-- Set the selected curve to the radius the game gives speed v (m/s), held to the track's top speed.
+-- Nothing, and why, when the game cannot say.
+function M.setSpeed(s : Session, v : number, probe : speedprobes.Probe) : {Request}
+	if v == nil or v ~= v or v <= 0 then return {} end
+	local top = probe.top()
+	if top > 0 then v = math.min(v, top) end
+	local r = probe.radiusFor(v)
+	if r == nil then
+		s.editMsg = "Cannot set a speed: the game gave no curve speed for this track."
+		return {}
+	end
+	return M.setRadius(s, r)
+end
+
+-- A curve's badge was pressed (turn: the edit's turn it is the curve of, from tg_readout): select the
+-- turn and ask for the window.
+function M.pickCurve(s : Session, turn : integer) : {Request}
+	if s.edit == nil or M.vertical(s) or turn == nil or edits.curve(s.edit, turn) == nil then return {} end
+	s.selectedTurn = s.edit.turns[turn]
+	s.log("edit: select turn " .. tostring(turn - 1) .. " by its badge")
+	return { "openMode" }
 end
 
 -- The selected elevation point or ground end, read out against the grade limit; nil when none is.
