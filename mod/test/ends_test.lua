@@ -259,6 +259,9 @@ local g = E.groundEnd(-400, 100, 0)
 local toG = { E.initialPis(g, E.aim(through, g.x, g.y)) }
 check(toG[2] == "switch" and eq(toG[1][2].y, 0) and toG[1][2].x < 0, "layouts: a ground end to a node end: the turn on the node's ray")
 
+-- TODO: I'm deeply suspicious about the following code.
+-- I think I need to figure out how switches actually work under the hood once again.
+
 -- A switch (a node or cut end) leaves on a curve no wider than SWITCH_RADIUS: where an arc would
 -- be wider (its radius is dist^2 / (2 offset): the other end nearly ahead), the turn goes out on
 -- the ray only as far as that curve needs, t = R tan(deflection / 2). (A wider curve runs within a
