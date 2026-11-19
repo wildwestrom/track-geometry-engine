@@ -11,12 +11,14 @@ function data()
 	a("R::TgBadges > FloatingLayout", {
 		gravity = { -1, -1 },
 	})
-	-- The mode window (tg_gui TgModeWindow): wide enough for its title, at the bottom right of the screen above the game bar, as the game's own calendar window (Window#calendar).
+	-- The mode window (tg_gui TgModeWindow): wide enough for its title, centred 2/3 of the way across the screen and halfway down.
+	-- A window's place can only be set here (the window API has no position), so it is not placed at the click.
+	-- Gravity runs 0 (left, top) to 1 (right, bottom) (seen in game: { 1/3, 0 } put it a third across, at the top); the anchor is the window's own centre.
 	a("Window#tgmode", {
 		minSize = { 260, -1 },
-		anchorPoint = { 1, 1 },
-		gravity = { 1, 1 },
-		margin = { 0, 30, 120, 0 },
+		anchorPoint = { 0.5, 0.5 },
+		gravity = { 2 / 3, 1 / 2 },
+		margin = { 10, 10, 10, 10 },
 	})
 	return result
 end
