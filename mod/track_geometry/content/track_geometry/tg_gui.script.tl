@@ -1,11 +1,11 @@
 -- GUI. Three parts:
 --   the tool (toolAction): the Track Geometry tool, in the drag builder's place on the game's track
---            entries while their Geometry row says Yes. Pick the start and the end (a track end, a
+--            entries while their Track Geometry row says On. Pick the start and the end (a track end, a
 --            node, a point along a piece, or the ground), then edit the alignment (tg_edit, driven
 --            by tg_session) under the game's ghost, and click off it to build (a window asks first).
 --   TgProbe : a plugin in the bottom game bar (tg_probe.res.lua): every frame it reads the ground
 --            under the mouse and places the badges for the tool (both only allowed there).
---   TgMenuPlugin : gives every track entry the "Geometry" row (tg_menu.res.lua), the only way in,
+--   TgMenuPlugin : gives every track entry the "Track Geometry" row (tg_menu.res.lua), the only way in,
 --            and the "Alignment" row (horizontal or vertical) beside it.
 
 local react = ug_require "::/gui/main/react.lua" as React
@@ -181,8 +181,8 @@ end
 
 ------------------------------------------------------------------ geometry mode
 
--- The game's own track builder has a "Geometry" row on every track entry (added by
--- decorate). With Yes the tool takes the builder's place (TgTrackAction) and builds the
+-- The game's own track builder has a "Track Geometry" row on every track entry (added by
+-- decorate). With On the tool takes the builder's place (TgTrackAction) and builds the
 -- picked entry's track, with the panel's bridge and tunnel types. One value for every track
 -- entry; it lasts until the game is closed.
 local GEO_KEY = "tg_geometry"
@@ -191,7 +191,7 @@ local ALIGN_KEY = "tg_alignment"
 local MODES : {sessions.Mode} = { "horizontal", "vertical" }
 
 local record Geo
-	on : boolean -- the row says Yes
+	on : boolean -- the row says On
 	panel : {string : number} -- the track panel's values, as its last look at the row gave them
 	hosted : boolean -- the tool ran since its alignment was last dropped (by No or the wand tab)
 end
@@ -1243,17 +1243,17 @@ end
 ------------------------------------------------------------------ gizmos
 
 local COLORS : {string : {number}} = {
-	leg = { 1.0, 0.75, 0.1, 0.5 }, -- the PI polyline
-	free = { 1.0, 0.75, 0.1, 1.0 }, -- turns
+	leg = { 0.949, 0.663, 0.0, 0.5 }, -- the PI polyline (#f2a900, the thumbnail's amber)
+	free = { 0.949, 0.663, 0.0, 1.0 }, -- turns
 	ray = { 0.3, 0.8, 1.0, 1.0 },
-	fixed = { 0.6, 0.6, 0.6, 1.0 },
+	fixed = { 0.635, 0.663, 0.675, 1.0 }, -- the thumbnail's grey (#a2a9ac)
 	bracket = { 0.3, 1.0, 0.4, 1.0 },
-	groundEnd = { 1.0, 0.75, 0.1, 1.0 }, -- a ground end: it moves anywhere, like a free turn
+	groundEnd = { 0.949, 0.663, 0.0, 1.0 }, -- a ground end: it moves anywhere, like a free turn
 	hot = { 1.0, 1.0, 1.0, 1.0 }, -- under the mouse or dragged
 	selected = { 1.0, 1.0, 0.1, 1.0 }, -- the selected elevation point (the mode window sets its height)
 	tooClose = { 1.0, 0.15, 0.15, 0.4 }, -- an elevation point too close to a neighbour or an end
 	osculating = { 0.32, 0.72, 0.92, 0.5 }, -- a curve's osculating circle, the blue of its arc (#52b8ea)
-	spiral = { 1.0, 0.35, 0.85, 0.5 }, -- a transition spiral
+	spiral = { 0.902, 0.435, 0.784, 0.5 }, -- a transition spiral (#e66fc8, the thumbnail's pink)
 	sketch = { 0.55, 0.85, 1.0, 0.9 }, -- the path while the mouse moves it (no ghost)
 	refused = { 1.0, 0.15, 0.15, 0.9 }, -- the section a bare refusal comes from (the game's error colour)
 }
@@ -1643,7 +1643,7 @@ end)
 local ENABLED : ConstructionMenuParam.CheckEnabledResult = "Enabled"
 local DISABLED : ConstructionMenuParam.CheckEnabledResult = "Disabled"
 
--- The "Geometry" row, placed and kept as Real Track Cant's Cant row: one value in every category,
+-- The "Track Geometry" row, placed and kept as Real Track Cant's Cant row: one value in every category,
 -- not reset by the menu, saved nowhere. The panel asks the row whether it is enabled with all
 -- its values, on every look: that is where the tool reads them (the Replace Track tab is mode 2;
 -- a custom action is given only the Settings window's values).
@@ -1651,10 +1651,10 @@ local function geoParam() : ConstructionMenuParam
 	local p : ConstructionMenuParam = {
 		key = GEO_KEY,
 		group = "settings",
-		name = "Geometry",
+		name = "Track Geometry",
 		-- (the game does not break a tooltip's lines itself)
 		tooltip = "Lay the track with the Track Geometry tool instead of the built-in track builder tool.",
-		values = { "No", "Yes" },
+		values = { "Off", "On" },
 		numbers = { 0, 1 },
 		defaultIndex = geo.on and 2 or 1,
 		yearFrom = 0,
@@ -1679,7 +1679,7 @@ local function geoParam() : ConstructionMenuParam
 	return p
 end
 
--- The "Alignment" row, kept as the Geometry row: which alignment the tool edits (the session's
+-- The "Alignment" row, kept as the Track Geometry row: which alignment the tool edits (the session's
 -- mode). Greyed out unless the tool has the builder's place. A switch while editing opens or
 -- closes the Elevation window (from the row's click: never from onStep).
 local function alignParam() : ConstructionMenuParam
@@ -1687,8 +1687,8 @@ local function alignParam() : ConstructionMenuParam
 		key = ALIGN_KEY,
 		group = "settings",
 		name = "Alignment",
-		tooltip = "Plan: edit the horizontal alignment (curves and straights).\nProfile: edit the vertical alignment (heights and grades).",
-		values = { "Plan", "Profile" }, -- (the row is too narrow for "Horizontal")
+		tooltip = "Path: edit the horizontal alignment (curves and straights).\nProfile: edit the vertical alignment (heights and grades).",
+		values = { "Path", "Profile" }, -- (the row is too narrow for "Horizontal")
 		numbers = { 0, 1 },
 		defaultIndex = sessions.vertical(sess) and 2 or 1,
 		yearFrom = 0,
@@ -1720,7 +1720,7 @@ local function hasGeoRow(def : ConstructionDefinition) : boolean
 	return false
 end
 
--- Give every track entry of the game's builder the Geometry row and the recipe (an entry with
+-- Give every track entry of the game's builder the Track Geometry row and the recipe (an entry with
 -- another mod's custom action is left alone).
 local function decorate(defs : {ConstructionDefinition})
 	for _, def in ipairs(defs) do
@@ -1761,7 +1761,7 @@ local GEO_ROWS : {string : boolean} = { mode = true, bridgeType = true, tunnelTy
 -- The rows already greyed (weak: the menu makes new definitions on each opening).
 local greyed : {ConstructionMenuParam : boolean} = setmetatable({}, { __mode = "k" })
 
--- Grey a row out while Geometry is Yes on the builder tab. A row the game or its mod hides or
+-- Grey a row out while Track Geometry is On on the builder tab. A row the game or its mod hides or
 -- greys stays so; with Geometry on No, or on the wand tab, the row says what it said before.
 local function greyInGeometry(p : ConstructionMenuParam)
 	if greyed[p] then return end

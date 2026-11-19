@@ -6,9 +6,10 @@
 		}
 	],
 	"name": "Track Geometry Tool",
-	"summary": "An alternative to the default track builder that lets you build your railway alignment with real civil engineering practices. Railway lines are built from a limited set of primitives: straight lines, circular arcs, clothoid transitions.",
+	"summary": "An alternative to the default track builder that lets you build your railway alignment with real civil engineering techniques. Uses the same set of primitives from real railway alignments: straight lines, circular arcs, clothoid transitions.",
 	"tags": [
-		"Script Mod"
+		"Script Mod",
+		"Track"
 	],
 	"url": "https://github.com/wildwestrom/track-geometry-engine/tree/tf3-mod"
 }
