@@ -297,4 +297,33 @@ check(E.nearestPiece(two, 50, 3).edge == 32, "near pieces: the nearer of two")
 check(E.nearestPiece(two, 50, 3, 32).edge == 31, "near pieces: not the skipped one")
 check(E.nearestPiece(two, 50, -E.PIECE_SNAP - 0.5) == nil, "near pieces: none past PIECE_SNAP")
 
+-- the reach at a point: a share (GRAB) of its distance from the eye, kept between a floor and REACH_MAX
+local eye = { x = 0, y = 0, z = 300 }
+check(E.GRAB == 0.02 and E.REACH_MAX == 50, "reach: GRAB starts at 0.02, the ceiling is 50 m")
+check(eq(E.reach(eye, 400, 0, 0, 3), 10), "reach: 500 m from the eye, 10 m")
+check(eq(E.reach(eye, 0, 0, 200, 3), 3), "reach: 100 m from the eye, the floor (3 m)")
+check(eq(E.reach(eye, 0, 0, 200, 5), 5), "reach: its own floor (5 m)")
+check(eq(E.reach(eye, 4000, 0, 0, 3), 50), "reach: 4 km from the eye, the ceiling (50 m)")
+check(eq(E.reach(nil, 4000, 0, 0, 3), 3) and eq(E.reach(nil, 4000, 0, 0, 3, 10), 10),
+	"reach: no eye, the fallback (else the floor)")
+
+-- the snaps scale with the distance from the eye: a node and a piece far off are picked further
+-- from the mouse; a free end's SNAP stays as it is
+local far = { x = 0, y = -1000, z = 0 } -- (the node at (0, 0, 0) is 1000 m off: 20 m of reach)
+got = E.snap({ ne(11, 0, 0) }, nil, 15, 0, 0, nil, far)
+check(got ~= nil and got.node == 11, "snap: a node 1 km from the eye, 15 m from the mouse")
+got = E.snap({ ne(11, 0, 0) }, nil, 15, 0, 0)
+check(got ~= nil and got.kind == "ground", "snap: with no eye, the node is not picked 15 m off")
+got = E.snap({ ne(11, 0, 0) }, nil, 4, 0, 0, nil, { x = 0, y = 0, z = 10 })
+check(got ~= nil and got.node == 11, "snap: a node near the eye is still picked within NODE_SNAP")
+got = E.snap({ ne(11, 0, 0) }, nil, 6, 0, 0, nil, { x = 0, y = 0, z = 10 })
+check(got ~= nil and got.kind == "ground", "snap: a node near the eye: not past NODE_SNAP")
+got = E.snap({ fe(1, 45, 0) }, nil, 0, 0, 0, nil, { x = 0, y = -5000, z = 0 })
+check(got ~= nil and got.kind == "ground", "snap: a free end far from the eye: still SNAP, not more")
+check(E.nearestPiece(two, 50, -20, nil, { x = 50, y = -2000, z = 0 }).edge == 31,
+	"near pieces: 2 km from the eye, a piece 20 m off is picked")
+check(E.nearestPiece(two, 50, -20) == nil, "near pieces: with no eye, not 20 m off")
+check(E.nearestPiece(two, 50, -E.PIECE_SNAP - 0.5, nil, { x = 50, y = 0, z = 50 }) == nil,
+	"near pieces: near the eye, none past PIECE_SNAP")
+
 H.done()

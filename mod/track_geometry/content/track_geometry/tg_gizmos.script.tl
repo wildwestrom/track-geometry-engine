@@ -9,9 +9,11 @@
 --   vertical  : at each end and elevation point a circle on the ground (where the mouse grabs it)
 --               and a post from the ground up to the track (a point's own height).
 -- Widths and steps are in metres. The width is fixed (Network Toolkit's settings: 1.5, with the
--- geometry 1 wide and 1 m steps); the circles' radius follows the grab radius.
+-- geometry 1 wide and 1 m steps); each circle is at its handle's own grab radius (tg_edit.grabAt,
+-- from the eye of the session's view ray), so what is drawn is what the mouse picks.
 
 local edits = require("track_geometry_tool::/track_geometry/tg_edit.script.tl")
+local ends = require("track_geometry_tool::/track_geometry/tg_ends.script.tl")
 local geometry = require("track_geometry_tool::/track_geometry/tg_geometry.script.tl")
 local profiles = require("track_geometry_tool::/track_geometry/tg_profile.script.tl")
 local sessions = require("track_geometry_tool::/track_geometry/tg_session.script.tl")
@@ -157,15 +159,19 @@ local function bracketPoints(h : edits.Hit, z : number, r : number) : {{number}}
 end
 
 local function horizontal(sess : sessions.Session, groundAt : function(number, number) : number, w : number) : {Shape}
-	local e, r = sess.edit, sess.grab
+	local e, r, ray = sess.edit, sess.grab, sess.ray
 	local hot = sess.drag or sess.hit
 	local function isHot(h : edits.Hit) : boolean return hot ~= nil and hot.kind == h.kind and hot.i == h.i end
 	local out : {Shape} = {}
-	-- (in steps that grow with the zoom, so km-wide circles stay cheap zoomed out)
-	local step = math.max(M.GIZMO_STEP, r / 4)
 	local path, p = edits.path(e), edits.profile(e) -- (one profile solve for the circles and spirals)
 	for _, c in ipairs(circlesOf(path, p)) do
-		out[#out + 1] = circle(c.x, c.y, c.z or groundAt(c.mx, c.my), c.r, "osculating", w, step)
+		local z = c.z or groundAt(c.mx, c.my)
+		-- (in steps that grow with the zoom, so km-wide circles stay cheap zoomed out: a quarter of
+		-- GRAB of the eye's distance, with no ceiling, or of r with no eye)
+		local zoom = r
+		if ray ~= nil then zoom = ends.GRAB * math.sqrt((c.x - ray.ex) ^ 2 + (c.y - ray.ey) ^ 2 + (z - ray.ez) ^ 2) end
+		local step = math.max(M.GIZMO_STEP, zoom / 4)
+		out[#out + 1] = circle(c.x, c.y, z, c.r, "osculating", w, step)
 	end
 	-- (the legs and handles: up at the track's height beside them, or on the ground with no profile)
 	local function trackAt(x : number, y : number) : number
@@ -184,12 +190,13 @@ local function horizontal(sess : sessions.Session, groundAt : function(number, n
 		if h.kind == "pi" or h.kind == "end" then
 			local role = isHot(h) and "hot" or h.kind == "pi" and h.mobility or "groundEnd"
 			local z = edits.onGround(e, h) and groundAt(h.x, h.y) or trackAt(h.x, h.y)
-			out[#out + 1] = circle(h.x, h.y, z, r, role, w, M.GIZMO_STEP)
+			out[#out + 1] = circle(h.x, h.y, z, edits.grabAt(ray, h.x, h.y, z, r), role, w, M.GIZMO_STEP)
 		end
 	end
 	for _, h in ipairs(hs) do
 		if h.kind == "entry" or h.kind == "exit" then
-			out[#out + 1] = line(bracketPoints(h, trackAt(h.x, h.y), r), isHot(h) and "hot" or "bracket", w)
+			local z = trackAt(h.x, h.y)
+			out[#out + 1] = line(bracketPoints(h, z, edits.grabAt(ray, h.x, h.y, z, r)), isHot(h) and "hot" or "bracket", w)
 		end
 	end
 	return out
@@ -199,7 +206,7 @@ end
 -- is not in the profile), "hot" under the mouse or dragged, "selected", "ray" at an elevation point
 -- (it slides along the path), "groundEnd" at a ground end (its height can be set).
 local function vertical(sess : sessions.Session, groundAt : function(number, number) : number, w : number) : {Shape}
-	local e, r = sess.edit, sess.grab
+	local e, r, ray = sess.edit, sess.grab, sess.ray
 	local out : {Shape} = {}
 	if edits.profile(e) == nil then return out end
 	local h, d = sess.hit, sess.dragEl
@@ -208,7 +215,8 @@ local function vertical(sess : sessions.Session, groundAt : function(number, num
 		local role = not pt.liftable and "fixed" or pt.tooClose and "tooClose" or i == hot and "hot"
 			or i == sess.selected and "selected" or pt.slides and "ray" or "groundEnd"
 		local g = groundAt(pt.x, pt.y)
-		out[#out + 1] = circle(pt.x, pt.y, g, r, role, w, M.GIZMO_STEP)
+		-- (its radius measured up at the point, where the mouse also picks it)
+		out[#out + 1] = circle(pt.x, pt.y, g, edits.grabAt(ray, pt.x, pt.y, pt.z, r), role, w, M.GIZMO_STEP)
 		if math.abs(pt.z - g) > POST_GAP then
 			-- (a hair off vertical: a straight with no run has no direction)
 			out[#out + 1] = line({ { pt.x, pt.y, g }, { pt.x + 0.01, pt.y, pt.z } }, role, w)

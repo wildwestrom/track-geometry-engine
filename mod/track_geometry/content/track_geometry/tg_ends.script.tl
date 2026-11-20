@@ -92,6 +92,9 @@ local record Ends
 	SNAP : number
 	CLEAR : number
 	PIECE_SNAP : number
+	GRAB : number
+	REACH_MAX : number
+	reach : function(eye : Point, x : number, y : number, z : number, floor : number, fallback ?: number) : number
 	MIN_LEG : number
 	LEAD : number
 	trackEnd : function(node : integer, x : number, y : number, z : number, dx : number, dy : number,
@@ -102,14 +105,14 @@ local record Ends
 	runs : function(e : End, branch : Piece, mayGo : function(joint : integer, from : integer, to : integer) : boolean) : {Run}
 	aim : function(e : End, x : number, y : number) : End
 	pieceAt : function(pc : Piece, u : number) : Point, Point
-	nearestPiece : function(pieces : {Piece}, x : number, y : number, skip ?: integer) : Piece
+	nearestPiece : function(pieces : {Piece}, x : number, y : number, skip ?: integer, eye ?: Point) : Piece
 	halves : function(pc : Piece, u : number) : Piece, Piece
 	splitEnd : function(pc : Piece, u : number) : End
 	hasHeading : function(e : End) : boolean
 	name : function(e : End) : string
 	key : function(e : End) : string
 	initialPis : function(a : End, b : End) : {geometry.Vec}, string
-	snap : function(near : {End}, piece : Piece, x : number, y : number, z : number, exclude : End) : End, string
+	snap : function(near : {End}, piece : Piece, x : number, y : number, z : number, exclude : End, eye ?: Point) : End, string
 end
 
 local M : Ends = {}
@@ -131,6 +134,11 @@ local STRAIGHT_ANGLE = 1e-6
 local STRAIGHT_OFFSET = 0.002
 -- A free end this close to the mouse snaps to it (m).
 M.SNAP = 40.0
+-- Hitboxes (the handles' and the snaps') keep about one size on the screen: a candidate is in
+-- reach within this share of its distance from the eye, but never under the hitbox's own floor
+-- nor over REACH_MAX (m). Tuned by hand in game.
+M.GRAB = 0.02
+M.REACH_MAX = 50.0
 -- The radius a switch (a node or cut end) leaves on, as its starting layout puts it (m): the
 -- game's own builder branched off a straight at 182 m (and builds them as gentle as 4 km).
 local SWITCH_RADIUS = 180.0
@@ -139,11 +147,19 @@ local SWITCH_RADIUS = 180.0
 -- on to the first node this far from the track beside it (m, centre to centre: parallel tracks'
 -- spacing), as the game's own builder lays the whole branch out of a switch as one piece.
 M.CLEAR = 5.0
--- A node with track through it this close to the mouse snaps to it (m); further, a click on track
--- cuts the piece there. (MIN_HALF: as near a node as a cut can be.)
+-- A node with track through it this close to the mouse snaps to it (m, the floor of its reach);
+-- further, a click on track cuts the piece there. (MIN_HALF: as near a node as a cut can be.)
 local NODE_SNAP = 5.0
 -- Shortest part of a piece a cut may leave (m): nearer its end, the node there is picked instead.
 local MIN_HALF = 5.0
+
+-- How far from the mouse a candidate at (x, y, z) is in reach (m): GRAB of its distance from the
+-- eye, between floor and REACH_MAX. With no eye (not read yet): fallback, else floor.
+function M.reach(eye : Point, x : number, y : number, z : number, floor : number, fallback ?: number) : number
+	if eye == nil then return fallback or floor end
+	local d = math.sqrt((x - eye.x) ^ 2 + (y - eye.y) ^ 2 + (z - eye.z) ^ 2)
+	return math.min(M.REACH_MAX, math.max(floor, M.GRAB * d))
+end
 
 -- The free track end at node, at (x, y, z), with (dx, dy) the unit direction out of its piece and
 -- grade the piece's grade going out along it.
@@ -217,18 +233,20 @@ local function nearestOnPiece(pc : Piece, x : number, y : number) : number, numb
 	return u, math.sqrt(d2(u))
 end
 
--- The mouse need not be on a track to cut it: a piece this close to it is picked (m, in plan; the
--- piece under the mouse comes first).
+-- The mouse need not be on a track to cut it: a piece this close to it is picked (m, in plan, the
+-- floor of its reach; the piece under the mouse comes first).
 M.PIECE_SNAP = 8.0
 
--- The piece of `pieces` nearest (x, y) in plan, within PIECE_SNAP (nil: none); never edge `skip`.
-function M.nearestPiece(pieces : {Piece}, x : number, y : number, skip ?: integer) : Piece
+-- The piece of `pieces` nearest (x, y) in plan, within its reach (PIECE_SNAP, more far from eye:
+-- see reach) at its point nearest (x, y) (nil: none); never edge `skip`.
+function M.nearestPiece(pieces : {Piece}, x : number, y : number, skip ?: integer, eye ?: Point) : Piece
 	local best : Piece = nil
-	local bestD = M.PIECE_SNAP
+	local bestD = math.huge
 	for _, pc in ipairs(pieces) do
 		if pc.edge ~= skip then
-			local _, d = nearestOnPiece(pc, x, y)
-			if d <= bestD then best, bestD = pc, d end
+			local u, d = nearestOnPiece(pc, x, y)
+			local p = M.pieceAt(pc, u)
+			if d <= M.reach(eye, p.x, p.y, p.z, M.PIECE_SNAP) and d < bestD then best, bestD = pc, d end
 		end
 	end
 	return best
@@ -449,19 +467,20 @@ function M.initialPis(a : End, b : End) : {geometry.Vec}, string
 end
 
 -- What the mouse at (x, y) picks, from the ends near it (free track ends and node ends) and the
--- track piece under or near the mouse (nil: none): the nearest end within reach (SNAP for a free end,
--- NODE_SNAP for a node); else on a piece, the point on it nearest the mouse (a cut); else the
--- ground there (z its height). Never the end exclude (the start), nor a cut of its piece. A cut
--- that would leave a part under MIN_HALF picks the node there instead; nil and a hint when that
--- node cannot be picked, or the mouse is over no ground.
-function M.snap(near : {End}, piece : Piece, x : number, y : number, z : number, exclude : End) : End, string
+-- track piece under or near the mouse (nil: none): the nearest end within reach (SNAP for a free
+-- end; for a node, its reach from eye, NODE_SNAP at least); else on a piece, the point on it
+-- nearest the mouse (a cut); else the ground there (z its height). Never the end exclude (the
+-- start), nor a cut of its piece. A cut that would leave a part under MIN_HALF picks the node
+-- there instead; nil and a hint when that node cannot be picked, or the mouse is over no ground.
+function M.snap(near : {End}, piece : Piece, x : number, y : number, z : number, exclude : End, eye ?: Point) : End, string
 	if x == nil then return nil, "Point at the ground or at a track." end
 	local best : End = nil
 	local bestD = math.huge
 	for _, e in ipairs(near) do
 		if exclude == nil or exclude.node == nil or e.node ~= exclude.node then
 			local d = math.sqrt((e.x - x) ^ 2 + (e.y - y) ^ 2)
-			if d <= (e.kind == "track" and M.SNAP or NODE_SNAP) and d < bestD then best, bestD = e, d end
+			local within = e.kind == "track" and M.SNAP or M.reach(eye, e.x, e.y, e.z, NODE_SNAP)
+			if d <= within and d < bestD then best, bestD = e, d end
 		end
 	end
 	if best ~= nil then return best, nil end

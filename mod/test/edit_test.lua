@@ -514,6 +514,40 @@ check(hoff > 5 and hct ~= nil and hct.kind == "leg" and math.abs(hct.s - hnd.s) 
 	"the raised track where it leaves the legs is picked along the ray: " .. tostring(hct and hct.s))
 check(hitAlong(hc, 250, -200, 5) == nil, "a ray far from the raised edit picks nothing")
 
+-- each handle's radius is measured from the eye to it (GRAB of that, 3 to 50 m): far handles
+-- stay a clickable size on the screen; r is only the radius with no ray (no eye yet)
+do
+local fl = assert(E.new(vend(0, 0, 0, 0, 0), vend(1000, 0, 180, 0, 0))) -- (flat, on the ground at 0)
+check(E.insertOnLeg(fl, 1, 400, 0) == 3 and E.insertOnLeg(fl, 3, 430, 0) == 4 and E.turn(fl, 4).x == 430,
+	"flat: turns added at 400 m and 430 m")
+-- the mouse at (mx, my) on the ground, the eye dist m from it (back along -y and up)
+local function eyeRay(mx, my, dist)
+	return { ex = mx, ey = my - dist * 0.8, ez = dist * 0.6, gx = mx, gy = my, gz = 0 }
+end
+check(hitAt(fl, 400, -20, 5) == nil and same(E.hit(fl, false, 400, -20, 5, eyeRay(400, -20, 1500)), E.turn(fl, 3)),
+	"a turn 1.5 km from the eye is hit 20 m off, which the fallback radius misses")
+check(same(E.hit(fl, false, 412, 5, 5, eyeRay(412, 5, 1500)), E.turn(fl, 3))
+	and same(E.hit(fl, false, 420, 5, 5, eyeRay(420, 5, 1500)), E.turn(fl, 4)),
+	"two turns in reach: the nearer one wins")
+check(E.hit(fl, false, 400, 8, 50, eyeRay(400, 8, 100)) == nil, "near the eye, the radius is its floor: 3 m")
+check(E.hit(fl, false, 400, 100, 5, eyeRay(400, 100, 6000)) == nil, "far from the eye, the radius is its ceiling: 50 m")
+local fc = assert(E.new(vend(0, 0, 0, 0, 0), vend(500, 400, -90, 0, 0)))
+local fcEntry = nil
+for _, h in ipairs(E.handles(fc)) do if h.kind == "entry" then fcEntry = h end end
+local bx, by = fcEntry.x - fcEntry.uy * 60, fcEntry.y + fcEntry.ux * 60 -- (60 m along its bar, off the leg)
+check(hitAt(fc, bx, by, 5) == nil and same(E.hit(fc, false, bx, by, 5, eyeRay(bx, by, 3000)), fcEntry),
+	"a bracket's bar scales with its own radius: 60 m out along it, 3 km from the eye")
+local fv = assert(E.new(vend(0, 0, 0, 0, 0), vend(1000, 0, 180, 0, 0)))
+E.insertElevation(fv, 500)
+local fvh = E.hit(fv, true, 500, 20, 5, eyeRay(500, 20, 1500))
+check(E.hit(fv, true, 500, 20, 5) == nil and fvh ~= nil and fvh.kind == "point" and fvh.i == 2,
+	"vertical: an elevation point 1.5 km from the eye is hit 20 m off")
+local fvt = E.hit(fv, true, 800, 20, 5, eyeRay(800, 20, 1500))
+check(E.hit(fv, true, 800, 20, 5) == nil and fvt ~= nil and fvt.kind == "track" and math.abs(fvt.s - 800) < 1,
+	"vertical: the track 1.5 km from the eye is hit 20 m off")
+check(E.hit(fv, true, 800, 8, 50, eyeRay(800, 8, 100)) == nil, "vertical: near the eye, the floor: 3 m")
+end
+
 -- the elevation points follow the path when a turn moves; the path is sampled again
 local f = E.new(vend(0, 0, 0, 100, 0), vend(1000, 0, 180, 110, 0))
 E.insertOnLeg(f, 1, 500, 0)

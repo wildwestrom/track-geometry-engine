@@ -19,7 +19,7 @@ local function newTool(a, b)
 	a, b = a or endA, b or endB
 	local t = { live = true, free = { [1] = true, [2] = true }, shift = false, asked = {}, groundZ = 0 }
 	t.w = {
-		grab = 10, cameraDist = 1000,
+		cameraDist = 1000,
 		shift = function() return t.shift end,
 		gradeLimit = function() return LIMIT end,
 		snap = function(x, y, z, _, exclude)
@@ -784,11 +784,11 @@ check(c ~= nil and c.state == "dragging" and c.x == pt.x and c.y == pt.y and c.z
 letGo(t)
 
 ------------------------------------------------------------------ odd moments
--- a press right after the second pick, before any tick of the edit and with no grab radius known
+-- a press right after the second pick, before any tick of the edit and with no eye known
 t = newTool()
 moveTo(t, 5, 5); click(t)
 moveTo(t, 1495, 795)
-t.w.grab = nil
+t.w.ray = nil
 click(t)
 local ok, err = pcall(press, t)
 check(ok, "press before the edit's first tick: no error (" .. tostring(err) .. ")")

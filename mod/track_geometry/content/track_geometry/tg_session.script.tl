@@ -117,7 +117,6 @@ local record World
 	terrZ : number -- (its height)
 	ray : edits.Ray -- the mouse's view ray, eye to that ground point (nil when unknown): picks the track up on its profile, over the ground
 	hovered : integer -- the entity under the mouse
-	grab : number -- grab radius for handles (m)
 	cameraDist : number -- the camera's distance (m), for a Shift-drag's height; nil when unknown
 	shift : function() : boolean -- is Shift held (asked at a press)
 	gradeLimit : function() : number -- the steepest grade the track type may be laid at
@@ -134,7 +133,8 @@ local record Session
 	mouseX : number -- where the last snap looked
 	mouseY : number
 	edit : edits.Edit -- the alignment being edited: there exactly while phase is "done"
-	grab : number -- grab radius as of the last event (m)
+	grab : number -- grab radius for handles with no eye known (no view ray) (m)
+	ray : edits.Ray -- the mouse's last known view ray (nil: none yet): each gizmo's grab radius is measured from its eye (tg_edit.grabAt)
 	hit : edits.Hit -- what is under the mouse while editing (tg_edit.hit)
 	drag : edits.Hit -- the turn, bracket or ground end being dragged
 	dragEl : ElevationDrag -- the elevation point being dragged
@@ -197,7 +197,7 @@ local M : SessionMod = {}
 
 local CLOSED_TICKS = 2 -- a click this many ticks after the confirm window closed is the one that closed it
 local HEIGHT_PER_PX = 0.001 -- a Shift-drag raises an elevation point this share of the camera's distance per pixel
-M.DEFAULT_GRAB = 10.0 -- grab radius before the game gives one (m)
+M.DEFAULT_GRAB = 10.0 -- grab radius for handles before the eye is known (m)
 
 function M.new(logger : function(string), live : function() : boolean) : Session
 	return { phase = "from", ticks = 0, grab = M.DEFAULT_GRAB, log = logger, live = live }
@@ -639,7 +639,7 @@ function M.back(s : Session, w : World) : {Request}
 	local right = takeRight(s)
 	if not M.canGoBack(s) then return {} end
 	if s.phase == "done" and right then
-		s.grab = w.grab or s.grab
+		s.ray = w.ray or s.ray
 		remove(s, w)
 		return {}
 	end
@@ -663,7 +663,7 @@ function M.mouse(s : Session, w : World, button : integer, kind : MouseKind, y :
 	if s.confirmOpen or justClosed(s) then return false, {} end
 	if s.phase == "done" then
 		if kind == "pressed" then
-			s.grab = w.grab or s.grab
+			s.ray = w.ray or s.ray
 			s.pressGrabbed = press(s, w)
 			return s.pressGrabbed, {}
 		end
@@ -744,7 +744,7 @@ end
 -- end points toward the other end (the start: toward the mouse when it snaps to none).
 function M.tick(s : Session, w : World) : {Request}
 	s.ticks = s.ticks + 1
-	s.grab = w.grab or s.grab
+	s.ray = w.ray or s.ray
 	local reqs : {Request} = {}
 	local a, b = M.ends(s)
 	if a ~= nil and not w.endThere(a) then

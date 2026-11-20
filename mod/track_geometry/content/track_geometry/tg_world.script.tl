@@ -39,7 +39,7 @@ local record WorldMod
 	isTrackEdge : function(e : integer) : boolean
 	piecesAt : function(e : ends.End) : {integer}
 	mergeable : function(joint : integer, from : integer, to : integer) : boolean
-	endsNear : function(x : number, y : number, hovered : integer, skip ?: integer) : {ends.End}, ends.Piece
+	endsNear : function(x : number, y : number, hovered : integer, skip ?: integer, eye ?: ends.Point) : {ends.End}, ends.Piece
 	-- town buildings
 	townBuildingConstruction : function(e : integer) : integer
 	allExist : function(es : {integer}) : boolean
@@ -492,10 +492,10 @@ end
 function M.isTrackEdge(e : integer) : boolean return piece(e) ~= nil end
 
 -- The ends (free track ends and node ends) at the nodes of the piece `hovered` and of the track
--- pieces within ends.SNAP of (x, y) (x nil: only the hovered piece's), and the piece to cut
--- (tg_ends.snap): the hovered one when it is a track piece, else the nearest within
--- ends.PIECE_SNAP of (x, y), never edge `skip`.
-function M.endsNear(x : number, y : number, hovered : integer, skip ?: integer) : {ends.End}, ends.Piece
+-- pieces within ends.SNAP or ends.REACH_MAX of (x, y) (x nil: only the hovered piece's), and the
+-- piece to cut (tg_ends.snap): the hovered one when it is a track piece, else the nearest in reach
+-- of (x, y) from eye (tg_ends.nearestPiece), never edge `skip`.
+function M.endsNear(x : number, y : number, hovered : integer, skip ?: integer, eye ?: ends.Point) : {ends.End}, ends.Piece
 	local nodes : {integer : boolean} = {}
 	local around : {ends.Piece} = {}
 	local function add(pc : ends.Piece) : ends.Piece
@@ -504,14 +504,14 @@ function M.endsNear(x : number, y : number, hovered : integer, skip ?: integer) 
 	end
 	local pc = add(piece(hovered))
 	if x ~= nil then
-		local r = ends.SNAP
+		local r = math.max(ends.SNAP, ends.REACH_MAX)
 		pcall(function()
 			local box = api.type.Box3.new(api.type.Vec3f.new(x - r, y - r, -2000), api.type.Vec3f.new(x + r, y + r, 6000))
 			api.engine.system.octreeSystem.findIntersectingEntities(box, function(e : Engine.Entity, _bv : Engine.Component.BoundingVolume)
 				around[#around + 1] = add(piece(e))
 			end)
 		end)
-		if pc == nil then pc = ends.nearestPiece(around, x, y, skip) end
+		if pc == nil then pc = ends.nearestPiece(around, x, y, skip, eye) end
 	end
 	if pc ~= nil then pc.beyond = runningOn({ pc }) end
 	local out : {ends.End} = {}

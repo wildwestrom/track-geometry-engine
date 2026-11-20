@@ -170,6 +170,29 @@ do
 	check(ok, "a bracket: a bar across the leg, its tips along it towards its curve, flat at the ground's height with no profile")
 end
 
+-- With the eye known (the mouse's view ray), each handle is drawn at its own grab radius (what
+-- is drawn is what is clicked): far off, the 50 m ceiling; a bracket's bar and tips with it.
+do
+	local turn = E.turn(bg, 2)
+	local farRay = { ex = turn.x, ey = turn.y - 8000, ez = 6000, gx = turn.x, gy = turn.y, gz = 0 }
+	local ss = shapes(bg, { ray = farRay })
+	local c = ofColor(ss, turn.mobility)[1]
+	check(c ~= nil and near(c.r, 50), "far from the eye, a turn's circle at the 50 m ceiling")
+	local b = ofColor(ss, "bracket")[1]
+	local h = nil
+	for _, hh in ipairs(E.handles(bg)) do if hh.kind == "entry" or hh.kind == "exit" then h = h or hh end end
+	local across = -(b.pts[1][1] - h.x) * h.uy + (b.pts[1][2] - h.y) * h.ux
+	local along = (b.pts[1][1] - h.x) * h.ux + (b.pts[1][2] - h.y) * h.uy
+	check(near(across, E.BRACKET_BAR * 50) and near(along, E.BRACKET_TIP * 50), "...and a bracket's bar and tips at its own radius")
+	local osc = ofColor(ss, "osculating")[1]
+	check(osc ~= nil and osc.step > 50 / 4, "zoomed far out, an osculating circle's steps grow past the grab ceiling: " .. tostring(osc and osc.step))
+	-- the eye 300 m from the turn: its circle smaller than the ground end's, further off
+	local nearRay = { ex = turn.x, ey = turn.y, ez = 300, gx = turn.x, gy = turn.y, gz = 0 }
+	local s2 = shapes(bg, { ray = nearRay })
+	local tc, gc = ofColor(s2, turn.mobility)[1], ofColor(s2, "groundEnd")[1]
+	check(tc.r < gc.r and tc.r >= 3 and tc.r < 10, string.format("nearer the eye, a smaller circle (%.1f m, %.1f m)", tc.r, gc.r))
+end
+
 -- Vertical mode: a circle on the ground per point, and a post up to it when off the ground.
 do
 	local v = assert(E.new(vend(0, 0, 0, 100, 0), gnd(1000, 0, 3)))
@@ -204,6 +227,13 @@ do
 	check(#ofColor(idle, "leg") == 0 and #ofColor(idle, "osculating") == 0, "vertical: no legs, no osculating circles")
 	-- with no profile, nothing (the stub stands in for a profile that cannot be solved)
 	check(#withoutProfile(vshapes) == 0, "vertical with no profile: nothing")
+	-- with the eye known, each circle at its point's own grab radius: 1 km over point 2, 20 m
+	local p2 = pts[2]
+	local above = { ex = p2.x, ey = p2.y, ez = p2.z + 1000, gx = p2.x, gy = p2.y, gz = 3 }
+	local sized = {}
+	for _, s in ipairs(vshapes({ ray = above })) do if s.kind == "circle" then sized[#sized + 1] = s end end
+	check(near(sized[2].r, 20) and sized[1].r > 20 and sized[5].r > 20,
+		"vertical: with the eye known, each circle at its own radius: 20 m 1 km under the eye, more further off")
 end
 
 -- Osculating circles: one per arc, round its centre, of its radius.

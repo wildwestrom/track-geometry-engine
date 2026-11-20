@@ -30,7 +30,6 @@ local speedprobes = require("track_geometry_tool::/track_geometry/tg_speedprobe.
 
 local TAG = "[track_geometry_tool] "
 local HOUSE_REACH = 3.0 -- a town building this close to the track's centre line is in its way (m; its box, seen from above)
-local GRAB = 0.02 -- grab radius for handles, as a share of the camera's distance
 local RAIL_CURSOR = 1024 -- the track builder's mouse cursor ("Rail" in the game's gui_react_util.tl)
 
 local function say(msg : string)
@@ -127,7 +126,6 @@ local record ToolState
 	lastCurveSpeeds : {integer : number} -- a sketch's curve speeds as last read, by turn: kept for a curve not measured yet
 	screen : {ScreenBadge} -- the line's badges on the screen (placed by TgProbe every frame)
 	screenKey : string -- changes when the badges move on the screen
-	grabNow : number -- grab radius at the last tick (m)
 	camDist : number -- the camera's distance at the last tick (m); nil when unknown
 	vbadgesKey : string -- the edit and grade limit the profile's badges were made for
 	placedView : string -- the camera, screen and badges the badges were last placed for
@@ -1006,13 +1004,21 @@ local function geoSnaps() : boolean
 	return panelValue("disableSnapping") ~= 2 and not shiftHeld()
 end
 
+-- The eye (the camera) as of the last frame, for the snaps' reach (tg_ends.reach); nil until read.
+local function eyePoint() : ends.Point
+	local eye = tool.eye
+	if eye == nil then return nil end
+	return { x = eye.x, y = eye.y, z = eye.z }
+end
+
 -- The end the mouse picks: what it snaps to (tg_ends.snap) on the track and nodes near it, or
 -- the ground there when Geometry mode does not snap now. Ends already picked stay.
 local function snapEnd(x : number, y : number, z : number, hovered : integer, exclude : ends.End) : ends.End, string
 	if not geoSnaps() then return ends.snap({}, nil, x, y, z, exclude) end
+	local eye = eyePoint()
 	-- (near the start's piece, not under the mouse: the ground, not a refusal)
-	local near, piece = world.endsNear(x, y, hovered, exclude ~= nil and exclude.piece ~= nil and exclude.piece.edge or nil)
-	return ends.snap(near, piece, x, y, z, exclude)
+	local near, piece = world.endsNear(x, y, hovered, exclude ~= nil and exclude.piece ~= nil and exclude.piece.edge or nil, eye)
+	return ends.snap(near, piece, x, y, z, exclude, eye)
 end
 -- What the session needs from the game, as of now. fresh (the tool's tick): read the camera
 -- again; else (a mouse or "back" event) as it was at the last tick.
@@ -1020,14 +1026,13 @@ local function worldNow(fresh : boolean) : sessions.World
 	if fresh then
 		local ok, cam = pcall(function() : number return api.gui.camera.getCameraData().z end)
 		tool.camDist = ok and cam ~= nil and cam == cam and cam as number or nil
-		-- (the grab radius: a fixed share of the screen, whatever the zoom)
-		tool.grabNow = tool.camDist ~= nil and math.max(3.0, GRAB * tool.camDist) or sessions.DEFAULT_GRAB
 	end
+	-- (the handles' grab radii are measured from the ray's eye: tg_edit.grabAt)
 	local eye, ray = tool.eye, nil as edits.Ray
 	if eye ~= nil and tool.terrX ~= nil and tool.terrZ ~= nil then
 		ray = { ex = eye.x, ey = eye.y, ez = eye.z, gx = tool.terrX, gy = tool.terrY, gz = tool.terrZ }
 	end
-	return { terrX = tool.terrX, terrY = tool.terrY, terrZ = tool.terrZ, ray = ray, hovered = tool.hovered, grab = tool.grabNow,
+	return { terrX = tool.terrX, terrY = tool.terrY, terrZ = tool.terrZ, ray = ray, hovered = tool.hovered,
 		cameraDist = tool.camDist, shift = shiftHeld, gradeLimit = gradeLimit, snap = snapEnd, endThere = world.joinable }
 end
 
@@ -1077,7 +1082,7 @@ local function toolTick() : string
 	return table.concat({ tostring(tool.opens or 0), sess.phase, G.ghost.key ~= nil and ghosts.viewKey(G) or "-", tool.screenKey or "-", sess.hoverMsg or "", tostring(G.ghost.cost), G.ghost.errors or "", tostring(G.ghost.built ~= nil),
 		G.ghost.offending ~= nil and (G.ghost.offending.first .. ":" .. G.ghost.offending.last) or "-",
 		sess.edit ~= nil and tostring(sess.edit.rev) or "-", u ~= nil and (u.kind .. u.i) or "-", h ~= nil and (h.kind .. tostring(h.i)) or "-",
-		string.format("%.0f", sess.grab or 0), sess.editMsg or "",
+		sess.editMsg or "",
 		sess.mode as string or "-", tostring(sess.dragEl ~= nil), cursorKey() }, "|")
 end
 
@@ -1418,7 +1423,10 @@ local function gizmoKey() : string
 	local e = sess.edit
 	if e == nil then return "-" end
 	local h, d, el = sess.hit, sess.drag, sess.dragEl
-	return table.concat({ tostring(e), tostring(e.rev), sess.mode as string or "-", string.format("%.2f", sess.grab or 0),
+	-- (the eye, to 2 m: each circle's radius is measured from it, GRAB of a metre's change being a few cm)
+	local ray = sess.ray
+	local eyeKey = ray ~= nil and string.format("%.0f,%.0f,%.0f", ray.ex / 2, ray.ey / 2, ray.ez / 2) or "-"
+	return table.concat({ tostring(e), tostring(e.rev), sess.mode as string or "-", string.format("%.2f", sess.grab or 0), eyeKey,
 		h ~= nil and (h.kind .. tostring(h.i)) or "-", d ~= nil and (d.kind .. tostring(d.i)) or "-",
 		el ~= nil and tostring(el.i) or "-", tostring(sess.selected) }, "|")
 end
