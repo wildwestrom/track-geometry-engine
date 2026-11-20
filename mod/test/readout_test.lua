@@ -120,4 +120,23 @@ check(pieceSp[1] == 50 and pieceSp[2] == 30 and pieceSp[3] == nil, "piece speeds
 pieceSp = R.pieceSpeeds({ [-1] = 1, [-2] = 1 }, 1, function(e) return e == -2 and 20 or nil end)
 check(pieceSp[1] == 20, "piece speeds: a split piece with no speed on one edge takes the other's")
 
+-- sketch speeds: curves 1 (30..90 m, R 200) and 2 (150..210 m, R 400) on the 300 m path; a fake probe
+-- that measures at most what the budget allows
+local sc = { { s0 = 30, s1 = 90, sMid = 60, radius = 200, turn = 1 }, { s0 = 150, s1 = 210, sMid = 180, radius = 400, turn = 2 } }
+local known, measured = { [200] = 20 }, {}
+local fake = {
+	cached = function(r) return known[r] end,
+	speedAt = function(r) measured[#measured + 1] = r; known[r] = r / 10; return known[r] end,
+}
+local sp, byTurn = R.sketchSpeeds(nodes, sc, fake.cached, fake.speedAt, {})
+check(#measured == 1 and measured[1] == 400, "sketch speeds: only the radius not known is measured")
+check(sp[1] == 1000 and sp[5] == 20 and sp[17] == 40 and sp[30] == 1000, "sketch speeds: curve pieces take their curve's speed, straights none")
+check(byTurn[1] == 20 and byTurn[2] == 40, "sketch speeds: kept per curve")
+measured, known = {}, {}
+local ss, bt = R.sketchSpeeds(nodes, sc, fake.cached, fake.speedAt, { [1] = 15, [2] = 25 })
+check(#measured == 1 and measured[1] == 200, "sketch speeds: at most one measurement per call")
+check(ss[5] == 20 and ss[17] == 25 and bt[2] == 25, "sketch speeds: a curve not measured yet keeps its previous speed")
+local none = R.sketchSpeeds(nodes, sc, function() return nil end, function() return nil end, {})
+check(none[5] == nil and none[1] == 1000, "sketch speeds: nothing known, nothing made up")
+
 H.done()

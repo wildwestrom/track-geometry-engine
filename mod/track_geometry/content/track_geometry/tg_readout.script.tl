@@ -33,6 +33,7 @@ local record Badge
 	steep : boolean -- spans: too steep (past the grade limit at a node over it)
 end
 
+
 local record Readout
 	Curve : Curve
 	Badge : Badge
@@ -42,6 +43,7 @@ local record Readout
 	profileBadges : function(nodes : {alignment.Sample}, p : profiles.Profile, every : number, limit ?: number) : {Badge}
 	summary : function(nodes : {alignment.Sample}, z : {number}, speeds : {number}, trackSpeed : number, minRadius : number) : {string}
 	pieceSpeeds : function(pieceOf : {integer : integer}, m : integer, edgeSpeed : function(edge : integer) : number) : {number}
+	sketchSpeeds : function(nodes : {alignment.Sample}, curves : {Curve}, cached : function(R : number) : number, measure : function(R : number) : number, prev : {integer : number}) : {number}, {integer : number}
 end
 
 local M : Readout = {}
@@ -188,6 +190,39 @@ function M.pieceSpeeds(pieceOf : {integer : integer}, m : integer, edgeSpeed : f
 		if i >= 1 and i <= m and v ~= nil and (out[i] == nil or v < out[i]) then out[i] = v end
 	end
 	return out
+end
+
+-- A sketch has no game check, so its curve speeds come from the speed probe's lookup on each
+-- curve's radius (cached: what it knows; measure: a dry run). The pieces of a curve take its speed,
+-- the others none (NO_LIMIT). At most one radius is measured per call (the dry run costs); a curve
+-- not known yet keeps its speed from `prev` (by turn, the last call's second result), or has none.
+-- Approximate: the game's own check of the settled ghost replaces it.
+function M.sketchSpeeds(nodes : {alignment.Sample}, curves : {Curve}, cached : function(R : number) : number, measure : function(R : number) : number, prev : {integer : number}) : {number}, {integer : number}
+	local byTurn : {integer : number} = {}
+	local budget = 1
+	local ofCurve : {number} = {}
+	for i, c in ipairs(curves) do
+		local v : number = nil
+		if c.radius ~= nil then
+			v = cached(c.radius)
+			if v == nil and budget > 0 then
+				budget = budget - 1
+				v = measure(c.radius)
+			end
+		end
+		if v == nil and c.turn ~= nil and prev ~= nil then v = prev[c.turn] end
+		ofCurve[i] = v
+		if v ~= nil and c.turn ~= nil then byTurn[c.turn] = v end
+	end
+	local out : {number} = {}
+	for j = 1, #nodes - 1 do
+		local mid = (nodes[j].s + nodes[j + 1].s) / 2
+		out[j] = NO_LIMIT
+		for i, c in ipairs(curves) do
+			if mid >= c.s0 and mid <= c.s1 then out[j] = ofCurve[i]; break end
+		end
+	end
+	return out, byTurn
 end
 
 local function kmh(v : number) : string

@@ -18,6 +18,7 @@ end
 
 local record Probe
 	speedAt : function(R : number) : number -- nil when the game cannot say
+	cached : function(R : number) : number -- the answer already known, never measuring (nil: not yet)
 	radiusFor : function(v : number) : number -- nil when the game cannot say
 	top : function() : number
 end
@@ -54,12 +55,22 @@ function M.new(src : Source) : Probe
 	local failed : {string : boolean} = {} -- track types the game gave no speed for (a failing call costs ~300 ms)
 	local probe : Probe = { top = src.top }
 
-	-- Cached by track type and radius (to 0.1 m).
-	probe.speedAt = function(R : number) : number
+	-- The cache key: the track type and the radius (to 0.1 m); nil for a radius nothing can be said of.
+	local function keyFor(R : number) : string
 		if R == nil or R ~= R or R < 1 or not src.ready() then return nil end
+		return string.format("%s|%.1f", src.key(), R)
+	end
+
+	probe.cached = function(R : number) : number
+		local key = keyFor(R)
+		return key ~= nil and cache[key] or nil
+	end
+
+	probe.speedAt = function(R : number) : number
+		local key = keyFor(R)
+		if key == nil then return nil end
 		local type = src.key()
 		if failed[type] then return nil end
-		local key = string.format("%s|%.1f", type, R)
 		if cache[key] ~= nil then return cache[key] end
 		local ok, v = pcall(src.measure, R)
 		if not ok or v == nil then

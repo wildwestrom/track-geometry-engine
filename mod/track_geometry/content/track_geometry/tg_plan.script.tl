@@ -54,6 +54,7 @@ local record PlanMod
 	path : function(a : ends.End, b : ends.End, e : edits.Edit, ground : Ground, water : Water) : Plan, string
 	switches : function(a : ends.End, b : ends.End, nodes : {alignment.Sample}, piecesAt : PiecesAt, mergeable : Mergeable) : {integer}, {ends.Run}
 	readout : function(plan : Plan, speeds : {number}) : Readout, string
+	readoutDense : function(plan : Plan, carried : {number}) : Readout, string
 	summary : function(r : Readout, trackSpeed : number) : {string}
 end
 
@@ -190,8 +191,12 @@ end
 -- the limits on the dense pieces, and a badge at each curve and every BADGE_EVERY along the path.
 -- Also why there are no badges, when making them failed.
 function M.readout(plan : Plan, speeds : {number}) : Readout, string
+	return M.readoutDense(plan, alignment.carry(plan.built.nodes, speeds, plan.dense.nodes))
+end
+
+-- The same from speeds already on the dense pieces (a sketch's: tg_readout.sketchSpeeds).
+function M.readoutDense(plan : Plan, carried : {number}) : Readout, string
 	local d = plan.dense
-	local carried = alignment.carry(plan.built.nodes, speeds, d.nodes)
 	local ok, bs = pcall(function() : {readout.Badge}
 		local out = readout.badges(d.nodes, d.z, carried, plan.curves)
 		for _, b in ipairs(readout.alongBadges(d.nodes, d.z, carried, M.BADGE_EVERY)) do out[#out + 1] = b end

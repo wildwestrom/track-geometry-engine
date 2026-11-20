@@ -123,6 +123,8 @@ local record ToolState
 	gameCtx : GameContext -- for the confirm window
 	entry : string -- the track entry picked in the game's builder: the track to build (nil until the tool first runs)
 	line : PlanLine -- the plan as last read out: badges at its curves, summed up in the tooltip
+	sketchRev : integer -- sketches read out so far: each one's line has its own key
+	lastCurveSpeeds : {integer : number} -- a sketch's curve speeds as last read, by turn: kept for a curve not measured yet
 	screen : {ScreenBadge} -- the line's badges on the screen (placed by TgProbe every frame)
 	screenKey : string -- changes when the badges move on the screen
 	grabNow : number -- grab radius at the last tick (m)
@@ -163,7 +165,7 @@ local G : ghosts.State
 local function resetTool()
 	G = ghosts.new(say, port)
 	tool.pending, tool.hovered, tool.vbadges, tool.line, tool.screen, tool.screenKey, tool.matchRedraws = nil, nil, nil, nil, nil, nil, nil
-	tool.sketchEdges, tool.section, tool.describe, tool.sectionEdges, tool.hl = nil, nil, nil, nil, nil
+	tool.sketchEdges, tool.section, tool.describe, tool.sectionEdges, tool.hl, tool.lastCurveSpeeds = nil, nil, nil, nil, nil, nil
 end
 
 ------------------------------------------------------------------ track type
@@ -259,6 +261,7 @@ local function mapAlong(pts : {{number}}) : {integer}, {crossings.Street}
 	return houses, streets
 end
 
+local gameSpeeds : speedprobes.Probe -- the game's curve speed on a radius, on the track type (made below)
 local sketchLine : function(plan : plans.Plan) : {Builtin.Type.EdgeRenderable.Edge} -- (with the gizmos)
 local pieceLine : function(nodes : {alignment.Sample}, z : {number}, j : integer, k : integer) : {Builtin.Type.EdgeRenderable.Edge} -- (likewise)
 
@@ -289,6 +292,15 @@ local function nearestPiece(nodes : {alignment.Sample}, x : number, y : number) 
 	return best, bestD
 end
 
+-- The readout of a sketch's plan: its curve speeds from the speed probe's lookup (tg_readout.sketchSpeeds).
+local function sketchReadout(plan : plans.Plan) : plans.Readout
+	local speeds, byTurn = readout.sketchSpeeds(plan.dense.nodes, plan.curves, gameSpeeds.cached, gameSpeeds.speedAt, tool.lastCurveSpeeds)
+	tool.lastCurveSpeeds = byTurn
+	local r, why = plans.readoutDense(plan, speeds)
+	if why ~= nil then say("badges: " .. why) end
+	return r
+end
+
 -- Make the ghost of the path from a to b (none without both): the port's make. sketch: the mouse
 -- is moving the path, so no proposal, only the path as a line (tool.sketchEdges). A sketch plans
 -- the path without the ground and water (no bridges or tunnels): its line needs only the plan's
@@ -312,9 +324,15 @@ local function makeGhost(a : ends.End, b : ends.End, sketch : boolean) : ghosts.
 	if sketch then
 		local okL, l = pcall(sketchLine, plan)
 		if okL then tool.sketchEdges = l as {Builtin.Type.EdgeRenderable.Edge} else say("ghost: the path's line: " .. tostring(l)) end
-		tool.line = nil
+		-- (the readout while the path moves: curve speeds from the probe's lookup, so approximate;
+		-- the ghost's own check replaces it. The key matches no ghost's, so nothing confirms on it.)
+		local okR, r = pcall(sketchReadout, plan)
+		-- (a new key each time: placeBadges re-places the badges only when its key changes)
+		tool.sketchRev = (tool.sketchRev or 0) + 1
+		if okR then tool.line = { key = "sketch" .. tostring(tool.sketchRev), readout = r as plans.Readout } else tool.line = nil; say("ghost: the sketch's readout: " .. tostring(r)) end
 		return g
 	end
+	tool.lastCurveSpeeds = nil -- (a ghost: the next path starts with none)
 	local nodes, grades, zs, kinds = plan.built.nodes, plan.grades, plan.built.z, plan.kinds
 	local replace, runs = plans.switches(a, b, nodes, world.piecesAt, world.mergeable)
 	local pts = layouts.footprint(nodes, kinds, 4.0)
@@ -699,7 +717,6 @@ end
 ------------------------------------------------------------------ the mode window
 
 local run : function(reqs : {sessions.Request}) -- (below, with the session's adapter)
-local gameSpeeds : speedprobes.Probe -- the game's curve speed on a radius, on the track type (made below)
 
 local record ModeParam -- (none: the window reads the session)
 end

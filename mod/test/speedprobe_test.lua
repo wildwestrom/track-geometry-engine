@@ -24,6 +24,8 @@ local probe = P.new{
 check(near(probe.speedAt(300), speedOn(300)), "speedAt: the game's speed on the radius")
 local n = calls
 probe.speedAt(300.04)
+check(near(probe.cached(300), speedOn(300)) and calls == n, "cached: what is known, never measuring")
+check(probe.cached(777) == nil and calls == n, "cached: an unknown radius is not measured")
 check(calls == n, "speedAt: asked again (to 0.1 m), it is not measured again")
 check(probe.top() == 27.5, "top: the track's top speed")
 check(probe.speedAt(nil) == nil and probe.speedAt(0.5) == nil and probe.speedAt(0 / 0) == nil, "speedAt: no radius, no speed")
