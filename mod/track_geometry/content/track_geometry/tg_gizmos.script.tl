@@ -8,9 +8,10 @@
 --               curve.
 --   vertical  : at each end and elevation point a circle on the ground (where the mouse grabs it)
 --               and a post from the ground up to the track (a point's own height).
--- Widths and steps are in metres. The width is fixed (Network Toolkit's settings: 1.5, with the
--- geometry 1 wide and 1 m steps); each circle is at its handle's own grab radius (tg_edit.grabAt,
--- from the eye of the session's view ray), so what is drawn is what the mouse picks.
+-- Widths and steps are in metres. The width is GIZMO_WIDTH near the eye (Network Toolkit's
+-- settings: 1.5, with the geometry 1 wide and 1 m steps) and grows with the distance from it
+-- (widthAt), so the lines stay visible zoomed out; each circle is at its handle's own grab radius
+-- (tg_edit.grabAt, from the eye of the session's view ray), so what is drawn is what the mouse picks.
 
 local edits = require("track_geometry_tool::/track_geometry/tg_edit.script.tl")
 local ends = require("track_geometry_tool::/track_geometry/tg_ends.script.tl")
@@ -53,6 +54,9 @@ local record GizmosMod
 	Circle : Circle
 	GIZMO_STEP : number
 	GIZMO_WIDTH : number
+	WIDTH_SHARE : number
+	WIDTH_RATIO : number
+	widthAt : function(eye : ends.Point, x : number, y : number, z : number, floor : number) : number
 	LEG_STEP : number
 	MAX_LEG_PIECES : integer
 	of : function(sess : sessions.Session, groundAt : function(x : number, y : number) : number) : {Shape}
@@ -61,7 +65,24 @@ end
 
 local M : GizmosMod = {}
 M.GIZMO_STEP = 1.0 -- a gizmo is drawn in steps this long (m), unless it says otherwise
-M.GIZMO_WIDTH = 1.5 -- a gizmo line's width, whatever the zoom
+M.GIZMO_WIDTH = 1.5 -- a gizmo line's width near the eye (its floor: see widthAt)
+-- A line's width away from the eye: this share of its distance from it (to stay about one size
+-- on the screen), in steps of WIDTH_RATIO, so a small camera move changes no width (and redraws
+-- nothing). Tuned by hand in game.
+M.WIDTH_SHARE = 0.002
+M.WIDTH_RATIO = 1.25
+
+-- The width of a line at (x, y, z) (m): WIDTH_SHARE of its distance from eye, rounded to a whole
+-- number of WIDTH_RATIO steps up from floor; floor near the eye, or with no eye.
+function M.widthAt(eye : ends.Point, x : number, y : number, z : number, floor : number) : number
+	if eye == nil then return floor end
+	local want = M.WIDTH_SHARE * math.sqrt((x - eye.x) ^ 2 + (y - eye.y) ^ 2 + (z - eye.z) ^ 2)
+	if want <= floor then return floor end
+	return floor * M.WIDTH_RATIO ^ math.floor(math.log(want / floor) / math.log(M.WIDTH_RATIO) + 0.5)
+end
+
+-- (a line's width at a point: widthAt from the session's eye)
+local type Width = function(x : number, y : number, z : number) : number
 M.LEG_STEP = 10.0 -- legs (and spirals) are cut into pieces this long (m)...
 M.MAX_LEG_PIECES = 60 -- ...or this many per line, on long ones
 local POST_GAP = 0.1 -- a point this far (m) or less off the ground gets no post
@@ -99,8 +120,10 @@ local function circle(x : number, y : number, z : number, r : number, color : st
 	return { kind = "circle", x = x, y = y, z = z, r = r, color = color, width = width, step = step }
 end
 
-local function line(pts : {{number}}, color : string, width : number) : Shape
-	return { kind = "line", pts = pts, color = color, width = width, step = M.GIZMO_STEP }
+-- (as wide as at its middle point)
+local function line(pts : {{number}}, color : string, w : Width) : Shape
+	local mid = pts[math.floor((#pts + 1) / 2)]
+	return { kind = "line", pts = pts, color = color, width = w(mid[1], mid[2], mid[3]), step = M.GIZMO_STEP }
 end
 
 -- How many pieces a line len long is cut into: each at most LEG_STEP long (longer on very long
@@ -158,7 +181,7 @@ local function bracketPoints(h : edits.Hit, z : number, r : number) : {{number}}
 	return pts
 end
 
-local function horizontal(sess : sessions.Session, groundAt : function(number, number) : number, w : number) : {Shape}
+local function horizontal(sess : sessions.Session, groundAt : function(number, number) : number, w : Width) : {Shape}
 	local e, r, ray = sess.edit, sess.grab, sess.ray
 	local hot = sess.drag or sess.hit
 	local function isHot(h : edits.Hit) : boolean return hot ~= nil and hot.kind == h.kind and hot.i == h.i end
@@ -171,7 +194,7 @@ local function horizontal(sess : sessions.Session, groundAt : function(number, n
 		local zoom = r
 		if ray ~= nil then zoom = ends.GRAB * math.sqrt((c.x - ray.ex) ^ 2 + (c.y - ray.ey) ^ 2 + (z - ray.ez) ^ 2) end
 		local step = math.max(M.GIZMO_STEP, zoom / 4)
-		out[#out + 1] = circle(c.x, c.y, z, c.r, "osculating", w, step)
+		out[#out + 1] = circle(c.x, c.y, z, c.r, "osculating", w(c.mx, c.my, z), step) -- (as wide as at its arc)
 	end
 	-- (the legs and handles: up at the track's height beside them, or on the ground with no profile)
 	local function trackAt(x : number, y : number) : number
@@ -190,7 +213,7 @@ local function horizontal(sess : sessions.Session, groundAt : function(number, n
 		if h.kind == "pi" or h.kind == "end" then
 			local role = isHot(h) and "hot" or h.kind == "pi" and h.mobility or "groundEnd"
 			local z = edits.onGround(e, h) and groundAt(h.x, h.y) or trackAt(h.x, h.y)
-			out[#out + 1] = circle(h.x, h.y, z, edits.grabAt(ray, h.x, h.y, z, r), role, w, M.GIZMO_STEP)
+			out[#out + 1] = circle(h.x, h.y, z, edits.grabAt(ray, h.x, h.y, z, r), role, w(h.x, h.y, z), M.GIZMO_STEP)
 		end
 	end
 	for _, h in ipairs(hs) do
@@ -205,7 +228,7 @@ end
 -- Roles: "fixed" at a track end (its height is the track's), "tooClose" at a point too close (it
 -- is not in the profile), "hot" under the mouse or dragged, "selected", "ray" at an elevation point
 -- (it slides along the path), "groundEnd" at a ground end (its height can be set).
-local function vertical(sess : sessions.Session, groundAt : function(number, number) : number, w : number) : {Shape}
+local function vertical(sess : sessions.Session, groundAt : function(number, number) : number, w : Width) : {Shape}
 	local e, r, ray = sess.edit, sess.grab, sess.ray
 	local out : {Shape} = {}
 	if edits.profile(e) == nil then return out end
@@ -216,7 +239,7 @@ local function vertical(sess : sessions.Session, groundAt : function(number, num
 			or i == sess.selected and "selected" or pt.slides and "ray" or "groundEnd"
 		local g = groundAt(pt.x, pt.y)
 		-- (its radius measured up at the point, where the mouse also picks it)
-		out[#out + 1] = circle(pt.x, pt.y, g, edits.grabAt(ray, pt.x, pt.y, pt.z, r), role, w, M.GIZMO_STEP)
+		out[#out + 1] = circle(pt.x, pt.y, g, edits.grabAt(ray, pt.x, pt.y, pt.z, r), role, w(pt.x, pt.y, g), M.GIZMO_STEP)
 		if math.abs(pt.z - g) > POST_GAP then
 			-- (a hair off vertical: a straight with no run has no direction)
 			out[#out + 1] = line({ { pt.x, pt.y, g }, { pt.x + 0.01, pt.y, pt.z } }, role, w)
@@ -228,7 +251,9 @@ end
 -- The gizmos of sess's edit, in draw order (later on top), for its mode; groundAt gives the height
 -- of the ground at (x, y), which handles sit over (the mouse picks them where it meets the ground).
 function M.of(sess : sessions.Session, groundAt : function(x : number, y : number) : number) : {Shape}
-	local w = M.GIZMO_WIDTH
+	local ray = sess.ray
+	local eye : ends.Point = ray ~= nil and { x = ray.ex, y = ray.ey, z = ray.ez } or nil
+	local function w(x : number, y : number, z : number) : number return M.widthAt(eye, x, y, z, M.GIZMO_WIDTH) end
 	if sessions.vertical(sess) then return vertical(sess, groundAt, w) end
 	return horizontal(sess, groundAt, w)
 end

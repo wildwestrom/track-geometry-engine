@@ -170,6 +170,19 @@ do
 	check(ok, "a bracket: a bar across the leg, its tips along it towards its curve, flat at the ground's height with no profile")
 end
 
+-- A line's width keeps about one size on the screen: WIDTH_SHARE of its distance from the eye, in
+-- steps of WIDTH_RATIO up from its floor (so a small camera move redraws nothing).
+do
+	local eye = { x = 0, y = 0, z = 0 }
+	check(Gz.widthAt(nil, 3000, 0, 0, 2.5) == 2.5, "width: with no eye, the floor")
+	check(Gz.widthAt(eye, 100, 0, 0, 1.5) == 1.5, "width: near the eye, the floor")
+	local w = Gz.widthAt(eye, 3000, 0, 0, 1.5)
+	local k = math.log(w / 1.5) / math.log(Gz.WIDTH_RATIO)
+	check(math.abs(w - Gz.WIDTH_SHARE * 3000) <= 0.12 * Gz.WIDTH_SHARE * 3000 and math.abs(k - math.floor(k + 0.5)) < 1e-9,
+		"width: 3 km off, about WIDTH_SHARE of it, a whole number of steps up from the floor: " .. w)
+	check(Gz.widthAt(eye, 3000, 0, 0, 1.5) == Gz.widthAt(eye, 3020, 5, 0, 1.5), "width: a few metres' move keeps the width")
+end
+
 -- With the eye known (the mouse's view ray), each handle is drawn at its own grab radius (what
 -- is drawn is what is clicked): far off, the 50 m ceiling; a bracket's bar and tips with it.
 do
@@ -184,6 +197,9 @@ do
 	local across = -(b.pts[1][1] - h.x) * h.uy + (b.pts[1][2] - h.y) * h.ux
 	local along = (b.pts[1][1] - h.x) * h.ux + (b.pts[1][2] - h.y) * h.uy
 	check(near(across, E.BRACKET_BAR * 50) and near(along, E.BRACKET_TIP * 50), "...and a bracket's bar and tips at its own radius")
+	local leg = ofColor(ss, "leg")[1]
+	check(leg.width > W and c.width > W and b.width > W, "far from the eye, the lines are wider")
+
 	local osc = ofColor(ss, "osculating")[1]
 	check(osc ~= nil and osc.step > 50 / 4, "zoomed far out, an osculating circle's steps grow past the grab ceiling: " .. tostring(osc and osc.step))
 	-- the eye 300 m from the turn: its circle smaller than the ground end's, further off
@@ -191,6 +207,7 @@ do
 	local s2 = shapes(bg, { ray = nearRay })
 	local tc, gc = ofColor(s2, turn.mobility)[1], ofColor(s2, "groundEnd")[1]
 	check(tc.r < gc.r and tc.r >= 3 and tc.r < 10, string.format("nearer the eye, a smaller circle (%.1f m, %.1f m)", tc.r, gc.r))
+	check(tc.width == W and ofColor(s2, "leg")[1].width < leg.width, "nearer the eye, thinner: the floor at 300 m")
 end
 
 -- Vertical mode: a circle on the ground per point, and a post up to it when off the ground.

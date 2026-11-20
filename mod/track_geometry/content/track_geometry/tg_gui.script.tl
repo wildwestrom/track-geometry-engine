@@ -1476,7 +1476,12 @@ local function edgesOf(s : gizmos.Shape) : {Builtin.Type.EdgeRenderable.Edge}
 end
 
 local SKETCH_EVERY = 50.0 -- the sketch is drawn in straights this long (m): 0.3 m off a 1 km curve
-local SKETCH_WIDTH = 2.5
+local SKETCH_WIDTH = 2.5 -- the sketch's width near the eye (m): wider further off (tg_gizmos.widthAt)
+
+-- The width of a sketch or refused line from (x0, y0, z0) to (x1, y1, z1): as at its middle.
+local function sketchWidth(x0 : number, y0 : number, z0 : number, x1 : number, y1 : number, z1 : number) : number
+	return gizmos.widthAt(eyePoint(), (x0 + x1) / 2, (y0 + y1) / 2, (z0 + z1) / 2, SKETCH_WIDTH)
+end
 
 -- The whole path of plan as a line (a sketch): straights through its dense nodes every
 -- SKETCH_EVERY, and its last, at the track's height.
@@ -1490,7 +1495,10 @@ sketchLine = function(plan : plans.Plan) : {Builtin.Type.EdgeRenderable.Edge}
 			local q = { nd.x, nd.y, dz[i] }
 			if last ~= nil then
 				local len = math.sqrt((q[1] - last[1]) ^ 2 + (q[2] - last[2]) ^ 2 + (q[3] - last[3]) ^ 2)
-				if len > 0.01 then out[#out + 1] = straightEdge(last[1], last[2], last[3], q[1], q[2], q[3], COLORS.sketch, SKETCH_WIDTH, len) end
+				if len > 0.01 then
+					local w = sketchWidth(last[1], last[2], last[3], q[1], q[2], q[3])
+					out[#out + 1] = straightEdge(last[1], last[2], last[3], q[1], q[2], q[3], COLORS.sketch, w, len)
+				end
 			end
 			last, lastS = q, nd.s
 		end
@@ -1504,7 +1512,10 @@ pieceLine = function(nodes : {alignment.Sample}, z : {number}, j : integer, k : 
 	for i = j, k do
 		local p, q = nodes[i], nodes[i + 1]
 		local len = math.sqrt((q.x - p.x) ^ 2 + (q.y - p.y) ^ 2 + (z[i + 1] - z[i]) ^ 2)
-		if len > 0.01 then out[#out + 1] = straightEdge(p.x, p.y, z[i], q.x, q.y, z[i + 1], COLORS.refused, SKETCH_WIDTH, len) end
+		if len > 0.01 then
+			local w = sketchWidth(p.x, p.y, z[i], q.x, q.y, z[i + 1])
+			out[#out + 1] = straightEdge(p.x, p.y, z[i], q.x, q.y, z[i + 1], COLORS.refused, w, len)
+		end
 	end
 	return out
 end
