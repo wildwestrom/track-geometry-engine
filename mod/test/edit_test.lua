@@ -674,7 +674,8 @@ local function tip(side, towards)
 end
 check(is(tip(1, -1), "exit", 3) and is(tip(-1, -1), "exit", 3) and is(tip(1, 1), "entry", 5) and is(tip(-1, 1), "entry", 5),
 	"brackets on a turn: past the circle, each one's tips pick it")
-check(hitAt(bk, bp[4].x + ax * 3 * R, bp[4].y + ay * 3 * R, R) == nil, "a bracket on a turn: nothing past its tips")
+local past = E.bracketAt(nil, bp[4].x, bp[4].y, 0, R).bar + R + 1 -- (past its bar's end, and its grab radius)
+check(hitAt(bk, bp[4].x + ax * past, bp[4].y + ay * past, R) == nil, "a bracket on a turn: nothing past its tips")
 -- (bg: track to ground, the end curve fills the leg up to the ground end at (300, 200); the leg
 -- from turn 2 (216.67, 0) runs along (250 / 3, 200): across it is (-200, 250 / 3))
 local bg = assert(E.new(endAt(0, 0, 0), gnd(300, 200)))
@@ -685,6 +686,18 @@ check(is(hitAt(bg, 300 + gx * 2, 200 + gy * 2, R), "end", 3), "a bracket on a gr
 check(is(hitAt(bg, 300 + gx * 1.4 * R, 200 + gy * 1.4 * R, R), "exit", 2)
 	and is(hitAt(bg, 300 - gx * 1.4 * R, 200 - gy * 1.4 * R, R), "exit", 2),
 	"a bracket on a ground end: past the circle, either tip picks the bracket")
+-- (picked within the grab radius of what is drawn: its bar and its tips' ends, but no further
+-- behind its bar than that)
+do
+	local gs = E.bracketAt(nil, gexit.x, gexit.y, 0, R)
+	local function at(across, along)
+		return hitAt(bg, gexit.x - gexit.uy * across + gexit.ux * along, gexit.y + gexit.ux * across + gexit.uy * along, R)
+	end
+	check(is(at(gs.bar, gs.tip + R / 2), "exit", 2) and is(at(-gs.bar, gs.tip + R / 2), "exit", 2),
+		"a bracket: just past its tips' ends picks it")
+	check(at(gs.bar * 0.9, -R - 1) == nil and at(gs.bar * 0.9, gs.tip + R + 1) == nil,
+		"a bracket: nothing further than its grab radius behind its bar or past its tips")
+end
 
 -- setting a curve's radius: the radius laid is the one asked, within what the legs and the minimum radius allow
 local sr = assert(E.new(endAt(0, 0, 0), endAt(3000, 2000, 90))) -- (one long-legged corner, turn 2)

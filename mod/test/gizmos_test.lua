@@ -43,6 +43,20 @@ local function withoutProfile(fn)
 end
 local function groundShapes(e) return withoutProfile(function() return shapes(e) end) end -- (as drawn with no profile)
 local function turnRole(s) return s.kind == "circle" and (s.color == "free" or s.color == "ray" or s.color == "fixed" or s.color == "groundEnd" or s.color == "hot") end
+local function brackets(e) local out = {} for _, h in ipairs(E.handles(e)) do if E.isBracket(h) then out[#out + 1] = h end end return out end
+local function same(a, b) return a ~= nil and b ~= nil and a.kind == b.kind and a.i == b.i end
+-- The bracket handle a drawn bracket b stands for: the one at the middle of its bar.
+local function handleOf(e, b)
+	for _, h in ipairs(brackets(e)) do
+		if near(b.pts[3][1] + b.pts[4][1], 2 * h.x) and near(b.pts[3][2] + b.pts[4][2], 2 * h.y) then return h end
+	end
+end
+-- A drawn bracket's size, measured from its first point (a tip's end): how far it is across the
+-- leg from h (its bar's reach) and along it (its tip's).
+local function measure(b, h)
+	local p = b.pts[1]
+	return -(p[1] - h.x) * h.uy + (p[2] - h.y) * h.ux, (p[1] - h.x) * h.ux + (p[2] - h.y) * h.uy
+end
 
 -- bg: track to ground, one turn (a curve with its two brackets) and the ground end
 local bg = assert(E.new(endAt(0, 0, 0), gnd(300, 200)))
@@ -104,13 +118,11 @@ do
 	check(tc ~= nil and near(tc.z, trackZ(turn.x, turn.y)) and tc.z > 100 and tc.z < 130,
 		"a turn's circle sits at the leg's height at its PI")
 	local ok, n = true, 0
-	for _, h in ipairs(E.handles(sl)) do
-		if h.kind == "entry" or h.kind == "exit" then
-			n = n + 1
-			for _, b in ipairs(ofColor(ss, "bracket")) do
-				if near(b.pts[3][1] + b.pts[4][1], 2 * h.x) and near(b.pts[3][2] + b.pts[4][2], 2 * h.y) then
-					for _, q in ipairs(b.pts) do ok = ok and near(q[3], trackZ(h.x, h.y)) end
-				end
+	for _, h in ipairs(brackets(sl)) do
+		n = n + 1
+		for _, b in ipairs(ofColor(ss, "bracket")) do
+			if same(handleOf(sl, b), h) then
+				for _, q in ipairs(b.pts) do ok = ok and near(q[3], trackZ(h.x, h.y)) end
 			end
 		end
 	end
@@ -152,8 +164,7 @@ end
 
 -- A bracket's points open towards its curve: tips along the leg, the bar across it.
 do
-	local hs = {}
-	for _, h in ipairs(E.handles(bg)) do if h.kind == "entry" or h.kind == "exit" then hs[#hs + 1] = h end end
+	local hs = brackets(bg)
 	local bs = ofColor(groundShapes(bg), "bracket")
 	local ok = #bs == #hs and #bs == 2
 	for k, b in ipairs(bs) do
@@ -161,10 +172,11 @@ do
 		local function along(p) return (p[1] - h.x) * h.ux + (p[2] - h.y) * h.uy end
 		local function across(p) return -(p[1] - h.x) * h.uy + (p[2] - h.y) * h.ux end
 		local z = slope(h.x, h.y)
+		local size = E.bracketAt(nil, h.x, h.y, z, R)
 		ok = ok and #b.pts == 6 and b.width == W
-			and near(along(b.pts[1]), E.BRACKET_TIP * R) and near(along(b.pts[6]), E.BRACKET_TIP * R)
+			and near(along(b.pts[1]), size.tip) and near(along(b.pts[6]), size.tip)
 			and near(along(b.pts[3]), 0) and near(along(b.pts[4]), 0)
-			and near(across(b.pts[1]), E.BRACKET_BAR * R) and near(across(b.pts[6]), -E.BRACKET_BAR * R)
+			and near(across(b.pts[1]), size.bar) and near(across(b.pts[6]), -size.bar)
 		for _, p in ipairs(b.pts) do ok = ok and near(p[3], z) end
 	end
 	check(ok, "a bracket: a bar across the leg, its tips along it towards its curve, flat at the ground's height with no profile")
@@ -183,8 +195,35 @@ do
 	check(Gz.widthAt(eye, 3000, 0, 0, 1.5) == Gz.widthAt(eye, 3020, 5, 0, 1.5), "width: a few metres' move keeps the width")
 end
 
+-- A bracket's bar and tips are each the larger of BRACKET_NEAR (in track widths) and BRACKET_FAR
+-- (in grab radii): up close all BRACKET_NEAR, far off all BRACKET_FAR.
+do
+	local tw = E.TRACK_WIDTH
+	local close = E.bracketAt(nil, 0, 0, 0, E.MIN_GRAB)
+	check(near(close.bar, E.BRACKET_NEAR.bar * tw) and near(close.tip, E.BRACKET_NEAR.tip * tw),
+		string.format("bracket size: up close, in track widths (%.2f, %.2f m)", close.bar, close.tip))
+	local far = E.bracketAt(nil, 0, 0, 0, 1000)
+	check(near(far.bar, E.BRACKET_FAR.bar * 1000) and near(far.tip, E.BRACKET_FAR.tip * 1000), "bracket size: far off, in grab radii")
+	-- (a grab radius where the bar is still its near size and the tips already their far one, or
+	-- the other way round: each takes its own larger)
+	local g = (E.BRACKET_NEAR.bar * tw / E.BRACKET_FAR.bar + E.BRACKET_NEAR.tip * tw / E.BRACKET_FAR.tip) / 2
+	local mid = E.bracketAt(nil, 0, 0, 0, g)
+	check(near(mid.bar, math.max(E.BRACKET_NEAR.bar * tw, E.BRACKET_FAR.bar * g)) and near(mid.tip, math.max(E.BRACKET_NEAR.tip * tw, E.BRACKET_FAR.tip * g)),
+		"bracket size: in between, its bar and tips each the larger of their own two")
+end
+
+-- A line's straights run on past each bend by (width / 2) tan(bend / 2), to fill its outside:
+-- none on a straight run, width / 2 at a right angle; the line's own ends stay where they are.
+do
+	local sq = Gz.straights({ kind = "line", width = 2, pts = { { 0, 0, 0 }, { 10, 0, 0 }, { 20, 0, 0 }, { 20, 10, 0 } } })
+	check(#sq == 3 and near(sq[1].p[1], 0) and near(sq[1].q[1], 10) and near(sq[2].p[1], 10) and near(sq[2].q[1], 21)
+		and near(sq[3].p[2], -1) and near(sq[3].q[2], 10), "straights: run on past a bend to fill it, the line's own ends kept")
+	check(near(sq[1].len, 10) and near(sq[2].len, 11) and near(sq[3].len, 11), "straights: each one's length, run-on included")
+end
+
 -- With the eye known (the mouse's view ray), each handle is drawn at its own grab radius (what
--- is drawn is what is clicked): far off, the 50 m ceiling; a bracket's bar and tips with it.
+-- is drawn is what is clicked): far off, the 50 m ceiling; a bracket at its own size from it
+-- (tg_edit.bracketAt).
 do
 	local turn = E.turn(bg, 2)
 	local farRay = { ex = turn.x, ey = turn.y - 8000, ez = 6000, gx = turn.x, gy = turn.y, gz = 0 }
@@ -192,13 +231,20 @@ do
 	local c = ofColor(ss, turn.mobility)[1]
 	check(c ~= nil and near(c.r, 50), "far from the eye, a turn's circle at the 50 m ceiling")
 	local b = ofColor(ss, "bracket")[1]
-	local h = nil
-	for _, hh in ipairs(E.handles(bg)) do if hh.kind == "entry" or hh.kind == "exit" then h = h or hh end end
-	local across = -(b.pts[1][1] - h.x) * h.uy + (b.pts[1][2] - h.y) * h.ux
-	local along = (b.pts[1][1] - h.x) * h.ux + (b.pts[1][2] - h.y) * h.uy
-	check(near(across, E.BRACKET_BAR * 50) and near(along, E.BRACKET_TIP * 50), "...and a bracket's bar and tips at its own radius")
+	local across, along = measure(b, handleOf(bg, b))
+	check(near(across, E.BRACKET_FAR.bar * 50) and near(along, E.BRACKET_FAR.tip * 50),
+		"...and a bracket's bar and tips BRACKET_FAR of that radius")
 	local leg = ofColor(ss, "leg")[1]
 	check(leg.width > W and c.width > W and b.width > W, "far from the eye, the lines are wider")
+
+	-- the eye 10 m over a bracket: its bar and tips their near size, in track widths
+	local h = brackets(bg)[1]
+	local onTop = { ex = h.x, ey = h.y, ez = 10, gx = h.x, gy = h.y, gz = 0 }
+	local tb = nil
+	for _, bb in ipairs(ofColor(shapes(bg, { ray = onTop }), "bracket")) do if same(handleOf(bg, bb), h) then tb = bb end end
+	local nearAcross, nearAlong = measure(tb, h)
+	check(near(nearAcross, E.BRACKET_NEAR.bar * E.TRACK_WIDTH) and near(nearAlong, E.BRACKET_NEAR.tip * E.TRACK_WIDTH),
+		string.format("with the eye right over it, a bracket at its near size (%.2f, %.2f m)", nearAcross, nearAlong))
 
 	local osc = ofColor(ss, "osculating")[1]
 	check(osc ~= nil and osc.step > 50 / 4, "zoomed far out, an osculating circle's steps grow past the grab ceiling: " .. tostring(osc and osc.step))

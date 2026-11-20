@@ -11,7 +11,8 @@
 -- Widths and steps are in metres. The width is GIZMO_WIDTH near the eye (Network Toolkit's
 -- settings: 1.5, with the geometry 1 wide and 1 m steps) and grows with the distance from it
 -- (widthAt), so the lines stay visible zoomed out; each circle is at its handle's own grab radius
--- (tg_edit.grabAt, from the eye of the session's view ray), so what is drawn is what the mouse picks.
+-- (tg_edit.grabAt, from the eye of the session's view ray; a bracket at its own size,
+-- tg_edit.bracketAt), so what is drawn is what the mouse picks.
 
 local edits = require("track_geometry_tool::/track_geometry/tg_edit.script.tl")
 local ends = require("track_geometry_tool::/track_geometry/tg_ends.script.tl")
@@ -49,6 +50,13 @@ local record Circle
 	z : number
 end
 
+-- A straight edge of a line: from p to q (each {x, y, z}), len long (m).
+local record Straight
+	p : {number}
+	q : {number}
+	len : number
+end
+
 local record GizmosMod
 	Shape : Shape
 	Circle : Circle
@@ -57,6 +65,8 @@ local record GizmosMod
 	WIDTH_SHARE : number
 	WIDTH_RATIO : number
 	widthAt : function(eye : ends.Point, x : number, y : number, z : number, floor : number) : number
+	Straight : Straight
+	straights : function(s : Shape) : {Straight}
 	LEG_STEP : number
 	MAX_LEG_PIECES : integer
 	of : function(sess : sessions.Session, groundAt : function(x : number, y : number) : number) : {Shape}
@@ -79,6 +89,42 @@ function M.widthAt(eye : ends.Point, x : number, y : number, z : number, floor :
 	local want = M.WIDTH_SHARE * math.sqrt((x - eye.x) ^ 2 + (y - eye.y) ^ 2 + (z - eye.z) ^ 2)
 	if want <= floor then return floor end
 	return floor * M.WIDTH_RATIO ^ math.floor(math.log(want / floor) / math.log(M.WIDTH_RATIO) + 0.5)
+end
+
+-- The straights of line s: one per pair of its points. An edge ends square, so at a bend each
+-- runs on past the joint by (width / 2) tan(bend / 2), at most width / 2: that fills the outside of
+-- the bend as a mitre would (a bracket's corners).
+function M.straights(s : Shape) : {Straight}
+	local pts, half = s.pts, s.width / 2
+	local dirs : {{number}} = {}
+	local lens : {number} = {}
+	for k = 1, #pts - 1 do
+		local p, q = pts[k], pts[k + 1]
+		local dx, dy, dz = q[1] - p[1], q[2] - p[2], q[3] - p[3]
+		local len = math.sqrt(dx * dx + dy * dy + dz * dz)
+		dirs[k] = len > 0 and { dx / len, dy / len, dz / len } or { 0, 0, 0 }
+		lens[k] = len
+	end
+	-- (how far the straights either side of point k run on past it)
+	local function past(k : integer) : number
+		if k <= 1 or k >= #pts then return 0 end
+		local a, b = dirs[k - 1], dirs[k]
+		local cos = a[1] * b[1] + a[2] * b[2] + a[3] * b[3]
+		local sin = math.sqrt((a[2] * b[3] - a[3] * b[2]) ^ 2 + (a[3] * b[1] - a[1] * b[3]) ^ 2 + (a[1] * b[2] - a[2] * b[1]) ^ 2)
+		if 1 + cos < 1e-9 then return half end
+		return math.min(half, half * sin / (1 + cos))
+	end
+	local out : {Straight} = {}
+	for k = 1, #pts - 1 do
+		local p, q, d = pts[k], pts[k + 1], dirs[k]
+		local e0, e1 = past(k), past(k + 1)
+		out[k] = {
+			p = { p[1] - d[1] * e0, p[2] - d[2] * e0, p[3] - d[3] * e0 },
+			q = { q[1] + d[1] * e1, q[2] + d[2] * e1, q[3] + d[3] * e1 },
+			len = lens[k] + e0 + e1,
+		}
+	end
+	return out
 end
 
 -- (a line's width at a point: widthAt from the session's eye)
@@ -167,10 +213,10 @@ local function spiralPoints(path : {geometry.Segment}, p : profiles.Profile, gro
 	return out
 end
 
--- A 〔 at bracket h, flat at height z: a bar across the leg, past the circles; at each end a
--- slanted corner and then a tip along the leg, towards the curve.
-local function bracketPoints(h : edits.Hit, z : number, r : number) : {{number}}
-	local bar, tip = edits.BRACKET_BAR * r, edits.BRACKET_TIP * r
+-- A 〔 at bracket h, of that size, flat at height z: a bar across the leg, past the circles; at
+-- each end a slanted corner and then a tip along the leg, towards the curve.
+local function bracketPoints(h : edits.Hit, size : edits.BracketSize, z : number) : {{number}}
+	local bar, tip = size.bar, size.tip
 	local corner = tip / 2
 	local shape = { { tip, bar }, { corner, bar }, { 0, bar - corner }, { 0, corner - bar }, { corner, -bar }, { tip, -bar } }
 	local pts : {{number}} = {}
@@ -217,9 +263,10 @@ local function horizontal(sess : sessions.Session, groundAt : function(number, n
 		end
 	end
 	for _, h in ipairs(hs) do
-		if h.kind == "entry" or h.kind == "exit" then
+		if edits.isBracket(h) then
 			local z = trackAt(h.x, h.y)
-			out[#out + 1] = line(bracketPoints(h, z, edits.grabAt(ray, h.x, h.y, z, r)), isHot(h) and "hot" or "bracket", w)
+			local size = edits.bracketAt(ray, h.x, h.y, z, r)
+			out[#out + 1] = line(bracketPoints(h, size, z), isHot(h) and "hot" or "bracket", w)
 		end
 	end
 	return out

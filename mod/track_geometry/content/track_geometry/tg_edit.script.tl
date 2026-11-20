@@ -164,16 +164,27 @@ local record CurveRead
 	maxRadius : number
 end
 
+-- A bracket's size: how far its bar reaches either side of the leg, and how far each tip reaches
+-- along the leg towards its curve.
+local record BracketSize
+	bar : number
+	tip : number
+end
+
 local record EditMod
 	Edit : Edit
 	Turn : Turn
 	CurveRead : CurveRead
 	Hit : Hit
 	Ray : Ray
-	BRACKET_BAR : number
-	BRACKET_TIP : number
+	BracketSize : BracketSize
 	MIN_GRAB : number
 	grabAt : function(ray : Ray, x : number, y : number, z : number, r : number) : number
+	TRACK_WIDTH : number
+	BRACKET_NEAR : BracketSize
+	BRACKET_FAR : BracketSize
+	isBracket : function(h : Hit) : boolean
+	bracketAt : function(ray : Ray, x : number, y : number, z : number, r : number) : BracketSize
 	MIN_SPAN : number
 	STEP : number
 	new : function(a : ends.End, b : ends.End, dp ?: geometry.DesignParams) : Edit, string
@@ -216,13 +227,15 @@ local record EditMod
 end
 
 local M : EditMod = {}
--- A bracket's shape, in grab radii (the radius of the turn and end circles): its bar across the
--- leg reaches BRACKET_BAR either side, past a circle under it, and each end bends BRACKET_TIP
--- along the leg towards its curve (a slanted corner, then the tip).
-M.BRACKET_BAR = 1.5
-M.BRACKET_TIP = 0.8
 -- The smallest grab radius (m): the floor of a handle's reach (tg_ends.reach).
 M.MIN_GRAB = 3.0
+-- A track's width (m): the vanilla tracks' trackDistance. A bracket's size up close is in it.
+M.TRACK_WIDTH = 5.0
+-- A bracket's size up close, in track widths (TRACK_WIDTH), and away from the eye, in grab radii
+-- (grabAt: its bar past a circle under it). Each of its bar and tips is the larger of the two
+-- (bracketAt), so its shape goes from the one to the other as the eye draws back.
+M.BRACKET_NEAR = { bar = 4.0, tip = 1.5 }
+M.BRACKET_FAR = { bar = 1.5, tip = 0.75 }
 
 -- Closest two neighbouring turns may get (m).
 local MIN_GAP = 10.0
@@ -629,6 +642,21 @@ function M.grabAt(ray : Ray, x : number, y : number, z : number, r : number) : n
 	return ends.reach({ x = ray.ex, y = ray.ey, z = ray.ez }, x, y, z, M.MIN_GRAB)
 end
 
+-- Whether h is a bracket (a curve's start or end).
+function M.isBracket(h : Hit) : boolean
+	return h.kind == "entry" or h.kind == "exit"
+end
+
+-- A bracket's size at (x, y, z) (m): its bar and its tips each the larger of BRACKET_NEAR (in track
+-- widths) and BRACKET_FAR (in grab radii, grabAt). tg_gizmos draws it at it, and hit picks it by it.
+function M.bracketAt(ray : Ray, x : number, y : number, z : number, r : number) : BracketSize
+	local grab = M.grabAt(ray, x, y, z, r)
+	return {
+		bar = math.max(M.BRACKET_NEAR.bar * M.TRACK_WIDTH, M.BRACKET_FAR.bar * grab),
+		tip = math.max(M.BRACKET_NEAR.tip * M.TRACK_WIDTH, M.BRACKET_FAR.tip * grab),
+	}
+end
+
 -- How far the point (px, py, pz) is from the ray (m): from the line beyond the eye.
 local function offRay(ray : Ray, px : number, py : number, pz : number) : number
 	local dx, dy, dz = ray.gx - ray.ex, ray.gy - ray.ey, ray.gz - ray.ez
@@ -662,13 +690,15 @@ function M.chainageOnRay(e : Edit, ray : Ray) : number, number
 	return best, bestD
 end
 
--- How far (x, y) is from the bar of the bracket h, squared, and how far along the leg on its
--- curve's side (negative: on the other side). The bar reaches BRACKET_BAR * r either side.
-local function offBar(h : Hit, x : number, y : number, r : number) : number, number
+-- How far (x, y) is from the bracket h of that size, squared: from the box its bar and tips span
+-- (size.bar either side of the leg, size.tip along it on its curve's side), so from what is drawn;
+-- and how far along the leg it is on its curve's side (negative: on the other side).
+local function offBracket(h : Hit, size : BracketSize, x : number, y : number) : number, number
 	local wx, wy = x - h.x, y - h.y
 	local along = wx * h.ux + wy * h.uy
-	local past = math.max(0, math.abs(wx * h.uy - wy * h.ux) - M.BRACKET_BAR * r)
-	return along * along + past * past, along
+	local pastBar = math.max(0, math.abs(wx * h.uy - wy * h.ux) - size.bar)
+	local pastTips = along < 0 and -along or math.max(0, along - size.tip)
+	return pastTips * pastTips + pastBar * pastBar, along
 end
 
 -- What is at (x, y) in reach, each candidate within its own grab radius (grabAt: from the eye of
@@ -733,21 +763,21 @@ function M.hit(e : Edit, vertical : boolean, x : number, y : number, r : number,
 	local bestD = math.huge
 	for _, h in ipairs(M.handles(e)) do
 		local z = heightOf(h)
-		local hr = M.grabAt(ray, h.x, h.y, z, r)
+		local grab = M.grabAt(ray, h.x, h.y, z, r)
 		local hx, hy = mouseAt(h, z)
 		local d = d2(hx, hy, h.x, h.y)
 		local off = d
 		-- (where handles sit together, a hair ahead: an end or a turn, in its circle, then the
 		-- bracket whose curve is on the mouse's side; so a curve that fills its leg up to an end,
 		-- a turn or the next curve is resized at its bracket's tips, or from its own side)
-		if h.kind == "entry" or h.kind == "exit" then
+		if M.isBracket(h) then
 			local along : number
-			off, along = offBar(h, hx, hy, hr)
+			off, along = offBracket(h, M.bracketAt(ray, h.x, h.y, z, r), hx, hy) -- (within its grab radius of its shape)
 			if along > 0 then d = d - 1e-6 end
 		else
 			d = d - 2e-6
 		end
-		if off <= hr * hr and d <= bestD then best, bestD = h, d end
+		if off <= grab * grab and d <= bestD then best, bestD = h, d end
 	end
 	if best ~= nil then return best end
 	local lx, ly = x, y -- (the legs: at the track's height beside them)

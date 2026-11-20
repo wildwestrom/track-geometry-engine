@@ -1459,7 +1459,7 @@ local function shapeKey(s : gizmos.Shape) : string
 	return table.concat(parts, "|")
 end
 
--- The edges of shape s: a circle as one, a line as one straight per pair of its points (each in one
+-- The edges of shape s: a circle as one, a line as its straights (tg_gizmos.straights, each in one
 -- step: a straight drawn in finer steps looks the same).
 local function edgesOf(s : gizmos.Shape) : {Builtin.Type.EdgeRenderable.Edge}
 	local c = COLORS[s.color]
@@ -1467,10 +1467,9 @@ local function edgesOf(s : gizmos.Shape) : {Builtin.Type.EdgeRenderable.Edge}
 		return { circleEdge(s.x, s.y, s.z, s.r, c, s.width, math.max(s.step, 2 * math.pi * s.r / CIRCLE_STEPS)) }
 	end
 	local out : {Builtin.Type.EdgeRenderable.Edge} = {}
-	for k = 1, #s.pts - 1 do
-		local p, q = s.pts[k], s.pts[k + 1]
-		local len = math.sqrt((q[1] - p[1]) ^ 2 + (q[2] - p[2]) ^ 2 + (q[3] - p[3]) ^ 2)
-		out[#out + 1] = straightEdge(p[1], p[2], p[3], q[1], q[2], q[3], c, s.width, math.max(s.step, len))
+	for _, st in ipairs(gizmos.straights(s)) do
+		local p, q = st.p, st.q
+		out[#out + 1] = straightEdge(p[1], p[2], p[3], q[1], q[2], q[3], c, s.width, math.max(s.step, st.len))
 	end
 	return out
 end
