@@ -1226,11 +1226,12 @@ local BADGE_STEEP = { 0.8, 0.12, 0.12, 0.95 } -- a span too steep (past the grad
 local BADGE_TEXT = { 1, 1, 1, 1 }
 local ICONS = "::/gui/construction/build_control/"
 local RADIUS_ICON = "track_geometry_tool::/gui/icons/tg_radius.tga" -- our own: the game has a curved road icon, not a track one
-local BADGE_W = 90 -- a badge's size on the screen, about (px): width, and height with three rows, two or one
-local BADGE_H3 = 72
+local BADGE_W = 90 -- a badge's size on the screen, about (px): width, and height with two rows or one
 local BADGE_H2 = 50
 local BADGE_H1 = 28
-local BADGE_GAP = 10 -- the badge sits this far (px) up and left of its curve, clear of the handles
+local BADGE_GAP = 40 -- a badge's nearest edge is this far (px) off the track, clear of the handles
+local BADGE_FAR = 160 -- a curve's badge goes at most this far (px) toward its arc's centre
+local BADGE_SPAN = 100 -- the track's direction at a badge is read over this many px (whole ones: readout.screenFrame)
 
 -- The track builder's slope icon for grade g: symbol_slope_-4 .. 4, a step per percent.
 local function slopeIcon(g : number) : string
@@ -1251,8 +1252,9 @@ local function badgeRow(icon : string, text : string) : TreeNodeId
 	}
 end
 
--- A curve's badge: its radius (as Network Toolkit labels one), speed and grade; an elevation point's: its height and grade; halfway
--- between two: the grade.
+-- A curve's badge: its radius (as Network Toolkit labels one; none with no arc) and speed; one along
+-- the path: its speed and grade; an elevation point's: its height and grade; halfway between two:
+-- the grade.
 local function badgeRows(b : readout.Badge) : {TreeNodeId}
 	local grade = badgeRow(slopeIcon(b.grade), string.format("%+.0f ‰", b.grade * 1000))
 	if b.kind == "point" then return { builtin.TextView{ meta = { styleSheet = styleutil.makeStyle{ color = BADGE_TEXT } }, text = string.format("%.1f m", b.z) }, grade } end
@@ -1261,8 +1263,9 @@ local function badgeRows(b : readout.Badge) : {TreeNodeId}
 	local top = trackType().speed
 	local v = b.speed ~= nil and top > 0 and math.min(b.speed, top) or b.speed
 	local speed = badgeRow(ICONS .. "symbol_speed_16.tga", v ~= nil and string.format("%.0f", v * 3.6) or "...")
-	if b.radius == nil then return { speed, grade } end
-	return { badgeRow(RADIUS_ICON, string.format("R %.0f m", b.radius)), speed, grade }
+	if b.kind == "along" then return { speed, grade } end
+	if b.radius == nil then return { speed } end
+	return { badgeRow(RADIUS_ICON, string.format("R %.0f m", b.radius)), speed }
 end
 
 local function badgeView(b : readout.Badge) : TreeNodeId
@@ -1273,7 +1276,9 @@ local function badgeView(b : readout.Badge) : TreeNodeId
 		children = badgeRows(b),
 	}
 	-- (a curve's badge is a button, which takes the click over its whole area: it selects the curve and
-	-- pops out the window. The others, and the curve badges of the profile, let the mouse through.)
+	-- pops out the window. The others let the mouse through, and so do curve badges in Profile mode:
+	-- the mode stays on when the tool starts over, and the preview ghost shows curve badges while
+	-- the end is being picked.)
 	if b.kind == "curve" and b.turn ~= nil and not sessions.vertical(sess) then
 		return builtin.Button{
 			meta = { styleSheet = style },
@@ -1309,13 +1314,13 @@ end)
 -- Every frame, from TgProbe (world2Screen is refused elsewhere): put the badges on the screen.
 local function placeBadges()
 	local l = tool.line
-	local list, key : {readout.Badge}, string
+	local curves, list, key : {readout.Badge}, {readout.Badge}, string
 	if sessions.vertical(sess) and sess.phase == "done" then
-		list, key = tool.vbadges, "v" .. tostring(sess.edit.rev)
+		curves, list, key = {}, tool.vbadges, "v" .. tostring(sess.edit.rev)
 	elseif l ~= nil and G.ghost.info ~= nil then
-		list, key = l.readout.badges, l.key
+		curves, list, key = l.readout.curves, l.readout.along, l.key
 	end
-	if list == nil or #list == 0 then
+	if list == nil or curves == nil or #list + #curves == 0 then
 		tool.screen, tool.screenKey = nil, nil
 		return
 	end
@@ -1325,29 +1330,67 @@ local function placeBadges()
 	-- (where they go on the screen changes only with the camera, the screen or the badges: about
 	-- a hundred world2Screen calls a frame on a long track are kept for when one of them does)
 	local cam = api.gui.camera.getCameraData()
-	local view = string.format("%s|%d|%.4f,%.4f,%.4f,%.5f,%.5f|%.0fx%.0f", key, #list, cam.x, cam.y, cam.z, cam.w, cam.q, w, h)
+	local view = string.format("%s|%d,%d|%.4f,%.4f,%.4f,%.5f,%.5f|%.0fx%.0f", key, #curves, #list, cam.x, cam.y, cam.z, cam.w, cam.q, w, h)
 	if view == tool.placedView and tool.screen ~= nil then return end
 	tool.placedView = view
 	local out : {ScreenBadge} = {}
 	local keys : {string} = {}
-	local taken : {{number}} = {} -- screen boxes of the badges placed so far: x, y (their corner), height
+	local taken : {{number}} = {} -- screen boxes of the badges placed so far: x, y (their top left), height
 	local function free(x : number, y : number, bh : number) : boolean
 		for _, t in ipairs(taken) do
-			if math.abs(x - t[1]) < BADGE_W and y > t[2] - t[3] and y - bh < t[2] then return false end
+			if math.abs(x - t[1]) < BADGE_W and y < t[2] + t[3] and t[2] < y + bh then return false end
 		end
 		return true
 	end
-	-- (the curves and points first; the badges along the path only where they do not cover one)
+	local function screenAt(x : number, y : number, z : number) : number, number
+		local q = api.gui.camera.world2Screen(api.type.Vec3f.new(x, y, z))
+		return q.x, q.y
+	end
+	-- b on the screen, bh tall with its top left corner at (cx, cy) (or as near as the screen
+	-- allows); a badge not a curve's only where it covers none placed before it
+	local function put(b : readout.Badge, cx : number, cy : number, bh : number)
+		-- (kept on the screen: the layout's h, v past 0..1 are not known to work)
+		cx = math.max(0, math.min(w - BADGE_W, cx))
+		cy = math.max(0, math.min(h - bh, cy))
+		if b.kind ~= "curve" and not free(cx, cy, bh) then return end
+		taken[#taken + 1] = { cx, cy, bh }
+		-- (h, v: an alignment, not a corner; NOTES.md, Badges layout)
+		out[#out + 1] = { h = cx / math.max(1, w - BADGE_W), v = cy / math.max(1, h - bh), badge = b }
+		-- (to the pixel: a fraction of one is no reason to draw the tool again)
+		keys[#keys + 1] = string.format("%.0f,%.0f", cx, cy)
+	end
+	-- b's point on the screen, a metre along the path and a metre across it to the left from there;
+	-- nil when its point is off the screen
+	local function frame(b : readout.Badge) : number, number, number, number, number, number
+		local px, py = screenAt(b.x, b.y, b.z)
+		if not (px >= 0 and px <= w and py >= 0 and py <= h) then return nil end
+		return readout.screenFrame(function(x : number, y : number) : number, number return screenAt(x, y, b.z) end,
+			b.x, b.y, b.dx, b.dy, BADGE_SPAN, 1000)
+	end
+	-- (the curves first, every one of them, inside their curve: overlapping ones stack in path
+	-- order, the slowest on top, as the layout draws its later children over the earlier)
+	local order : {readout.Badge} = {}
+	for _, b in ipairs(curves) do if not b.slowest then order[#order + 1] = b end end
+	for _, b in ipairs(curves) do if b.slowest then order[#order + 1] = b end end
+	for _, b in ipairs(order) do
+		local px, py, tx, ty, lx, ly = frame(b)
+		if px ~= nil then
+
+			local bh = b.radius ~= nil and BADGE_H2 or BADGE_H1
+			local cx, cy = readout.curveCorner(px, py, tx, ty, lx, ly, b.side, b.radius, BADGE_W, bh, BADGE_FAR, BADGE_GAP)
+			put(b, cx, cy, bh)
+		end
+	end
+	-- (then the others: the points, then the spans, then those every so far)
 	for pass = 1, 3 do
 	for _, b in ipairs(list) do
-		local prio = (b.kind == "curve" or b.kind == "point") and 1 or b.kind == "span" and 2 or 3
-		local p = prio == pass and api.gui.camera.world2Screen(api.type.Vec3f.new(b.x, b.y, b.z)) or nil
-		local bh = (b.kind == "span" or b.kind == "grade") and BADGE_H1 or b.radius ~= nil and BADGE_H3 or BADGE_H2
-		if p ~= nil and p.x >= 0 and p.x <= w and p.y >= 0 and p.y <= h and free(p.x, p.y, bh) then
-			taken[#taken + 1] = { p.x, p.y, bh }
-			out[#out + 1] = { h = (p.x - BADGE_GAP) / w, v = (p.y - BADGE_GAP) / h, badge = b }
-			-- (to the pixel: a fraction of one is no reason to draw the tool again)
-			keys[#keys + 1] = string.format("%.0f,%.0f", p.x, p.y)
+		local prio = b.kind == "point" and 1 or b.kind == "span" and 2 or 3
+		local px, py, tx, ty, lx, ly : number, number, number, number, number, number = nil, nil, nil, nil, nil, nil
+		if prio == pass then px, py, tx, ty, lx, ly = frame(b) end
+		if px ~= nil then
+			local bh = (b.kind == "span" or b.kind == "grade") and BADGE_H1 or BADGE_H2
+			local cx, cy = readout.badgeCorner(px, py, tx, ty, lx, ly, b.side, BADGE_W, bh, BADGE_GAP)
+			put(b, cx, cy, bh)
 		end
 	end
 	end

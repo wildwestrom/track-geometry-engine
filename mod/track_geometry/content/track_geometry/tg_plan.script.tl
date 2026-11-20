@@ -39,7 +39,8 @@ end
 local record Readout
 	plan : Plan
 	speeds : {number} -- the game's curve limit on each dense piece (m/s; nil where it gave none)
-	badges : {readout.Badge} -- nil when making them failed
+	curves : {readout.Badge} -- a badge at each curve; nil when making the badges failed
+	along : {readout.Badge} -- a badge every BADGE_EVERY along the path; nil then too
 end
 
 local type Ground = function(number, number) : number
@@ -197,12 +198,11 @@ end
 -- The same from speeds already on the dense pieces (a sketch's: tg_readout.sketchSpeeds).
 function M.readoutDense(plan : Plan, carried : {number}) : Readout, string
 	local d = plan.dense
-	local ok, bs = pcall(function() : {readout.Badge}
-		local out = readout.badges(d.nodes, d.z, carried, plan.curves)
-		for _, b in ipairs(readout.alongBadges(d.nodes, d.z, carried, M.BADGE_EVERY)) do out[#out + 1] = b end
-		return out
+	local ok, cs, al = pcall(function() : {readout.Badge}, {readout.Badge}
+		return readout.badges(d.nodes, d.z, carried, plan.curves), readout.alongBadges(d.nodes, d.z, carried, M.BADGE_EVERY)
 	end)
-	return { plan = plan, speeds = carried, badges = ok and bs as {readout.Badge} or nil }, not ok and tostring(bs) or nil
+	if not ok then return { plan = plan, speeds = carried }, tostring(cs) end
+	return { plan = plan, speeds = carried, curves = cs as {readout.Badge}, along = al as {readout.Badge} }, nil
 end
 
 -- The tooltip's summary lines (tg_readout); trackSpeed is the track type's top speed (m/s).

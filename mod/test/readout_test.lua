@@ -53,7 +53,7 @@ check(cs[1].turn == 2 and cs[2].turn == 3 and cs[3].turn == 5, "curves: each car
 -- badges on the 300 m line (only chainage is used to find each curve's pieces)
 local bs = R.badges(nodes, z, nil, cs)
 check(#bs == 3 and bs[1].speed == nil and not bs[1].slowest, "badges: one per curve, no speed before the game's data")
-check(near(bs[1].x, 90) and near(bs[1].z, 1.8) and near(bs[1].grade, 0.02), "badges: at the arc's middle, with its height and grade")
+check(near(bs[1].x, 90) and near(bs[1].z, 1.8), "badges: at the arc's middle, with its height")
 check(near(bs[1].radius, 100), "badges: the curve's radius")
 check(bs[1].turn == 2 and bs[2].turn == 3 and bs[3].turn == 5, "badges: each carries its curve's turn")
 for i = 1, 30 do speeds[i] = 5000 end
@@ -138,5 +138,100 @@ check(#measured == 1 and measured[1] == 200, "sketch speeds: at most one measure
 check(ss[5] == 20 and ss[17] == 25 and bt[2] == 25, "sketch speeds: a curve not measured yet keeps its previous speed")
 local none = R.sketchSpeeds(nodes, sc, function() return nil end, function() return nil end, {})
 check(none[5] == nil and none[1] == 1000, "sketch speeds: nothing known, nothing made up")
+
+-- where a badge goes on the screen: its nearest edge `gap` px off the track, square to the track's
+-- direction there, on the badge's side. A camera looking straight down, north up, 2 px a metre:
+-- east is (2, 0) on the screen and north (0, -2). The badge is 90 x 50 px, its point at (500, 300).
+local function corner(tx, ty, lx, ly, side) return R.badgeCorner(500, 300, tx, ty, lx, ly, side, 90, 50, 40) end
+local function at(x, y, ex, ey) return math.abs(x - ex) < 1e-6 and math.abs(y - ey) < 1e-6 end
+local cx, cy = corner(2, 0, 0, -2, 1)
+check(at(cx, cy, 455, 210), "badge corner: east, left of the track: above it, 40 px clear: " .. cx .. "," .. cy)
+cx, cy = corner(2, 0, 0, -2, -1)
+check(at(cx, cy, 455, 340), "badge corner: east, right of the track: below it: " .. cx .. "," .. cy)
+cx, cy = corner(-2, 0, 0, 2, 0)
+check(at(cx, cy, 455, 210), "badge corner: no side: toward the top of the screen: " .. cx .. "," .. cy)
+cx, cy = corner(0, -3, -3, 0, 1)
+check(at(cx, cy, 370, 275), "badge corner: north, left of the track: to its left: " .. cx .. "," .. cy)
+-- a tilted camera: a metre across the track shows up and to the right, but the badge still goes square to the track
+cx, cy = corner(2, 0, 1, -1, 1)
+check(at(cx, cy, 455, 210), "badge corner: square to the track on the screen, not to the ground: " .. cx .. "," .. cy)
+-- north-east, right of the track: the box's nearest corner (its top left) 40 px out along the
+-- normal (1, 1)/sqrt 2, its middle on the normal
+cx, cy = corner(1, -1, -1, -1, -1)
+local r2 = math.sqrt(2)
+check(math.abs((cx - 500 + cy - 300) / r2 - 40) < 1e-6 and math.abs((cx + 45 - 500) - (cy + 25 - 300)) < 1e-6,
+	"badge corner: diagonal: nearest corner 40 px out, middle on the normal: " .. cx .. "," .. cy)
+cx, cy = corner(0, 2, 2, 0, 0)
+check(at(cx, cy, 370, 275), "badge corner: no side, track straight down the screen: to the left: " .. cx .. "," .. cy)
+-- the track pointing at the camera (a metre along it under a tenth of one across): up, whatever the side
+cx, cy = corner(0.1, 0, 0, -2, -1)
+check(at(cx, cy, 455, 210), "badge corner: track toward the camera: up: " .. cx .. "," .. cy)
+
+-- each badge's direction and side (the outside of the nearest curve): a path east 100 m, a left
+-- curve (100..200 m), 100 m straight, a right curve (300..400 m), 100 m straight; a node every 10 m
+local curvy, curvyZ = {}, {}
+do
+	local x, y, hd = 0.0, 0.0, 0.0
+	local turns = { [11] = 0.05, [21] = 0, [31] = -0.05, [41] = 0 } -- the heading's change a piece, from that piece on
+	local dh = 0.0
+	for i = 1, 51 do
+		curvy[i] = { x = x, y = y, heading = hd, s = (i - 1) * 10, k = math.abs(dh) / 10 }
+		curvyZ[i] = 0
+		dh = turns[i] or dh
+		x, y, hd = x + 10 * math.cos(hd + dh / 2), y + 10 * math.sin(hd + dh / 2), hd + dh
+	end
+end
+local function sides(list, on)
+	local out = {}
+	for _, b in ipairs(list) do out[#out + 1] = string.format("%.0f:%d", A.project(on or curvy, b.x, b.y), b.side) end
+	return table.concat(out, " ")
+end
+local along = R.alongBadges(curvy, curvyZ, nil, 50)
+-- (250 m is as near the one curve as the other: not checked)
+check(sides({ along[1], along[2], along[3], along[4] }) == "50:-1 100:-1 150:-1 200:-1", "badge sides: near the left curve, on its outside (right): " .. sides(along))
+check(sides({ along[6], along[7], along[8], along[9] }) == "300:1 350:1 400:1 450:1", "badge sides: near the right curve, on its outside (left): " .. sides(along))
+check(near(along[1].dx, 1) and near(along[1].dy, 0), "badge direction: along the path, east on the first straight")
+local heading = A.atan2(along[3].dy, along[3].dx)
+check(heading > 0.2 and heading < 0.3 and near(along[3].dx ^ 2 + along[3].dy ^ 2, 1), "badge direction: along the curve, of length one: " .. heading)
+local curvyCurves = { { s0 = 100, s1 = 200, sMid = 150, radius = 200, turn = 1 }, { s0 = 300, s1 = 400, sMid = 350, radius = 200, turn = 2 } }
+local cb = R.badges(curvy, curvyZ, nil, curvyCurves)
+check(sides(cb) == "150:1 350:-1", "badge sides: curve badges on their curve's inside: " .. sides(cb))
+-- a curve with no arc (a spiral straight into another): at the middle of the whole curve, inside
+local bare = R.badges(curvy, curvyZ, nil, { { s0 = 100, s1 = 200, sMid = 120, turn = 1 } })[1]
+check(near(A.project(curvy, bare.x, bare.y), 150) and bare.radius == nil and bare.side == 1, "curve badges: no arc: the curve's middle, inside")
+
+-- where a curve's badge goes on the screen: square to the track, on its side (the inside), its
+-- middle as far out as the arc's centre (its radius, at the track's scale across it), but at most
+-- `far` px and its nearest edge never under `gap` px off the track. The badge is 90 x 50 px, its
+-- point at (500, 300), the track running east on the screen with its left up, 2 px a metre.
+local function ccorner(radius, side, lx, ly) return R.curveCorner(500, 300, 2, 0, lx or 0, ly or -2, side or 1, radius, 90, 50, 160, 40) end
+cx, cy = ccorner(50)
+check(at(cx, cy, 455, 175), "curve corner: the centre within reach (100 px): on it: " .. cx .. "," .. cy)
+cx, cy = ccorner(3488)
+check(at(cx, cy, 455, 115), "curve corner: the centre far off: 160 px toward it: " .. cx .. "," .. cy)
+cx, cy = ccorner(25)
+check(at(cx, cy, 455, 210), "curve corner: the centre close in: still 40 px clear of the track: " .. cx .. "," .. cy)
+cx, cy = ccorner(nil, 1)
+check(at(cx, cy, 455, 115), "curve corner: no arc: 160 px out on its side: " .. cx .. "," .. cy)
+cx, cy = ccorner(nil, -1)
+check(at(cx, cy, 455, 435), "curve corner: no arc, to the right: below: " .. cx .. "," .. cy)
+-- the track's direction on the screen, read over enough metres to span `span` px: world2Screen gives
+-- whole pixels, and from far off a metre is a third of one. A fake camera at 0.3 px a metre, the
+-- track running east-north-east, rounding as the game does.
+local function proj(x, y) return math.floor(500 + 0.3 * x + 0.5), math.floor(300 - 0.3 * y + 0.5) end
+local fpx, fpy, ftx, fty, flx, fly = R.screenFrame(proj, 1000.4, 200.3, 0.9578, 0.2873, 100, 1000)
+local ang = math.atan2(fty, ftx) - math.atan2(-0.2873, 0.9578)
+check(fpx == proj(1000.4, 200.3) and math.abs(ang) < 0.02, "screen frame: the direction to a degree, though a metre is under a pixel: " .. ang)
+check(math.abs(math.sqrt(ftx ^ 2 + fty ^ 2) - 0.3) < 0.01 and math.abs(math.sqrt(flx ^ 2 + fly ^ 2) - 0.3) < 0.01,
+	"screen frame: per metre: " .. ftx .. "," .. fty .. " " .. flx .. "," .. fly)
+local _, _, ntx, nty = R.screenFrame(function(x, y) return math.floor(x * 40 + 0.5), math.floor(-y * 40 + 0.5) end, 0, 0, 1, 0, 100, 1000)
+check(ntx == 40 and nty == 0, "screen frame: close up, a metre is enough: " .. ntx .. "," .. nty)
+-- a tilted camera: a metre across shows up and to the right, sqrt 8 px long; the badge still goes square to the track
+cx, cy = ccorner(50, 1, 2, -2)
+check(at(cx, cy, 455, 300 - 50 * math.sqrt(8) - 25), "curve corner: tilted camera: square to the track, the centre's distance: " .. cx .. "," .. cy)
+local curvyProf = assert(P.solve({ { s = 0, z = 0 }, { s = 120, z = 3 }, { s = 500, z = 0 } }, 0.02, 0))
+local profSides = sides(R.profileBadges(curvy, curvyProf, 1000))
+check(profSides == "0:-1 60:-1 120:-1 310:1 500:1", "badge sides: profile badges the same way: " .. profSides)
+check(sides(R.alongBadges(nodes, z, nil, 100), nodes) == "100:0 200:0", "badge sides: none on a path with no curve")
 
 H.done()

@@ -133,14 +133,16 @@ for k = 1, #dn - 1 do
 	if r.speeds[k] ~= 10 + j then bad = true end
 end
 check(not bad and #r.speeds == #dn - 1 and r.plan == plan and rwhy == nil, "readout: each dense piece has its built piece's speed")
-local curveBadges = 0
-for _, bd in ipairs(r.badges or {}) do if bd.kind == "curve" then curveBadges = curveBadges + 1 end end
-check(r.badges ~= nil and curveBadges == #plan.curves, "readout: a badge at each curve (" .. curveBadges .. ")")
+local curveBadges, alongBadges = 0, 0
+for _, bd in ipairs(r.curves or {}) do if bd.kind == "curve" then curveBadges = curveBadges + 1 end end
+for _, bd in ipairs(r.along or {}) do if bd.kind == "along" then alongBadges = alongBadges + 1 end end
+check(r.curves ~= nil and curveBadges == #plan.curves and #r.curves == curveBadges, "readout: a badge at each curve, on its own (" .. curveBadges .. ")")
+check(r.along ~= nil and alongBadges > 0 and #r.along == alongBadges, "readout: the badges along the path, on their own (" .. alongBadges .. ")")
 local lines = P.summary(r, 40)
 check(type(lines) == "table" and #lines > 0, "readout: summary: " .. table.concat(lines or {}, " | "))
 -- speeds missing (the game gave none): still a readout
 local r0 = P.readout(plan, {})
-check(r0 ~= nil and r0.badges ~= nil, "readout: without speeds, still badges")
+check(r0 ~= nil and r0.curves ~= nil and r0.along ~= nil, "readout: without speeds, still badges")
 
 ------------------------------------------------------------------ switches
 -- The game refuses a new piece that overlaps the existing track without sharing a node with it, so

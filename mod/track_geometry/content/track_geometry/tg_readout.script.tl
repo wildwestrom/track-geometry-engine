@@ -1,7 +1,7 @@
--- What the tool reads out about the path: the tooltip's summary lines and a badge at each curve
--- with its speed and grade. The speeds are the game's own curve speed limits, read from the
--- ghost's proposal data by the GUI. No game API here, so test/readout_test.lua runs it outside the
--- game.
+-- What the tool reads out about the path: the tooltip's summary lines, a badge at each curve with
+-- its radius and speed, and badges along the path with their speed and grade. The speeds are the
+-- game's own curve speed limits, read from the ghost's proposal data by the GUI. No game API here,
+-- so test/readout_test.lua runs it outside the game.
 
 local geometry = require("track_geometry_tool::/track_geometry/tg_geometry.script.tl")
 local alignment = require("track_geometry_tool::/track_geometry/tg_alignment.script.tl")
@@ -16,10 +16,11 @@ local record Curve
 	turn : integer -- the edit's turn it is the curve of (tg_edit's index)
 end
 
--- A badge: where it goes and what it says. "curve": at a curve's arc middle, with its speed;
--- "along": every so far along the path, with its speed (as the game's builder badges each piece);
--- "point": at an elevation point (or an end), with its height; "span": halfway between two;
--- "grade": every so far along the profile. All of them with the grade.
+-- A badge: where it goes and what it says. "curve": at a curve's arc middle (the middle of the
+-- curve, with no arc), with its radius and speed; "along": every so far along the path, with its
+-- speed and grade (as the game's builder badges each piece); "point": at an elevation point (or an
+-- end), with its height and grade; "span": halfway between two, and "grade": every so far along
+-- the profile, with the grade.
 local record Badge
 	kind : string
 	x : number
@@ -31,6 +32,10 @@ local record Badge
 	grade : number -- rise over run at the badge
 	slowest : boolean -- the path's slowest curve
 	steep : boolean -- spans: too steep (past the grade limit at a node over it)
+	dx : number -- the path's direction at the badge (a unit vector, on the ground)
+	dy : number
+	side : number -- where it goes off the path: 1 to its left, -1 to its right (a curve's: its
+	              -- inside; the others: the outside of the nearest curve along the path), 0 either (no curve)
 end
 
 
@@ -44,6 +49,9 @@ local record Readout
 	summary : function(nodes : {alignment.Sample}, z : {number}, speeds : {number}, trackSpeed : number, minRadius : number) : {string}
 	pieceSpeeds : function(pieceOf : {integer : integer}, m : integer, edgeSpeed : function(edge : integer) : number) : {number}
 	sketchSpeeds : function(nodes : {alignment.Sample}, curves : {Curve}, cached : function(R : number) : number, measure : function(R : number) : number, prev : {integer : number}) : {number}, {integer : number}
+	badgeCorner : function(px : number, py : number, tx : number, ty : number, lx : number, ly : number, side : number, bw : number, bh : number, gap : number) : number, number
+	curveCorner : function(px : number, py : number, tx : number, ty : number, lx : number, ly : number, side : number, radius : number, bw : number, bh : number, far : number, gap : number) : number, number
+	screenFrame : function(screenAt : function(x : number, y : number) : number, number, x : number, y : number, dx : number, dy : number, span : number, maxLen : number) : number, number, number, number, number, number
 end
 
 local M : Readout = {}
@@ -87,12 +95,54 @@ function M.curves(path : {geometry.Segment}) : {Curve}
 	return out
 end
 
--- A badge at chainage s, with the grade of the piece there and speed v.
-local function badge(kind : string, nodes : {alignment.Sample}, z : {number}, gs : {number}, s : number, v : number) : Badge
+-- A turning stretch of the path: a run of pieces turning the same way.
+local record Stretch
+	s0 : number -- its chainage from and to
+	s1 : number
+	way : number -- 1 left, -1 right
+end
+
+-- The path's turning stretches.
+local function turning(nodes : {alignment.Sample}) : {Stretch}
+	local out : {Stretch} = {}
+	for i = 1, #nodes - 1 do
+		local d = (nodes[i + 1].heading - nodes[i].heading + math.pi) % (2 * math.pi) - math.pi
+		local way = d > 1e-6 and 1 or d < -1e-6 and -1 or 0
+		local last = out[#out]
+		if way ~= 0 and last ~= nil and last.way == way and last.s1 >= nodes[i].s - 1e-9 then
+			last.s1 = nodes[i + 1].s
+		elseif way ~= 0 then
+			out[#out + 1] = { s0 = nodes[i].s, s1 = nodes[i + 1].s, way = way }
+		end
+	end
+	return out
+end
+
+-- The side (Badge.side) of a badge at chainage s: the outside of the nearest turning stretch.
+local function outside(turns : {Stretch}, s : number) : number
+	local best, side = math.huge, 0.0
+	for _, r in ipairs(turns) do
+		local d = s < r.s0 and r.s0 - s or s > r.s1 and s - r.s1 or 0.0
+		if d < best then best, side = d, -r.way end
+	end
+	return side
+end
+
+-- A badge at chainage s: its point, the path's direction there and its side (turns: turning(nodes)).
+local function badgeAt(kind : string, nodes : {alignment.Sample}, turns : {Stretch}, s : number) : Badge, integer, number
 	local i, t = alignment.locate(nodes, s)
-	local a, b = nodes[i], nodes[i + 1]
-	return { kind = kind, x = a.x + t * (b.x - a.x), y = a.y + t * (b.y - a.y), z = z[i] + t * (z[i + 1] - z[i]),
-		speed = v, grade = gs[i], slowest = false }
+	local a, b = nodes[i], nodes[i + 1] or nodes[i]
+	local lx, ly = b.x - a.x, b.y - a.y
+	local l = math.sqrt(lx * lx + ly * ly)
+	local dx, dy = l > 0 and lx / l or math.cos(a.heading), l > 0 and ly / l or math.sin(a.heading)
+	return { kind = kind, x = a.x + t * lx, y = a.y + t * ly, dx = dx, dy = dy, side = outside(turns, s), slowest = false }, i, t
+end
+
+-- A badge at chainage s, with the grade of the piece there and speed v.
+local function badge(kind : string, nodes : {alignment.Sample}, turns : {Stretch}, z : {number}, gs : {number}, s : number, v : number) : Badge
+	local bd, i, t = badgeAt(kind, nodes, turns, s)
+	bd.z, bd.speed, bd.grade = z[i] + t * (z[i + 1] - z[i]), v, gs[i]
+	return bd
 end
 
 -- The slowest of the speeds (m/s per piece; nil: none known) on the pieces whose middle `keep` takes.
@@ -105,18 +155,20 @@ local function slowest(nodes : {alignment.Sample}, speeds : {number}, keep : fun
 	return v
 end
 
--- A badge at each curve's arc middle, with its radius. speeds (m/s per piece, nil where unknown) is nil until the
--- game has made the ghost's data.
+-- A badge at each curve's arc middle (with no arc, the curve's middle), on its inside, with its
+-- radius and its arc's centre. speeds (m/s per piece, nil where unknown) is nil until the game has
+-- made the ghost's data.
 function M.badges(nodes : {alignment.Sample}, z : {number}, speeds : {number}, curves : {Curve}) : {Badge}
 	local out : {Badge} = {}
 	if #nodes < 2 then return out end
 	local gs = grades(nodes, z)
+	local turns = turning(nodes)
 	local slow = math.huge
 	for _, c in ipairs(curves) do
 		local v = slowest(nodes, speeds, function(mid : number, sp : number) : boolean return mid >= c.s0 and mid <= c.s1 and sp < NO_LIMIT end)
 		if v ~= nil then slow = math.min(slow, v) end
-		local bd = badge("curve", nodes, z, gs, c.sMid, v)
-		bd.radius, bd.turn = c.radius, c.turn
+		local bd = badge("curve", nodes, turns, z, gs, c.radius ~= nil and c.sMid or (c.s0 + c.s1) / 2, v)
+		bd.radius, bd.turn, bd.side = c.radius, c.turn, -bd.side
 		out[#out + 1] = bd
 	end
 	-- (only when there is a choice: one curve is the slowest of one)
@@ -132,11 +184,12 @@ function M.alongBadges(nodes : {alignment.Sample}, z : {number}, speeds : {numbe
 	local out : {Badge} = {}
 	if #nodes < 2 then return out end
 	local gs = grades(nodes, z)
+	local turns = turning(nodes)
 	local len = nodes[#nodes].s
 	local s = every
 	while s <= len - every / 2 do
 		local v = slowest(nodes, speeds, function(mid : number) : boolean return math.abs(mid - s) <= every / 2 end)
-		out[#out + 1] = badge("along", nodes, z, gs, s, v)
+		out[#out + 1] = badge("along", nodes, turns, z, gs, s, v)
 		s = s + every
 	end
 	return out
@@ -149,9 +202,10 @@ end
 function M.profileBadges(nodes : {alignment.Sample}, p : profiles.Profile, every : number, limit ?: number) : {Badge}
 	local out : {Badge} = {}
 	if #nodes < 2 then return out end
+	local turns = turning(nodes)
 	local function at(kind : string, s : number) : Badge
-		local x, y = alignment.pointAt(nodes, s)
-		local b : Badge = { kind = kind, x = x, y = y, z = profiles.heightAt(p, s), grade = profiles.gradeAt(p, s), slowest = false, steep = false }
+		local b = badgeAt(kind, nodes, turns, s)
+		b.z, b.grade, b.steep = profiles.heightAt(p, s), profiles.gradeAt(p, s), false
 		out[#out + 1] = b
 		return b
 	end
@@ -223,6 +277,68 @@ function M.sketchSpeeds(nodes : {alignment.Sample}, curves : {Curve}, cached : f
 		end
 	end
 	return out, byTurn
+end
+
+-- Where a badge's top left corner goes on the screen (px, y down). (px, py): its point on the track;
+-- (tx, ty): a metre along the track, on the screen; (lx, ly): a metre across it to the left; side:
+-- the badge's (Badge.side). The badge (bw x bh) goes square to the track on the screen, on its side,
+-- its nearest edge gap px off; with no side, on the one toward the top of the screen (the left,
+-- where the track runs straight up or down it). Where the
+-- track points at the camera (a metre along it under a tenth of one across) its direction on the
+-- screen means little: the badge goes straight up.
+-- The screen direction square to the track, on the side (badgeCorner's arguments).
+local function across(tx : number, ty : number, lx : number, ly : number, side : number) : number, number
+	local len = math.sqrt(tx * tx + ty * ty)
+	local nx, ny = 0.0, -1.0
+	if len > 0 and len >= math.sqrt(lx * lx + ly * ly) / 10 then
+		nx, ny = ty / len, -tx / len
+		local onSide = side ~= 0 and (nx * lx + ny * ly) * side or ny ~= 0 and -ny or -nx -- (positive: on the side wanted)
+		if onSide < 0 then nx, ny = -nx, -ny end
+	end
+	return nx, ny
+end
+
+-- The top left corner of a bw x bh box whose middle is r px from (px, py) along (nx, ny), but
+-- never so close that its nearest edge is under gap px off.
+local function boxCorner(px : number, py : number, nx : number, ny : number, r : number, bw : number, bh : number, gap : number) : number, number
+	-- (the box's middle as far out as its own half reaches along the direction, then the gap)
+	local reach = math.max(r, gap + math.abs(nx) * bw / 2 + math.abs(ny) * bh / 2)
+	return px + nx * reach - bw / 2, py + ny * reach - bh / 2
+end
+
+function M.badgeCorner(px : number, py : number, tx : number, ty : number, lx : number, ly : number, side : number, bw : number, bh : number, gap : number) : number, number
+	local nx, ny = across(tx, ty, lx, ly, side)
+	return boxCorner(px, py, nx, ny, 0, bw, bh, gap)
+end
+
+-- A badge's point (x, y) on the screen (screenAt: the game's world2Screen there), and a metre along
+-- the track (dx, dy: its direction there) and a metre across it to the left, on the screen: the
+-- (tx, ty), (lx, ly) badgeCorner takes. world2Screen gives whole pixels, and from far off a metre
+-- is a fraction of one, so both are read over enough metres (at most maxLen) to span about span
+-- px, then scaled back to one. (A straight line stays straight on the screen: its direction is
+-- the same read over any length.)
+function M.screenFrame(screenAt : function(x : number, y : number) : number, number, x : number, y : number, dx : number, dy : number, span : number, maxLen : number) : number, number, number, number, number, number
+	local px, py = screenAt(x, y)
+	local L, ax, ay, lx, ly = 1.0, 0.0, 0.0, 0.0, 0.0
+	for _ = 1, 4 do
+		ax, ay = screenAt(x + dx * L, y + dy * L)
+		lx, ly = screenAt(x - dy * L, y + dx * L)
+		local m = math.max(math.sqrt((ax - px) ^ 2 + (ay - py) ^ 2), math.sqrt((lx - px) ^ 2 + (ly - py) ^ 2))
+		if m >= span or L >= maxLen then break end
+		L = math.min(maxLen, L * span / math.max(m, 1))
+	end
+	return px, py, (ax - px) / L, (ay - py) / L, (lx - px) / L, (ly - py) / L
+end
+
+-- Where a curve's badge's top left corner goes on the screen: as badgeCorner (side: the curve's
+-- inside), but its middle as far out as the arc's centre, the radius (m; nil with no arc) at the
+-- track's scale across it (lx, ly), and at most far px. Its nearest edge stays gap px off the track.
+-- (The centre itself is not put on the screen: on a wide curve it is kilometres off, near or behind
+-- the camera, where the slightest move swings it all over the screen.)
+function M.curveCorner(px : number, py : number, tx : number, ty : number, lx : number, ly : number, side : number, radius : number, bw : number, bh : number, far : number, gap : number) : number, number
+	local nx, ny = across(tx, ty, lx, ly, side)
+	local r = radius ~= nil and math.min(radius * math.sqrt(lx * lx + ly * ly), far) or far
+	return boxCorner(px, py, nx, ny, r, bw, bh, gap)
 end
 
 local function kmh(v : number) : string
