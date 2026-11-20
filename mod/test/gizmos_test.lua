@@ -41,6 +41,7 @@ local function withoutProfile(fn)
 	E.profile = profile
 	return assert(ok and out, out)
 end
+local function groundShapes(e) return withoutProfile(function() return shapes(e) end) end -- (as drawn with no profile)
 local function turnRole(s) return s.kind == "circle" and (s.color == "free" or s.color == "ray" or s.color == "fixed" or s.color == "groundEnd" or s.color == "hot") end
 
 -- bg: track to ground, one turn (a curve with its two brackets) and the ground end
@@ -57,9 +58,9 @@ do
 		"horizontal: osculating circles, legs, spirals, turn and end circles, brackets: " .. table.concat(groups, " "))
 end
 
--- A leg is cut into pieces at most 10 m long (60 at most), each point over the ground.
+-- A leg is cut into pieces at most 10 m long (60 at most), each point over the ground (with no profile).
 local function legCut(e, pieces, what)
-	local legs, pis = ofColor(shapes(e), "leg"), E.polyline(e)
+	local legs, pis = ofColor(groundShapes(e), "leg"), E.polyline(e)
 	local ok = #legs == #pis - 1
 	for k, l in ipairs(legs) do
 		local a, b = pis[k], pis[k + 1]
@@ -76,6 +77,55 @@ legCut(E.new(endAt(0, 0, 0), endAt(500, 0, 180)), 50, "a 500 m leg: 50 pieces of
 legCut(E.new(endAt(0, 0, 0), endAt(5000, 0, 180)), 60, "a 5 km leg: 60 pieces, the most a leg gets")
 legCut(E.new(endAt(0, 0, 0), endAt(45, 0, 180)), 5, "a 45 m leg: 5 pieces, none past 10 m")
 
+-- Legs are drawn at the track's profile height at the nearest chainage; with no profile, on the ground.
+do
+	local st = assert(E.new(vend(0, 0, 0, 100, 0), vend(500, 0, 180, 130, 0))) -- (straight: chainage = x)
+	local prof = assert(E.profile(st))
+	local legs = ofColor(shapes(st), "leg")
+	local ok = #legs == 1
+	for _, p in ipairs(legs[1].pts) do ok = ok and near(p[3], P.heightAt(prof, p[1])) end
+	check(ok and near(legs[1].pts[1][3], 100) and near(legs[1].pts[#legs[1].pts][3], 130),
+		"a leg is drawn at the profile's height along the track")
+	local g = ofColor(groundShapes(st), "leg")[1]
+	local gok = true
+	for _, p in ipairs(g.pts) do gok = gok and near(p[3], slope(p[1], p[2])) end
+	check(gok, "with no profile, a leg is drawn on the ground")
+end
+
+-- Turn circles, end circles and brackets lift with the legs: a turn at the leg's height at its PI,
+-- a bracket at the track's at its tangent point, a ground end on the ground, a track end at its own.
+do
+	local sl = assert(E.new(vend(0, 0, 0, 100, 0), vend(500, 400, -90, 130, 0)))
+	local prof = assert(E.profile(sl))
+	local function trackZ(x, y) return P.heightAt(prof, (E.chainageAt(sl, x, y))) end
+	local ss = shapes(sl)
+	local turn = E.turn(sl, 2)
+	local tc = ofColor(ss, turn.mobility)[1]
+	check(tc ~= nil and near(tc.z, trackZ(turn.x, turn.y)) and tc.z > 100 and tc.z < 130,
+		"a turn's circle sits at the leg's height at its PI")
+	local ok, n = true, 0
+	for _, h in ipairs(E.handles(sl)) do
+		if h.kind == "entry" or h.kind == "exit" then
+			n = n + 1
+			for _, b in ipairs(ofColor(ss, "bracket")) do
+				if near(b.pts[3][1] + b.pts[4][1], 2 * h.x) and near(b.pts[3][2] + b.pts[4][2], 2 * h.y) then
+					for _, q in ipairs(b.pts) do ok = ok and near(q[3], trackZ(h.x, h.y)) end
+				end
+			end
+		end
+	end
+	check(ok and n == 2, "a bracket sits at the track's height at its tangent point")
+	-- a ground end stays on the ground; a track end being dragged (held) at the track's height
+	local tg = assert(E.new(vend(0, 0, 0, 100, 0), gnd(300, 200, 104)))
+	local ge = ofColor(shapes(tg), "groundEnd")[1]
+	check(ge ~= nil and near(ge.z, slope(300, 200)), "a ground end's circle stays on the ground")
+	local onto = vend(500, 400, -90, 130, 0)
+	onto.kind, onto.node = "track", 1
+	assert(E.moveEnd(tg, 3, onto))
+	local held = ofColor(shapes(tg), "groundEnd")[1]
+	check(held ~= nil and near(held.z, 130), "a held track end's circle sits at the track's height")
+end
+
 -- The hot or dragged handle is "hot"; other turns their mobility; ground ends "groundEnd".
 do
 	local turn = E.turn(bg, 2)
@@ -85,8 +135,9 @@ do
 	check(roles(shapes(bg, { hit = turn })) == "groundEnd hot", "the turn under the mouse is hot")
 	check(roles(shapes(bg, { drag = { kind = "end", i = 3 }, hit = turn })) == "hot " .. turn.mobility, "the dragged end is hot, over the one under the mouse")
 	local turnCircle = ofColor(idle, turn.mobility)[1]
-	check(turnCircle.r == R and near(turnCircle.x, turn.x) and near(turnCircle.z, slope(turn.x, turn.y)) and turnCircle.step == Gz.GIZMO_STEP,
-		"a turn's circle: a grab radius round it, at the ground's height")
+	local groundCircle = ofColor(groundShapes(bg), turn.mobility)[1]
+	check(turnCircle.r == R and near(turnCircle.x, turn.x) and near(groundCircle.z, slope(turn.x, turn.y)) and turnCircle.step == Gz.GIZMO_STEP,
+		"a turn's circle: a grab radius round it, at the ground's height with no profile")
 	local leg = { kind = "leg", i = 1 }
 	check(#ofColor(shapes(bg, { hit = leg }), "hot") == 1 and ofColor(shapes(bg, { hit = leg }), "hot")[1].kind == "line",
 		"the leg under the mouse is hot")
@@ -103,7 +154,7 @@ end
 do
 	local hs = {}
 	for _, h in ipairs(E.handles(bg)) do if h.kind == "entry" or h.kind == "exit" then hs[#hs + 1] = h end end
-	local bs = ofColor(shapes(bg), "bracket")
+	local bs = ofColor(groundShapes(bg), "bracket")
 	local ok = #bs == #hs and #bs == 2
 	for k, b in ipairs(bs) do
 		local h = hs[k]
@@ -116,7 +167,7 @@ do
 			and near(across(b.pts[1]), E.BRACKET_BAR * R) and near(across(b.pts[6]), -E.BRACKET_BAR * R)
 		for _, p in ipairs(b.pts) do ok = ok and near(p[3], z) end
 	end
-	check(ok, "a bracket: a bar across the leg, its tips along it towards its curve, flat at the ground's height")
+	check(ok, "a bracket: a bar across the leg, its tips along it towards its curve, flat at the ground's height with no profile")
 end
 
 -- Vertical mode: a circle on the ground per point, and a post up to it when off the ground.

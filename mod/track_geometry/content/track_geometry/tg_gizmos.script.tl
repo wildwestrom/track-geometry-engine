@@ -107,15 +107,15 @@ local function pieces(len : number) : integer
 	return math.max(1, math.ceil(len / math.max(M.LEG_STEP, len / M.MAX_LEG_PIECES)))
 end
 
--- The leg from a to b, in pieces, each point over the ground.
-local function legPoints(a : geometry.Vec, b : geometry.Vec, groundAt : function(number, number) : number) : {{number}}
+-- The leg from a to b, in pieces, each point at the height zAt gives.
+local function legPoints(a : geometry.Vec, b : geometry.Vec, zAt : function(number, number) : number) : {{number}}
 	local len = math.sqrt((b.x - a.x) ^ 2 + (b.y - a.y) ^ 2)
 	local n = pieces(len)
 	local pts : {{number}} = {}
 	for k = 0, n do
 		local t = k / n
 		local x, y = a.x + t * (b.x - a.x), a.y + t * (b.y - a.y)
-		pts[k + 1] = { x, y, groundAt(x, y) }
+		pts[k + 1] = { x, y, zAt(x, y) }
 	end
 	return pts
 end
@@ -167,10 +167,14 @@ local function horizontal(sess : sessions.Session, groundAt : function(number, n
 	for _, c in ipairs(circlesOf(path, p)) do
 		out[#out + 1] = circle(c.x, c.y, c.z or groundAt(c.mx, c.my), c.r, "osculating", w, step)
 	end
+	-- (the legs and handles: up at the track's height beside them, or on the ground with no profile)
+	local function trackAt(x : number, y : number) : number
+		return p and edits.trackHeightAt(e, p, x, y) or groundAt(x, y)
+	end
 	local pis = edits.polyline(e)
 	for i = 1, #pis - 1 do
 		local legHot = sess.drag == nil and isHot({ kind = "leg", i = i })
-		out[#out + 1] = line(legPoints(pis[i], pis[i + 1], groundAt), legHot and "hot" or "leg", w)
+		out[#out + 1] = line(legPoints(pis[i], pis[i + 1], trackAt), legHot and "hot" or "leg", w)
 	end
 	for _, pts in ipairs(spiralPoints(path, p, groundAt)) do
 		out[#out + 1] = line(pts, "spiral", w)
@@ -179,12 +183,13 @@ local function horizontal(sess : sessions.Session, groundAt : function(number, n
 	for _, h in ipairs(hs) do
 		if h.kind == "pi" or h.kind == "end" then
 			local role = isHot(h) and "hot" or h.kind == "pi" and h.mobility or "groundEnd"
-			out[#out + 1] = circle(h.x, h.y, groundAt(h.x, h.y), r, role, w, M.GIZMO_STEP)
+			local z = edits.onGround(e, h) and groundAt(h.x, h.y) or trackAt(h.x, h.y)
+			out[#out + 1] = circle(h.x, h.y, z, r, role, w, M.GIZMO_STEP)
 		end
 	end
 	for _, h in ipairs(hs) do
 		if h.kind == "entry" or h.kind == "exit" then
-			out[#out + 1] = line(bracketPoints(h, groundAt(h.x, h.y), r), isHot(h) and "hot" or "bracket", w)
+			out[#out + 1] = line(bracketPoints(h, trackAt(h.x, h.y), r), isHot(h) and "hot" or "bracket", w)
 		end
 	end
 	return out

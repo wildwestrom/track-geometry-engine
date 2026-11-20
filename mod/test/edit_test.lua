@@ -487,6 +487,33 @@ check(past ~= nil and past.kind == "track" and math.abs(past.s - 800) < 1, "a ra
 local low = E.hit(v, true, 200, 3, 5, { ex = 200, ey = -300, ez = 400, gx = 200, gy = 3, gz = 100 })
 check(low ~= nil and low.kind == "track" and math.abs(low.s - 200) < 1, "a track on the ground is still hit at the ground point")
 
+-- horizontal, a raised corner (its track 100 m over the ground at 0): its gizmos are drawn up at
+-- the track's height, so they are picked along the view ray there
+local hc = assert(E.new(vend(0, 0, 0, 100, 0), vend(500, 400, -90, 100, 0)))
+-- a ray down at 45 degrees through (px, py, 100) to the ground at (px, py + 100, 0), the mouse there
+local function rayAt(px, py) return { ex = px, ey = py - 300, ez = 400, gx = px, gy = py + 100, gz = 0 } end
+local function hitAlong(e, px, py, r)
+	local ry = rayAt(px, py)
+	return E.hit(e, false, ry.gx, ry.gy, r, ry)
+end
+local hcTurn = E.turn(hc, 2)
+check(not same(E.hit(hc, false, hcTurn.x, hcTurn.y + 100, 5), hcTurn) and same(hitAlong(hc, hcTurn.x, hcTurn.y, 5), hcTurn),
+	"a raised turn: not at the ground point, but along the ray up at its height (before the legs there)")
+check(same(E.hit(hc, false, hcTurn.x + 1, hcTurn.y, 5), hcTurn), "with no ray, a turn is picked on the ground under it, as before")
+
+local hcEntry = nil
+for _, h in ipairs(E.handles(hc)) do if h.kind == "entry" then hcEntry = h end end
+check(same(hitAlong(hc, hcEntry.x + 2 * hcEntry.ux, hcEntry.y + 2 * hcEntry.uy, 5), hcEntry),
+	"a raised bracket is picked along the ray, up at its height")
+local hq = E.polyline(hc)
+local hcLeg = hitAlong(hc, (hq[1].x + hcEntry.x) / 2, 2, 5)
+check(hcLeg ~= nil and hcLeg.kind == "leg" and hcLeg.i == 1 and hcLeg.s == nil, "a raised leg is picked along the ray, up at its height")
+local hnd, hoff = offLegs(hc)
+local hct = hitAlong(hc, hnd.x, hnd.y, hoff * 0.8)
+check(hoff > 5 and hct ~= nil and hct.kind == "leg" and math.abs(hct.s - hnd.s) < 1,
+	"the raised track where it leaves the legs is picked along the ray: " .. tostring(hct and hct.s))
+check(hitAlong(hc, 250, -200, 5) == nil, "a ray far from the raised edit picks nothing")
+
 -- the elevation points follow the path when a turn moves; the path is sampled again
 local f = E.new(vend(0, 0, 0, 100, 0), vend(1000, 0, 180, 110, 0))
 E.insertOnLeg(f, 1, 500, 0)

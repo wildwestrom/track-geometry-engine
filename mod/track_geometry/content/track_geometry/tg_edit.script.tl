@@ -198,6 +198,9 @@ local record EditMod
 	chainageAt : function(e : Edit, x : number, y : number) : number, number
 	hit : function(e : Edit, vertical : boolean, x : number, y : number, r : number, ray ?: Ray) : Hit
 	chainageOnRay : function(e : Edit, ray : Ray) : number, number
+	trackHeightAt : function(e : Edit, p : profiles.Profile, x : number, y : number) : number
+	onGround : function(e : Edit, h : Hit) : boolean
+	mouseOnTrack : function(e : Edit, x : number, y : number, ray : Ray) : number, number
 	-- the vertical profile
 	profile : function(e : Edit) : profiles.Profile, string
 	steepest : function(e : Edit) : number
@@ -576,6 +579,44 @@ function M.chainageAt(e : Edit, x : number, y : number) : number, number
 	return alignment.project(sampled(e).nodes, x, y)
 end
 
+-- The height of e's track (on its profile p) at the chainage nearest (x, y): past an end, the
+-- end's.
+function M.trackHeightAt(e : Edit, p : profiles.Profile, x : number, y : number) : number
+	return profiles.heightAt(p, (M.chainageAt(e, x, y)))
+end
+
+-- Is the handle h (M.handles) a ground end? It sits on the ground, the rest at the track's height.
+function M.onGround(e : Edit, h : Hit) : boolean
+	local en = h.kind == "end" and (h.i == 1 and e.a or e.b) or nil
+	return en ~= nil and en.kind == "ground"
+end
+
+-- Where ray reaches height z: (x, y) on it there; (gx, gy) when z is nil or it never gets there.
+local function rayAtHeight(ray : Ray, z : number) : number, number
+	if z == nil then return ray.gx, ray.gy end
+	local dz = ray.gz - ray.ez
+	local t = math.abs(dz) > 1e-9 and (z - ray.ez) / dz or -1
+	if t < 0 then return ray.gx, ray.gy end
+	return ray.ex + t * (ray.gx - ray.ex), ray.ey + t * (ray.gy - ray.ey)
+end
+
+-- Where the mouse is at the track's height (on e's profile p), as the legs and turns are drawn
+-- (tg_gizmos): where the ray crosses that height, found again from there (the height changes
+-- little over the step, so a few passes settle it).
+local function onTrackHeight(e : Edit, p : profiles.Profile, ray : Ray) : number, number
+	local x, y = ray.gx, ray.gy
+	for _ = 1, 3 do x, y = rayAtHeight(ray, M.trackHeightAt(e, p, x, y)) end
+	return x, y
+end
+
+-- Where the mouse, over the ground at (x, y), is at the track's height: along ray (the mouse's
+-- view ray) when it is given and there is a profile, else (x, y).
+function M.mouseOnTrack(e : Edit, x : number, y : number, ray : Ray) : number, number
+	local p = ray ~= nil and M.profile(e) or nil
+	if p == nil then return x, y end
+	return onTrackHeight(e, p, ray)
+end
+
 -- How far the point (px, py, pz) is from the ray (m): from the line beyond the eye.
 local function offRay(ray : Ray, px : number, py : number, pz : number) : number
 	local dx, dy, dz = ray.gx - ray.ex, ray.gy - ray.ey, ray.gz - ray.ez
@@ -620,7 +661,9 @@ end
 
 -- What is at (x, y) within r. Horizontal: the nearest ground end, turn (within r of it) or bracket
 -- (within r of its bar, so its tips reach past a circle under it), else a leg (or the track along
--- it, which leaves the legs at the curves). Vertical: the nearest point whose height can be set
+-- it, which leaves the legs at the curves); all where tg_gizmos draws them, up at the track's height
+-- (a ground end on the ground), along ray when it is given (and there is a profile), else on the
+-- ground at (x, y). Vertical: the nearest point whose height can be set
 -- (a ground end a hair ahead), else the track, all also up at their heights along ray (the mouse's
 -- view ray), when it is given. nil: nothing.
 function M.hit(e : Edit, vertical : boolean, x : number, y : number, r : number, ray ?: Ray) : Hit
@@ -648,17 +691,25 @@ function M.hit(e : Edit, vertical : boolean, x : number, y : number, r : number,
 		if d <= r then return { kind = "track", s = s } end
 		return nil
 	end
+	local p = ray ~= nil and M.profile(e) or nil
+	-- where the mouse is at handle h's height (tg_gizmos draws it there): on the ground at (x, y)
+	-- with no ray or no profile, or for a ground end
+	local function mouseAt(h : Hit) : number, number
+		if p == nil or M.onGround(e, h) then return x, y end
+		return rayAtHeight(ray, M.trackHeightAt(e, p, h.x, h.y))
+	end
 	local best : Hit = nil
 	local bestD = math.huge
 	for _, h in ipairs(M.handles(e)) do
-		local d = d2(x, y, h.x, h.y)
+		local hx, hy = mouseAt(h)
+		local d = d2(hx, hy, h.x, h.y)
 		local off = d
 		-- (where handles sit together, a hair ahead: an end or a turn, in its circle, then the
 		-- bracket whose curve is on the mouse's side; so a curve that fills its leg up to an end,
 		-- a turn or the next curve is resized at its bracket's tips, or from its own side)
 		if h.kind == "entry" or h.kind == "exit" then
 			local along : number
-			off, along = offBar(h, x, y, r)
+			off, along = offBar(h, hx, hy, r)
 			if along > 0 then d = d - 1e-6 end
 		else
 			d = d - 2e-6
@@ -666,9 +717,12 @@ function M.hit(e : Edit, vertical : boolean, x : number, y : number, r : number,
 		if off <= r * r and d <= bestD then best, bestD = h, d end
 	end
 	if best ~= nil then return best end
-	local leg, d = nearestLeg(e, x, y)
+	local lx, ly = x, y -- (the legs: at the track's height beside them)
+	if p ~= nil then lx, ly = onTrackHeight(e, p, ray) end
+	local leg, d = nearestLeg(e, lx, ly)
 	if d <= r then return { kind = "leg", i = leg } end
-	local s, off = alignment.project(c.nodes, x, y)
+	local s, off : number, number
+	if p ~= nil then s, off = M.chainageOnRay(e, ray) else s, off = alignment.project(c.nodes, x, y) end
 	if off <= r then
 		local px, py = alignment.pointAt(c.nodes, s)
 		return { kind = "leg", i = (nearestLeg(e, px, py)), s = s }

@@ -399,6 +399,27 @@ letGo(t)
 check(asked(t, "askBuild") == 0, "bridge: the press and its click do not ask to build")
 t.w.ray = nil
 
+-- horizontal, the same bridge: a turn added on a raised leg, and then dragged, goes where the view
+-- ray meets the track's height (where the gizmos are drawn), not to the ground point 10 m on
+t = editing()
+e = t.s.edit
+t.groundZ = -100
+-- the eye looks steeply down along +x through (x, y) on the track, to the ground 10 m on
+local function lookAlong(x, y)
+	t.w.ray = { ex = x - 30, ey = y + 0.0, ez = 300, gx = x + 10.0, gy = y + 0.0, gz = -100 }
+	moveTo(t, x + 10, y)
+end
+check(E.polyline(e)[2].x == 200 and E.polyline(e)[2].y == 0, "raised legs: the first leg runs along y = 0, to x = 200")
+lookAlong(100, 0)
+check(t.s.hit ~= nil and t.s.hit.kind == "leg" and t.s.hit.i == 1, "raised legs: the first leg is under the mouse along the ray")
+check(press(t) == true and math.abs(E.polyline(e)[2].x - 100) < 1e-6,
+	"raised legs: the turn is added where the ray meets the leg: " .. string.format("%.1f", E.polyline(e)[2].x))
+lookAlong(130, 0)
+check(math.abs(E.polyline(e)[2].x - 130) < 1e-6,
+	"raised legs: the turn is dragged where the ray meets the track: " .. string.format("%.1f", E.polyline(e)[2].x))
+letGo(t)
+t.w.ray, t.groundZ = nil, 0
+
 ------------------------------------------------------------------ selecting a point and setting its height
 t = editing()
 e = t.s.edit

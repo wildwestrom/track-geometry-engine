@@ -394,7 +394,8 @@ end
 local function pressH(s : Session, w : World) : boolean
 	local e, h = s.edit, s.hit
 	if h ~= nil and h.kind == "leg" then
-		local i, why = edits.insertOnLeg(e, h.i, w.terrX, w.terrY)
+		-- (where the leg is drawn, at the track's height: the mouse's ground point may be far off)
+		local i, why = edits.insertOnLeg(e, h.i, edits.mouseOnTrack(e, w.terrX, w.terrY, w.ray))
 		if i == nil then s.editMsg = "Cannot add a turn here: " .. why; return true end
 		s.drag = edits.turn(e, i)
 		s.log(string.format("edit: add turn %d on leg %d (%d turns)", i - 1, h.i, edits.turnCount(e)))
@@ -500,10 +501,12 @@ local function dragTick(s : Session, w : World)
 		d.i, s.selected = j, j -- (passing a neighbour reorders the points)
 		return
 	end
-	local h, x, y = s.drag, w.terrX, w.terrY
-	if h == nil or x == nil then return end
+	local h = s.drag
+	if h == nil or w.terrX == nil then return end
+	if h.kind == "end" then dragEnd(s, w, h); return end -- (a ground end: on the ground)
+	-- (a turn or bracket: to where it is drawn, at the track's height under the mouse)
+	local x, y = edits.mouseOnTrack(e, w.terrX, w.terrY, w.ray)
 	if h.kind == "pi" then edits.movePi(e, h.i, x, y)
-	elseif h.kind == "end" then dragEnd(s, w, h)
 	else edits.dragBracket(e, h.i, h.kind == "entry", x, y) end
 end
 
