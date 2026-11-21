@@ -9,7 +9,7 @@ It all started in the summer of 2025. I was playing Transport Fever 2, but I was
 
 ## The idea
 
-- **One scalar interface, two instances.** `TrackScalar α` (in `TrackGeometry/Lib.lean`) captures the arithmetic/trig/sqrt a track engine needs. `RFloat` (Float newtype) is the computable instance; `ℝ` is the exact, `noncomputable` proof instance (`TrackGeometry/Real.lean`). The core carries **no Mathlib dependency** so it stays compilable to C.
+- **One scalar interface, two instances.** `TrackScalar α` (in `TrackGeometry/Scalar.lean`) captures the arithmetic/trig/sqrt a track engine needs. `RFloat` (Float newtype) is the computable instance; `ℝ` is the exact, `noncomputable` proof instance (`TrackGeometry/Real.lean`). The core carries **no Mathlib dependency** so it stays compilable to C.
 - **PI-based building.** You place *points of intersection* (PIs) — corners of a tangent polyline. `buildPath` runs straights along the legs and rounds each interior corner with a circular fillet. No radius is supplied: each corner gets a tangent *budget* (fraction of the shorter leg) and the radius is whatever fits (`R = T / tan(Δ/2)`). Near-straight corners pass through.
 - **Type-indexed segments.** `Segment α cA cB` is indexed by start/end `Curvature`, so only valid curvature transitions can be expressed. The UI samples a flat `AlignmentPath` of `AnySegment` pieces (join continuity erased for heterogeneous arrays).
 - **Design cant.** Rails bank from curvature and operating speed: applied cant `h = G · V² · κ / g` (balanced), rolling a gravity-aligned level frame about the tangent. RMF remains available for continuous frame sampling; it is not the rail bank.
@@ -20,13 +20,20 @@ It all started in the summer of 2025. I was playing Transport Fever 2, but I was
 TrackGeometry.lean          Top-level module (imports core + UI deps)
 TrackGeometry/
   Lib.lean                  Barrel re-export of the geometry core modules below
-  Vec.lean                  TrackScalar, Vec3, scalar helpers
-  Segment.lean              Segment, clothoid, Frame/RMF, closed-form sampling
+  Scalar.lean               TrackScalar and scalar helpers
+  Clothoid.lean             Gauss–Legendre clothoid quadrature and shift
+  Design.lean               SpeedModel, LayoutPolicy, CornerParams, bisection solver, PI budgets
+  Planar.lean               2D horizontal alignment (Vec2, TurnDir, Segment2D, buildPath2D)
+  Vec.lean                  Vec3 3D vector operations
+  Segment.lean              3D Segment, clothoid placement, Frame/RMF, closed-form sampling
   Cant.lean                 Design cant from curvature and speed
-  Path.lean                 AnySegment, AlignmentPath, corner solve, buildPath
+  Path.lean                 3D AnySegment, AlignmentPath, corner solve, buildPath
   RFloat.lean               Computable Float scalar instance
   Real.lean                 Exact ℝ instance of TrackScalar (Mathlib)
-  Continuity.lean           G¹/G² proofs for the spiral corner
+  Bisection.lean            Bisection corner-solver convergence and pullback proofs
+  Budget.lean               Shared-leg budget resolution non-overlap proofs
+  PlanarContinuity.lean     G⁰/G¹/G² proofs for the 2D planar corner
+  Continuity.lean           G¹/G² proofs for the 3D spiral corner
   History.lean              Generic undo/redo *tree* (used by the UI)
   Raylib.lean               Generated Raylib FFI bindings (do not edit)
   UI/
@@ -38,7 +45,7 @@ TrackGeometry/
     Input.lean              Mouse/keyboard edit handlers
     Draw.lean               3D scene + HUD
 Main.lean                   Frame loop (exe `track`)
-Fixtures.lean               buildPath fixtures for the TF3 mod port (exe `fixtures`)
+Fixtures.lean               buildPath2D fixtures for the TF3 mod port (exe `fixtures`)
 ffi/raylib_shims.c          Generated C FFI shim (the only C in the project)
 vendor/raylib/              Vendored raylib
   tools/rlparser/rlparser.c FFI generator. Edit this to add bindings; regenerate with
@@ -58,7 +65,7 @@ lake build TrackGeometry   # build the Lean library only
 lake build raylibBindings  # regenerate Raylib.lean + raylib_shims.c from raylib.h (rlparser)
 lake build libRaylib       # build the vendored raylib static lib (via its Makefile)
 lake build libRaylibShims  # build the FFI shim static lib
-lake exe fixtures          # write buildPath fixtures for the TF3 mod's Teal port (mod/test/fixtures.lua)
+lake exe fixtures          # write buildPath2D fixtures for the TF3 mod's Teal port (mod/test/fixtures.lua)
 lake clean                 # remove Lean build outputs
 ```
 
@@ -78,4 +85,9 @@ Keep `lean-toolchain` at `v4.31.0` or newer (v4.30.0 ships glibc 2.40).
 
 ## Where to look
 
-New to the code: start at `TrackGeometry/Lib.lean`, then `Path.lean` (`solveCorner`, `buildPath`) and `Segment.lean`.
+New to the code? Start at `TrackGeometry/Lib.lean` (the barrel re-export of the Mathlib-free core) and read the spec modules in order:
+
+1. **Shared scalar core:** `TrackGeometry/Scalar.lean` (`TrackScalar`), `TrackGeometry/Clothoid.lean` (Gauss–Legendre clothoid quadrature and shift), and `TrackGeometry/Design.lean` (`SpeedModel`, `LayoutPolicy`, `CornerParams`, bisection corner solver, and PI budget allocation).
+2. **2D horizontal alignment:** `TrackGeometry/Planar.lean` (`Vec2`, `TurnDir`, `Segment2D`, `AlignmentPath2D`, `buildPath2D`).
+3. **3D alignment:** `TrackGeometry/Vec.lean` (`Vec3`), `TrackGeometry/Segment.lean` (`Segment`, RMF frames), `TrackGeometry/Cant.lean` (design cant), and `TrackGeometry/Path.lean` (`solveCorner`, `buildPath`).
+4. **Scalar instances & proofs:** `TrackGeometry/RFloat.lean` (computable `Float`), `TrackGeometry/Real.lean` (exact `ℝ`), `TrackGeometry/Bisection.lean`, `TrackGeometry/Budget.lean`, `TrackGeometry/PlanarContinuity.lean`, and `TrackGeometry/Continuity.lean`.

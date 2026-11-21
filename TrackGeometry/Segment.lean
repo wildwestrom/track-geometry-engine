@@ -1,4 +1,5 @@
 import TrackGeometry.Vec
+import TrackGeometry.Clothoid
 
 /-! # Segments, clothoids, and rotation-minimizing frames
 
@@ -39,26 +40,30 @@ inductive Curvature (α : Type) where
   | straight
   | curved (radius : α)
 
-/- A segment connects two points in the alignment, classified by the curvatures at
+/-- A segment connects two points in the alignment, classified by the curvatures at
   its start and end. The type indices enforce that only valid curvature transitions exist.
 
   Geometry is derived from essential parameters. Curved segments carry an unsigned
   `radius` plus the `binormal` of their (generally tilted) plane; the binormal's
   orientation carries the turn handedness (it is `±ẑ` for a planar `z=0` corner).
-  - `straight`: defined by startPt and endPt (length is computed as distance)
-  - `arc`: defined by radius, startPt, endPt, startTangent, binormal, and optionally a
-    sweep angle (center is derived)
-  - `transitionIn`: defined by radius, startPt, startTangent, binormal, and length
-  - `transitionOut`: defined by radius, startPt, startTangent, binormal, and length -/
+  - `straight`: defined by `startPt` and `endPt` (length is computed as distance)
+  - `arc`: defined by `radius`, `startPt`, `startTangent`, `binormal`, and `sweep` angle
+  - `transitionIn`: defined by `radius`, `startPt`, `startTangent`, `binormal`, and `length`
+  - `transitionOut`: defined by `radius`, `startPt`, `startTangent`, `binormal`, and `length` -/
 inductive Segment (α : Type) : Curvature α → Curvature α → Type where
+  /-- Straight line segment between `startPt` and `endPt`. -/
   | straight (startPt endPt : Vec3 α) : Segment α .straight .straight
-  | arc (radius : α) (startPt endPt : Vec3 α) (startTangent : Vec3 α)
-      (binormal : Vec3 α) (sweep : Option α := none) :
+  /-- Circular arc of unsigned `radius` starting at `startPt` with tangent `startTangent`
+      in the plane with unit `binormal`, sweeping through angle `sweep`. -/
+  | arc (radius : α) (startPt : Vec3 α) (startTangent : Vec3 α)
+      (binormal : Vec3 α) (sweep : α) :
       Segment α (.curved radius) (.curved radius)
+  /-- Entry transition ramping curvature from straight (`0`) to `1 / radius`. -/
   | transitionIn (radius : α) (continuity : GeometricContinuity := .gn 2)
       (startPt startTangent : Vec3 α) (binormal : Vec3 α) (length : α)
       (curveType : TransitionCurveType := .clothoid) :
       Segment α .straight (.curved radius)
+  /-- Exit transition ramping curvature from `1 / radius` back to straight (`0`). -/
   | transitionOut (radius : α) (continuity : GeometricContinuity := .gn 2)
       (startPt startTangent : Vec3 α) (binormal : Vec3 α) (length : α)
       (curveType : TransitionCurveType := .clothoid) :
@@ -73,92 +78,15 @@ def circleCenter [TrackScalar α] (p v : Vec3 α) (r : α)
   let n := Vec3.cross B v
   p + (r / Vec3.norm v) • n
 
-/-- Arc length given center, endpoints, and radius. Uses arccos of the angle between
-    radial vectors. -/
-def arcLength [TrackScalar α] (center startPt endPt : Vec3 α) (r : α) : α :=
-  let v1 := startPt - center
-  let v2 := endPt - center
-  let absR := if r > 0 then r else -r
-  let dotProd := Vec3.dot v1 v2
-  let normSq := Vec3.normSq v1
-  let cosθ := if normSq = 0 then 1 else dotProd / normSq
-  let cosθ' := max (-1) (min 1 cosθ)
-  absR * TrackScalar.arccos cosθ'
-
 /-- Extract the length of any segment. -/
 def Segment.length [TrackScalar α] {cA cB : Curvature α} : Segment α cA cB → α
   | .straight startPt endPt => Vec3.dist startPt endPt
-  | .arc radius startPt endPt startTangent binormal sweep =>
-    match sweep with
-    | some φ => (if radius > 0 then radius else -radius) * (if φ < 0 then -φ else φ)
-    | none =>
-      -- Derive the center and compute the minor arc length.
-      let center := circleCenter startPt startTangent radius binormal
-      arcLength center startPt endPt radius
+  | .arc radius _ _ _ sweep => absScalar (radius * sweep)
   | .transitionIn _ _ _ _ _ len _ => len
   | .transitionOut _ _ _ _ _ len _ => len
 
 
 /-! ## Transition curve evaluation -/
-
-/-! ### Gauss–Legendre quadrature
-
-We evaluate clothoid offsets by integrating the unit tangent `(cos θ(u), sin θ(u))`
-directly, rather than reducing to Fresnel integrals. The heading is the running
-turn angle `θ(u) = κ₀·u + ½·κ'·u²` of a linearly-varying-curvature transition.
-
-The integrator is a **composite 3-point Gauss–Legendre rule**: `[0, s]` is split into
-`clothoidPanels` equal panels and the 3-point rule (exact for quintics) is applied on
-each. The 3-point data — nodes `±√(3/5)`, `0` with weights `5/9, 8/9, 5/9` — is built
-from `0`, `1`, division and `sqrt`, so the whole thing stays generic over any
-`TrackScalar` (no decimal literals required) and needs no Fresnel primitives. -/
-
-/-- Number of equal panels used by the composite Gauss–Legendre clothoid integrator.
-    16 panels of a quintic-exact rule resolve any realistic transition (total turn
-    angle well under a full turn) to far better than float precision. -/
-def clothoidPanels : Nat := 16
-
-/-- Panelization data for the composite 3-point Gauss–Legendre rule on `[0, s]`:
-    the node offset `√(3/5)`, the weights `5/9` / `8/9`, and the panel width `h`
-    with its half-width. Built from `0`, `1`, division and `sqrt` only, so it stays
-    generic over any `TrackScalar` (no decimal literals required). -/
-structure GL3 (α : Type) where
-  node  : α
-  wSide : α
-  wMid  : α
-  h     : α
-  half  : α
-
-/-- The 3-point Gauss–Legendre panelization of `[0, s]` into `panels` equal panels. -/
-def GL3.on [TrackScalar α] (s : α) (panels : Nat) : GL3 α :=
-  let h : α := s / natToScalar panels
-  { node  := TrackScalar.sqrt (natToScalar 3 / natToScalar 5)
-    wSide := natToScalar 5 / natToScalar 9
-    wMid  := natToScalar 8 / natToScalar 9
-    h     := h
-    half  := h / natToScalar 2 }
-
-/-- Integrate `(cos θ(u), sin θ(u))` over `u ∈ [0, s]` with composite 3-point
-    Gauss–Legendre quadrature, where `θ(u) = κ₀·u + ½·κ'·u²`. Returns the local
-    offset `(xLocal, yLocal)` — displacement along and perpendicular to the start
-    tangent. -/
-def clothoidOffset [TrackScalar α] (κ₀ κ' s : α) (panels : Nat) : α × α :=
-  let g : GL3 α := GL3.on s panels
-  let heading : α → α := fun u => κ₀ * u + (κ' * u * u) / natToScalar 2
-  Id.run do
-    let mut sumC : α := 0
-    let mut sumS : α := 0
-    for k in [0:panels] do
-      let m  : α := natToScalar k * g.h + g.half      -- panel midpoint
-      let u0 : α := m - g.half * g.node
-      let u2 : α := m + g.half * g.node
-      sumC := sumC + g.wSide * TrackScalar.cos (heading u0)
-                   + g.wMid  * TrackScalar.cos (heading m)
-                   + g.wSide * TrackScalar.cos (heading u2)
-      sumS := sumS + g.wSide * TrackScalar.sin (heading u0)
-                   + g.wMid  * TrackScalar.sin (heading m)
-                   + g.wSide * TrackScalar.sin (heading u2)
-    return (g.half * sumC, g.half * sumS)
 
 /-! ### Moving frame and rotation-minimizing frame (RMF)
 
@@ -321,12 +249,22 @@ def Segment.pointAt [TrackScalar α] {cA cB : Curvature α}
     let len := Vec3.dist p q
     let frac := if len = 0 then 0 else t / len
     Vec3.lerp p q frac
-  | .arc r p _ v B _ =>
-    -- A circular arc is the constant-curvature (`κ = 1/r`), zero-torsion case of the
-    -- frame integrator in the corner's plane: the unsigned curvature gives the bend
-    -- magnitude and the binormal `B` carries the turn direction. `L` is unused here
-    -- (κ is constant, so κ' = 0); pass 1 to keep the divisor nonzero.
-    clothoidPoint p v (1 / r) (1 / r) 1 t B
+  | .arc r p v B _ =>
+    -- Exact analytic circular arc in the local `(v̂, n̂)` frame with `n̂ = B × v̂`:
+    -- local offset `(r · sin(t / r), r · (1 - cos(t / r)))`.
+    let θ := t / r
+    let xL := r * TrackScalar.sin θ
+    let yL := r * (1 - TrackScalar.cos θ)
+    let vUnit := Vec3.normalize v
+    let tx := vUnit 0; let ty := vUnit 1; let tz := vUnit 2
+    let bx := B 0; let bYc := B 1; let bz := B 2
+    -- in-plane normal n̂ = B × v̂
+    let nx := bYc * tz - bz * ty
+    let ny := bz * tx - bx * tz
+    let nz := bx * ty - bYc * tx
+    Vec3.mk (p 0 + xL * tx + yL * nx)
+            (p 1 + xL * ty + yL * ny)
+            (p 2 + xL * tz + yL * nz)
   | .transitionIn r _ p v B len cType =>
     transitionPoint p v 0 (1 / r) len t cType B
   | .transitionOut r _ p v B len cType =>
@@ -335,14 +273,14 @@ def Segment.pointAt [TrackScalar α] {cA cB : Curvature α}
 /-- The segment-plane binormal: the stored binormal for curved segments, `ẑ` for straights. -/
 def Segment.planeBinormal [TrackScalar α] {cA cB : Curvature α} : Segment α cA cB → Vec3 α
   | .straight _ _ => Vec3.mk 0 0 1
-  | .arc _ _ _ _ B _ => B
+  | .arc _ _ _ B _ => B
   | .transitionIn _ _ _ _ B _ _ => B
   | .transitionOut _ _ _ _ B _ _ => B
 
 /-- Start tangent direction: `q − p` for straights, stored `v` for curved segments. -/
 def Segment.startDir [TrackScalar α] {cA cB : Curvature α} : Segment α cA cB → Vec3 α
   | .straight p q => q - p
-  | .arc _ _ _ v _ _ => v
+  | .arc _ _ v _ _ => v
   | .transitionIn _ _ _ v _ _ _ => v
   | .transitionOut _ _ _ v _ _ _ => v
 
@@ -356,7 +294,7 @@ def Segment.headingAt [TrackScalar α] {cA cB : Curvature α}
     (seg : Segment α cA cB) (t : α) : α :=
   match seg with
   | .straight _ _ => 0
-  | .arc r _ _ _ _ _ => t / r
+  | .arc r _ _ _ _ => t / r
   | .transitionIn r _ _ _ _ len _ => (1 / r) / len * t * t / natToScalar 2
   | .transitionOut r _ _ _ _ len _ => t / r - (1 / r) / len * t * t / natToScalar 2
 
@@ -408,6 +346,6 @@ def Segment.curvatureAt [TrackScalar α] {cA cB : Curvature α}
     (seg : Segment α cA cB) (t : α) : α :=
   match seg with
   | .straight _ _ => 0
-  | .arc r _ _ _ _ _ => 1 / r
+  | .arc r _ _ _ _ => 1 / r
   | .transitionIn r _ _ _ _ len _ => (1 / r) / len * t
   | .transitionOut r _ _ _ _ len _ => 1 / r - (1 / r) / len * t

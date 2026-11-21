@@ -1,3 +1,4 @@
+import TrackGeometry.Design
 import TrackGeometry.Vec
 import TrackGeometry.Segment
 
@@ -120,92 +121,6 @@ def AlignmentPath.frameAt [TrackScalar α] (path : AlignmentPath α) (s : α)
         else go rest (t - len) (e.endFrame fr)
     go path.segments.toList s initFr
 
-/-- Design parameters for auto-radius PI construction.
-
-    Transition length is the *minimum* spiral that keeps the ride within comfort
-    limits. Each corner runs at its own
-    operating speed `V = √(a_max·R)` (the fastest the circular arc allows under the
-    lateral-acceleration limit), and the clothoid is then made just long enough to
-    cap both lateral jerk and yaw (heading) angular acceleration:
-
-      `Ls = max( V³/(R·j_max), V²/(R·α_max) )`.
-
-    Units are interpreted with **1 scene unit = 1 metre** (so `a_max` is m/s²,
-    `j_max` m/s³, `α_max` rad/s²). Setting `maxLateralAccel ≤ 0` switches the speed
-    model off and recovers the pure circular fillet (no transitions). -/
-structure DesignParams (α : Type) where
-  /-- Fraction (≤ 0.5) of the shorter adjacent leg a corner's auto budget takes. The corners
-      next to the path's ends take all the room they have instead (see `cornerLayouts`). -/
-  legBudget : α
-  /-- Minimum permitted arc radius (world units; 1 unit = 1 m). No corner is rounded —
-      or resized — tighter than this: the tangent budget is floored at
-      `radiusFloorBudget`, the pullback (transitions included) that yields this radius
-      (the solver's radius fit lands on it from above, within a few cm). A corner whose
-      legs are too short to reach it is rounded as gently as the legs allow (budget capped
-      at the room it has). 40 m is the tightest the game builds
-      (found experimentally). `≤ 0` disables the floor. -/
-  minRadius : α
-  /-- Corners whose `|sin Δ|` is below this are treated as straight (no arc). -/
-  straightThreshold : α
-  /-- Maximum lateral (centripetal) acceleration tolerated on the circular arc.
-      Fixes each corner's operating speed via `V = √(a_max·R)`. `≤ 0` disables the
-      speed model, recovering a pure straight→arc→straight corner. -/
-  maxLateralAccel : α
-  /-- Maximum lateral jerk (rate of change of lateral acceleration) on the
-      transition. Imposes `Ls ≥ V³/(R·j_max)`. `≤ 0` drops this criterion. -/
-  maxLateralJerk : α
-  /-- Maximum yaw angular acceleration (rate of change of heading rate) on the
-      transition. Imposes `Ls ≥ V²/(R·α_max)`. `≤ 0` drops this criterion. -/
-  maxYawAccel : α
-  /-- Design-speed ceiling. Operating speed is capped, `V = min(maxDesignSpeed,
-      √(a_max·R))`, so large-radius curves that *could* exceed it don't get oversized
-      transitions, and straights run at this speed. `≤ 0` leaves the speed uncapped. -/
-  maxDesignSpeed : α
-
-/-- Operating speed on an arc of radius `R`: `√(a_max·R)`, capped at the design speed (so
-    over-fast curves don't get oversized transitions). -/
-def DesignParams.speedAt [TrackScalar α] (dp : DesignParams α) (R : α) : α :=
-  let v := TrackScalar.sqrt (dp.maxLateralAccel * R)
-  if dp.maxDesignSpeed > 0 then min dp.maxDesignSpeed v else v
-
-/-- Transition length demanded on an arc of radius `R`: the larger of the jerk- and
-    yaw-acceleration-limited lengths at `speedAt R`. -/
-def DesignParams.transitionLength [TrackScalar α] (dp : DesignParams α) (R : α) : α :=
-  let V := dp.speedAt R
-  let lsJerk := if dp.maxLateralJerk > 0 then (V * V * V) / (R * dp.maxLateralJerk) else 0
-  let lsYaw  := if dp.maxYawAccel   > 0 then (V * V)     / (R * dp.maxYawAccel)  else 0
-  max lsJerk lsYaw
-
-/-- Spiral angle `θs = Ls/(2R)` of a corner of turn `Δ` on an arc of radius `R`, clamped to
-    `Δ/2` so an arc (of central angle `≥ 0`) remains. -/
-def DesignParams.spiralAngle [TrackScalar α] (dp : DesignParams α) (R Δ : α) : α :=
-  let two : α := natToScalar 2
-  min (dp.transitionLength R / (two * R)) (Δ / two)
-
-/-- Shift `(P, K)` of a unit clothoid of spiral angle `θ > 0`: the corner's tangent budget
-    is `R·((1+P)·tan(Δ/2) + K)` for an arc of radius `R`. -/
-def clothoidShift [TrackScalar α] (θ : α) : α × α :=
-  let Ls1 := natToScalar 2 * θ
-  let (X1, Y1) := clothoidOffset 0 (1 / Ls1) Ls1 clothoidPanels
-  (Y1 - (1 - TrackScalar.cos θ), X1 - TrackScalar.sin θ)
-
-/-- The tangent budget whose corner (of turn `delta`, `tanHalf = tan(Δ/2)`) has an arc of
-    radius `minRadius` (the fixed point of the solver's radius fit): `R·tan(Δ/2)` for a pure fillet, `R·((1+P)·tan(Δ/2) + K)` with the
-    transitions the speed model gives that arc. `0` when the floor is disabled.
-
-    Rejected: `minRadius·tan(Δ/2)` for every corner. It is the pure fillet's pullback only;
-    with transitions the same budget fits a tighter arc (a 100 m floor gave R ≈ 81 m), so
-    the floor let curves below the radius the game will build. -/
-def DesignParams.radiusFloorBudget [TrackScalar α] (dp : DesignParams α) (tanHalf delta : α) : α :=
-  let R := dp.minRadius
-  if R ≤ 0 then 0
-  else
-    let θ := if dp.maxLateralAccel ≤ 0 then 0 else dp.spiralAngle R delta
-    if θ ≤ 0 then R * absScalar tanHalf
-    else
-      let (P, K) := clothoidShift θ
-      R * absScalar ((1 + P) * tanHalf + K)
-
 /-- Directional and angular facts for one interior PI, independent of any chosen
     tangent budget. `none` means the corner is degenerate or near-straight. -/
 structure CornerGeometry (α : Type) where
@@ -225,25 +140,25 @@ structure CornerGeometry (α : Type) where
   /-- Signed total turn angle selected for this corner. Nonzero windings add full
       revolutions, allowing looped spiral-arc-spiral corners. -/
   turn : α
-  /-- `tan(Δ₀/2)` of the *principal* deflection (always positive). Independent of
-      winding: a wound corner sweeps the same fillet circle through extra revolutions. -/
+  /-- `tan(Δ/2)` of the selected (possibly wound) turn. Positive for standard turns and
+      negative for reflex reverse-winding loops. -/
   tanHalf : α
   /-- Unsigned selected turn angle `Δ`. -/
   delta : α
   /-- Shorter adjacent leg length. -/
   shorterLeg : α
-  /-- Maximum tangent budget. From `cornerGeometry`, the corner alone: the shorter
-      adjacent leg. From `cornerLayouts`, the room its neighbours leave: on each leg, the
-      leg less the budget of the curve at its far end (if any). -/
-  maxBudget : α
-  /-- Minimum tangent budget, `DesignParams.radiusFloorBudget` (an arc of radius
-      `minRadius`), capped to `maxBudget`. -/
-  minBudget : α
+  /-- Minimum tangent budget required to satisfy `minRadius`, before clamping to leg room. -/
+  floorBudget : α
+
+/-- Extract the scalar budget specification needed by `desiredBudgets` and `cornerDragBounds`. -/
+def CornerGeometry.budgetSpec (g : CornerGeometry α) : CornerBudgetSpec α :=
+  { shorterLeg := g.shorterLeg, floorBudget := g.floorBudget }
 
 /-- Compute shared corner geometry for an interior PI. This is the common source for
     path construction and UI curve-end controls, so straight/degenerate detection and
-    min/max budget bounds stay aligned. -/
-def cornerGeometry [TrackScalar α] (a b c : Vec3 α) (dp : DesignParams α)
+    minimum-radius floors stay aligned. -/
+def cornerGeometry [TrackScalar α] (a b c : Vec3 α)
+    (lp : LayoutPolicy α) (sm : SpeedModel α) (straightThreshold : α)
     (winding : Int := 0) :
     Option (CornerGeometry α) :=
   let dIn := b - a
@@ -265,22 +180,21 @@ def cornerGeometry [TrackScalar α] (a b c : Vec3 α) (dp : DesignParams α)
     let minor := TrackScalar.arccos cosD
     let principal := if sinSigned < 0 then -minor else minor
     let selected :=
-      if sinAbs ≤ dp.straightThreshold then
+      if sinAbs ≤ straightThreshold then
         if winding = 0 then 0 else intToScalar winding * fullTurn
       else
         principal + intToScalar winding * fullTurn
     let delta := absScalar selected
-    if delta ≤ dp.straightThreshold then none
+    if delta ≤ straightThreshold then none
     else
       let shorter := min nIn nOut
-      let hi := shorter
       -- `tan(Δ/2)` of the *selected* (possibly wound) turn. For a reflex turn
       -- (Δ ∈ (π, 2π), i.e. a reverse-winding loop) this is negative; that sign is
       -- exactly what flips the `K` term of the clothoid shift in the radius fit, so we
       -- keep it signed and let the consumers `absScalar` it where a magnitude is wanted.
       let cosT := TrackScalar.cos delta
       let tanHalf := TrackScalar.sin delta / (1 + cosT)
-      let lo := min (dp.radiusFloorBudget tanHalf delta) hi
+      let floor := radiusFloorBudget lp sm tanHalf delta
       -- Unit binormal of the corner's plane, oriented so a *positive* rotation about it
       -- carries `uIn` toward `uOut` along the selected turn. The geometric normal
       -- `uIn × uOut` already does this for the principal (minor) deflection; when the
@@ -290,7 +204,7 @@ def cornerGeometry [TrackScalar α] (a b c : Vec3 α) (dp : DesignParams α)
       let cr := Vec3.cross uIn uOut
       let crNorm := Vec3.norm cr
       let binormal : Vec3 α :=
-        if crNorm ≤ dp.straightThreshold then
+        if crNorm ≤ straightThreshold then
           if selected > 0 then Vec3.mk 0 0 1 else Vec3.mk 0 0 (-1)
         else
           let nHat := (1 / crNorm) • cr
@@ -298,7 +212,7 @@ def cornerGeometry [TrackScalar α] (a b c : Vec3 α) (dp : DesignParams α)
           if reversed then (-(1 : α)) • nHat else nHat
       some { uIn := uIn, uOut := uOut, binormal := binormal, sinSigned := sinSigned,
              cosDelta := cosD, turn := selected, tanHalf := tanHalf, delta := delta,
-             shorterLeg := shorter, maxBudget := hi, minBudget := lo }
+             shorterLeg := shorter, floorBudget := floor }
 
 /-- Whether the selected turn winds onto the *opposite* side from the principal
     deflection — a reverse-winding loop. When set, the corner is tangent to the legs on
@@ -328,95 +242,58 @@ structure CornerLayout (α : Type) extends CornerGeometry α where
 
 /-- Select and clamp the tangent budget for an interior PI, returning the tangent
     endpoints that consume that budget. An override is an absolute world-unit budget;
-    `none` uses `dp.legBudget * shorter adjacent leg`. This sees the corner alone; on a
+    `none` uses `lp.legBudget * shorter adjacent leg`. This sees the corner alone; on a
     path, `cornerLayouts` also keeps it clear of its neighbours. -/
-def cornerLayout [TrackScalar α] (a b c : Vec3 α) (dp : DesignParams α)
+def cornerLayout [TrackScalar α] (a b c : Vec3 α)
+    (lp : LayoutPolicy α) (sm : SpeedModel α) (straightThreshold : α)
     (override : Option α := none) (winding : Int := 0) : Option (CornerLayout α) :=
-  match cornerGeometry a b c dp winding with
+  match cornerGeometry a b c lp sm straightThreshold winding with
   | none => none
   | some g =>
       let cand := match override with
         | some o => o
-        | none => dp.legBudget * g.shorterLeg
-      let budget := max g.minBudget (min g.maxBudget cand)
+        | none => lp.legBudget * g.shorterLeg
+      let lo := min g.floorBudget g.shorterLeg
+      let budget := max lo (min g.shorterLeg cand)
       some { toCornerGeometry := g, budget := budget,
              entryPoint := g.entryPoint b budget, exitPoint := g.exitTangentPoint b budget }
 
-/-- The corners of a whole PI polyline, indexed like `pts` (`none` at the two ends and at
-    interior PIs that do not curve). Each corner asks for a budget (its override, else the
-    auto budget, clamped to its own legs) and gets it, leaving room for its neighbours ("leg
-    minus neighbour"). The auto budget is `dp.legBudget * shorter leg`, except at an *end
-    corner* (one with a path end as a neighbour), which asks for all the room it has: the
-    whole leg to the path end, and on its other leg the leg less the neighbour's own ask
-    (override or `dp.legBudget` share) when the neighbour curves. So by default the first and
-    last curves start at the path's ends unless a neighbour or the other leg stops them.
+/-- Compute the Euclidean length of each leg (`k` from PI `k` to PI `k + 1`) of a 3D polyline. -/
+def polylineLegLengths [TrackScalar α] (pts : Array (Vec3 α)) : Array α :=
+  let n := pts.size
+  let z : Vec3 α := Vec3.mk 0 0 0
+  let get := fun i => (pts[i]?).getD z
+  (Array.range (n - 1)).map fun k => Vec3.norm (get (k + 1) - get k)
 
+/-- Resolve the corners of a 3D PI polyline by composing `desiredBudgets` and `resolveSharedLegs`.
 
-    * a leg whose far end does not curve (a path end or a straight PI) is the corner's alone;
-    * a leg shared with another curve holds both asks when they fit, else it is split in
-      proportion to them (order-independent; only when moving PIs shortens a leg);
-    * the corner's budget is the lesser of its two legs' shares.
-
-    So curves never overlap: on every shared leg the two budgets sum to at most the leg.
-    `maxBudget` becomes the room the neighbours leave (the leg less the neighbour's budget,
-    the lesser over both legs), the bound for dragging a bracket, and `minBudget` the
-    `minRadius` floor capped to it. An end corner with no override only fills the room left,
-    so it leaves room down to its own `minBudget`: widening its neighbour shrinks it. -/
-def cornerLayouts [TrackScalar α] (pts : Array (Vec3 α)) (dp : DesignParams α)
+Indexed like `pts` (`none` at the two endpoints and at interior PIs that do not curve).
+Each curving corner's desired budget is computed by `desiredBudgets` and reconciled across
+shared legs by `resolveSharedLegs` so adjacent curves never overlap. UI bracket-drag limits
+are computed separately by `cornerDragBounds` when needed by the UI. -/
+def cornerLayouts [TrackScalar α] (pts : Array (Vec3 α))
+    (lp : LayoutPolicy α) (sm : SpeedModel α) (straightThreshold : α)
     (overrides : Array (Option α) := #[]) (windings : Array Int := #[]) :
     Array (Option (CornerLayout α)) :=
   let n := pts.size
   let z : Vec3 α := Vec3.mk 0 0 0
   let get := fun i => (pts[i]?).getD z
+  let legLengths := polylineLegLengths pts
   let geoms : Array (Option (CornerGeometry α)) := (Array.range n).map fun i =>
     if 1 ≤ i ∧ i + 1 < n then
-      cornerGeometry (get (i - 1)) (get i) (get (i + 1)) dp ((windings[i]?).getD 0)
+      cornerGeometry (get (i - 1)) (get i) (get (i + 1)) lp sm straightThreshold
+        ((windings[i]?).getD 0)
     else none
-  let geomAt := fun i => (geoms[i]?).bind id
-  let isCorner := fun i => (geomAt i).isSome
-  -- leg `k` runs from PI `k` to PI `k + 1`
-  let legLen := fun (k : Nat) => Vec3.norm (get (k + 1) - get k)
-  let clampAsk := fun (g : CornerGeometry α) (cand : α) => max g.minBudget (min g.maxBudget cand)
-  -- what each corner asks before the end corners take their room
-  let base : Array α := (Array.range n).map fun i =>
-    match geomAt i with
-    | none => 0
-    | some g => clampAsk g (((overrides[i]?).bind id).getD (dp.legBudget * g.shorterLeg))
-  -- the room on leg `k`, whose far end is PI `j`, left by the neighbour's base ask
-  let free := fun (j k : Nat) => if isCorner j then legLen k - base.getD j 0 else legLen k
-  -- an end corner with no override: it takes the room left, so it gives way to a neighbour
-  let autoEnd := fun i => (i = 1 ∨ i + 2 = n) ∧ ((overrides[i]?).bind id).isNone
-  let ask : Array α := (Array.range n).map fun i =>
-    match geomAt i with
-    | some g =>
-        if autoEnd i then clampAsk g (min (free (i - 1) (i - 1)) (free (i + 1) i))
-        else base.getD i 0
-    | none => 0
-  -- what corner `i` may take of leg `k`, whose far end is PI `j`
-  let share := fun (i j k : Nat) =>
-    let len := legLen k
-    let ai := ask.getD i 0
-    if isCorner j then
-      let aj := ask.getD j 0
-      if ai + aj ≤ len then ai else len * ai / (ai + aj)
-    else min ai len
-  let budget : Array α := (Array.range n).map fun i =>
-    if isCorner i then min (share i (i - 1) (i - 1)) (share i (i + 1) i) else 0
-  -- an auto end corner can shrink to its floor, so it leaves room down to that
-  let room := fun (j k : Nat) =>
-    match geomAt j with
-    | none => legLen k
-    | some g => legLen k - (if autoEnd j then g.minBudget else budget.getD j 0)
+  let specs : Array (Option (CornerBudgetSpec α)) := geoms.map (·.map CornerGeometry.budgetSpec)
+  let asks := desiredBudgets legLengths specs lp overrides
+  let budgets := resolveSharedLegs legLengths asks
   (Array.range n).map fun i =>
-    match geomAt i with
-    | none => none
-    | some g =>
-        let hi := min (room (i - 1) (i - 1)) (room (i + 1) i)
-        let lo := min (dp.radiusFloorBudget g.tanHalf g.delta) hi
-        let bud := budget.getD i 0
+    match (geoms[i]?).bind id, (budgets[i]?).bind id with
+    | some g, some bud =>
         let b := get i
-        some { toCornerGeometry := { g with maxBudget := hi, minBudget := lo }, budget := bud,
+        some { toCornerGeometry := g, budget := bud,
                entryPoint := g.entryPoint b bud, exitPoint := g.exitTangentPoint b bud }
+    | _, _ => none
 
 /-- A solved corner at one interior PI: where the incoming straight ends
     (`entryPoint`), where the outgoing straight resumes (`exitPoint`), and the curved
@@ -435,11 +312,12 @@ structure CornerSolution (α : Type) where
   /-- The fitted (unsigned) arc radius — handy for speed restrictions / labels. -/
   radius : α
 
-/-- Solve a non-degenerate corner from precomputed shared corner geometry. -/
-def solveCornerWithGeometry [TrackScalar α] (b : Vec3 α) (budget : α)
-    (dp : DesignParams α) (g : CornerGeometry α) : CornerSolution α :=
+/-- Construct the 3D segments for a corner from solved scalar `CornerParams` and
+precomputed `CornerGeometry`, without depending on `SpeedModel`. -/
+def buildCorner3D [TrackScalar α] (b : Vec3 α) (budget : α)
+    (g : CornerGeometry α) (cp : CornerParams α) (straightThreshold : α) :
+    CornerSolution α :=
   let uIn := g.uIn
-  let two : α := natToScalar 2
   -- Binormal of the corner's plane; all in-plane rotations and curvatures are about it,
   -- with unsigned magnitudes. Handedness (left/right, reflex windings) lives entirely in
   -- `B`'s orientation.
@@ -452,55 +330,29 @@ def solveCornerWithGeometry [TrackScalar α] (b : Vec3 α) (budget : α)
   -- is tangent at `b - budget·uIn` / `b + budget·uOut`; the reverse arc is tangent to
   -- the same legs but on their *extension* rays, so the tangent bases flip sign.
   let entryBase := g.entryPoint b budget
-  let exitBase  := g.exitTangentPoint b budget
-  let tanHalf := g.tanHalf
-  let safeDenom := fun (x : α) =>
-    let ax := absScalar x
-    if ax ≤ dp.straightThreshold then dp.straightThreshold else ax
-  let Δ := g.delta
-  -- Speed-derived spiral. Each corner runs at `V = √(a_max·R)`; the clothoid is
-  -- the shortest that holds that speed within the jerk and yaw-accel limits. `θs`
-  -- and `R` are mutually dependent, so we fixed-point from the pure-fillet radius.
-  let aMax := dp.maxLateralAccel
-  let speedAt := dp.speedAt
-  -- Fitted radius for spiral angle `θ > 0` (unit-clothoid shift `(P, K)` at angle θ).
-  let radiusOf := fun (θ : α) =>
-    let (P, K) := clothoidShift θ
-    budget / safeDenom ((1 + P) * tanHalf + K)
-  -- One step: radius → spiral angle `θs = Ls/(2R)`, clamped so an arc remains.
-  let stepθ := fun (R : α) => dp.spiralAngle R Δ
-  let θs :=
-    if aMax ≤ 0 then 0
-    else Id.run do
-      let mut R := budget / safeDenom tanHalf -- seed: pure-fillet radius where available
-      let mut θ := stepθ R
-      for _ in [0:4] do
-        if θ > 0 then
-          R := radiusOf θ
-          θ := stepθ R
-      return θ
-  if θs ≤ 0 then
+  if cp.spiralAngle ≤ 0 then
     -- No transitions: classic circular fillet (straight → arc → straight).
-    let absR := budget / safeDenom tanHalf
+    let absR := cp.radius
     let pc := entryBase
-    let pt := exitBase
-    let opSpeed := if aMax > 0 then speedAt absR else 0
-    { entryPoint := pc, exitPoint := pt, opSpeed := opSpeed, radius := absR,
-      pieces := #[AnySegment.of (Segment.arc absR pc pt uIn B (some Δ)) opSpeed] }
+    let arcSeg := Segment.arc absR pc uIn B cp.arcAngle
+    let pt := arcSeg.pointAt arcSeg.length
+    { entryPoint := pc, exitPoint := pt, opSpeed := cp.opSpeed, radius := absR,
+      pieces := #[AnySegment.of arcSeg cp.opSpeed] }
   else
-    -- Symmetric spiral corner: fit the radius to the budget at the converged spiral angle.
-    let absR := radiusOf θs
-    let opSpeed := speedAt absR
-    let Ls := two * absR * θs
+    -- Symmetric spiral corner: entry clothoid, optional circular arc, exit clothoid.
+    let absR := cp.radius
+    let θs := cp.spiralAngle
+    let Ls := cp.spiralLength
+    let φ := cp.arcAngle
+    let opSpeed := cp.opSpeed
     -- In-plane rotations use the scalar binormal `(bx,by,bz)` as a cheap axis, so the
-    -- stored tangents stay shallow (cf. `rotateAxisC`); `sc` and the arc end are already
-    -- scalar-assembled by `clothoidPoint`/`circleCenter`.
+    -- stored tangents stay shallow (cf. `rotateAxisC`); `sc` and `cs` are already
+    -- scalar-assembled by `clothoidPoint` and `Segment.pointAt`.
     let ts := entryBase                              -- entry tangent→spiral point
     let sc := clothoidPoint ts uIn 0 (1 / absR) Ls Ls B -- entry spiral end = arc start
     let tanSC := Vec3.rotateAxisC bx bYc bz θs uIn    -- tangent at sc
-    let φ := Δ - two * θs                            -- circular arc central angle (≥ 0)
-    let o := circleCenter sc tanSC absR B            -- arc center
-    let cs := o + Vec3.rotateAxisC bx bYc bz φ (sc - o) -- arc end = exit spiral start
+    let arcSeg := Segment.arc absR sc tanSC B φ
+    let cs := arcSeg.pointAt arcSeg.length           -- arc end = exit spiral start
     let tanCS := Vec3.rotateAxisC bx bYc bz φ tanSC   -- tangent at cs
     let entrySeg := AnySegment.of
       (Segment.transitionIn (radius := absR) (startPt := ts) (startTangent := uIn)
@@ -509,44 +361,41 @@ def solveCornerWithGeometry [TrackScalar α] (b : Vec3 α) (budget : α)
       (Segment.transitionOut (radius := absR) (startPt := cs) (startTangent := tanCS)
         (binormal := B) (length := Ls)) opSpeed
     let pieces :=
-      if φ ≤ dp.straightThreshold then #[entrySeg, exitSeg]
-      else #[entrySeg, AnySegment.of (Segment.arc absR sc cs tanSC B (some φ)) opSpeed, exitSeg]
+      if φ ≤ straightThreshold then #[entrySeg, exitSeg]
+      else #[entrySeg, AnySegment.of arcSeg opSpeed, exitSeg]
     { entryPoint := ts, exitPoint := exitSeg.pointAt Ls, pieces := pieces,
       opSpeed := opSpeed, radius := absR }
+
+/-- Solve a non-degenerate corner from precomputed shared corner geometry by delegating
+scalar parameter solving to `solveCornerParams` and 3D segment assembly to `buildCorner3D`. -/
+def solveCornerWithGeometry [TrackScalar α] (b : Vec3 α) (budget : α)
+    (sm : SpeedModel α) (straightThreshold : α) (g : CornerGeometry α) : CornerSolution α :=
+  let cp := solveCornerParams budget g.tanHalf g.delta sm straightThreshold
+  buildCorner3D b budget g cp straightThreshold
 
 /-- Solve the corner at interior PI `b`, between prev PI `a` and next PI `c`, consuming
     `budget` of tangent length along each leg. Returns `none` when the legs are (near)
     collinear — the corner is straight and contributes nothing.
 
-    With `dp.maxLateralAccel ≤ 0` this is the classic circular fillet: the tangent
+    With `sm.maxLateralAccel ≤ 0` this is the classic circular fillet: the tangent
     points sit `budget` back from `b` along each leg and `R = budget / tan(Δ/2)`, so the
     arc is exactly tangent to both legs.
 
     Otherwise the corner is the standard symmetric spiral: an entry clothoid, a circular
-    arc, and an exit clothoid. The spiral angle `θs = Ls/(2R)` is speed-derived. The
-    corner's operating speed is the fastest its arc
-    allows, `V = √(a_max·R)`, and the transition is the shortest clothoid that keeps the
-    ride within the comfort limits:
-
-      `Ls = max( V³/(R·j_max), V²/(R·α_max) )`   (jerk- and yaw-acceleration-limited).
-
-    This couples `θs` to `R`: the radius is fitted to the budget via the clothoid shift,
-    `R = budget / ((1+P)·tan(Δ/2) + K)` with `(P, K)` from a unit clothoid of angle `θs`,
-    while `θs` depends on `R` through `Ls`. Because `P, K` are tiny for realistic
-    spirals, a short fixed-point iteration (seeded from the pure-fillet radius) converges
-    to float precision. `θs` is clamped to `Δ/2` so a non-negative circular arc remains;
-    very sharp corners saturate at a full-spiral corner (and then exceed the nominal
-    jerk, the geometric price of a corner too tight for its speed). -/
-def solveCorner [TrackScalar α] (a b c : Vec3 α) (budget : α) (dp : DesignParams α) :
+    arc, and an exit clothoid whose scalar parameters are solved by `solveCornerParams`
+    (52-step bracketed bisection for `tanHalf > 0`, fixed-point fallback for 3D reverse
+    loops) and assembled in 3D by `buildCorner3D`. -/
+def solveCorner [TrackScalar α] (a b c : Vec3 α) (budget : α)
+    (lp : LayoutPolicy α) (sm : SpeedModel α) (straightThreshold : α) :
     Option (CornerSolution α) :=
-  match cornerGeometry a b c dp with
+  match cornerGeometry a b c lp sm straightThreshold with
   | none => none
-  | some g => some (solveCornerWithGeometry b budget dp g)
+  | some g => some (solveCornerWithGeometry b budget sm straightThreshold g)
 
 /-- Build an `AlignmentPath` from a polyline of PIs.
 
     The first and last PIs are endpoints. Each interior PI is rounded with a circular
-    arc whose radius fits a tangent budget: `legBudget × (shorter adjacent leg)`, or all the
+    arc whose radius fits a tangent budget: `lp.legBudget × (shorter adjacent leg)`, or all the
     room it has at the first and last corners (see `cornerLayouts`). Near-collinear corners
     pass straight through.
 
@@ -555,7 +404,8 @@ def solveCorner [TrackScalar α] (a b c : Vec3 α) (budget : α) (dp : DesignPar
     `cornerLayouts`, so a dragged control point can never cross the PI, overrun a leg or
     overlap the neighbouring curve. An out-of-range index or a `none` falls back to the
     auto budget. -/
-def buildPath [TrackScalar α] (pts : Array (Vec3 α)) (dp : DesignParams α)
+def buildPath [TrackScalar α] (pts : Array (Vec3 α))
+    (lp : LayoutPolicy α) (sm : SpeedModel α) (straightThreshold : α)
     (overrides : Array (Option α) := #[]) (windings : Array Int := #[]) :
     AlignmentPath α :=
   let n := pts.size
@@ -565,8 +415,8 @@ def buildPath [TrackScalar α] (pts : Array (Vec3 α)) (dp : DesignParams α)
     let get := fun i => (pts[i]?).getD z
     -- Straights run at the design-speed ceiling when set; otherwise leave `opSpeed = 0`
     -- (UI treats 0 as "unrestricted" and falls back to the same ceiling).
-    let straightSpeed := if dp.maxDesignSpeed > 0 then dp.maxDesignSpeed else 0
-    let layouts := cornerLayouts pts dp overrides windings
+    let straightSpeed := if sm.maxDesignSpeed > 0 then sm.maxDesignSpeed else 0
+    let layouts := cornerLayouts pts lp sm straightThreshold overrides windings
     let out : Array (AnySegment α) := Id.run do
       let mut acc : Array (AnySegment α) := #[]
       let mut cursor : Vec3 α := get 0
@@ -575,7 +425,7 @@ def buildPath [TrackScalar α] (pts : Array (Vec3 α)) (dp : DesignParams α)
         match (layouts[i]?).bind id with
         | none => pure ()
         | some layout =>
-          let sol := solveCornerWithGeometry b layout.budget dp layout.toCornerGeometry
+          let sol := solveCornerWithGeometry b layout.budget sm straightThreshold layout.toCornerGeometry
           acc := acc.push (AnySegment.of (Segment.straight cursor sol.entryPoint) straightSpeed)
           for piece in sol.pieces do
             acc := acc.push piece

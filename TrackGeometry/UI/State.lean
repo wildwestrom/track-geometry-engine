@@ -198,7 +198,8 @@ def sampleCurve (line : Line) : Array CurveSample := Id.run do
   let mut out := #[]
   if line.size ≥ 2 then
     let pts := line.map fun q => toGeo q.pos
-    let path := buildPath pts designParams (line.map fun q => q.budget.map rf) (line.map (·.winding))
+    let path := buildPath pts layoutPolicy speedModel straightThreshold
+      (line.map fun q => q.budget.map rf) (line.map (·.winding))
     let total := path.length |>.val
     if total > 0.0 then
       for e in path.segments do

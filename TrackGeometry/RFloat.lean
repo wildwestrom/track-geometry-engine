@@ -1,4 +1,4 @@
-import TrackGeometry.Vec
+import TrackGeometry.Scalar
 
 /-! # Computable Float scalar (`RFloat`)
 

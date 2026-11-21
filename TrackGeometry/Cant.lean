@@ -21,7 +21,7 @@ at `p ± (G/2) · N_φ` where `N_φ` is `N₀` rolled about `T` by `φ` with `si
 (positive `h` ⇒ left rail high). Turn sense for the signed height comes from the corner
 plane binormal (outer rail high).
 
-`DesignParams` speed and clothoid length use the zero-cant model
+`SpeedModel` speed and clothoid length use the zero-cant model
 `V = √(a_max·R)` and do not account for cant. -/
 
 /-- Equilibrium cant height `h_eq = G · V² · κ / g` (small-angle). `κ` is curvature magnitude.

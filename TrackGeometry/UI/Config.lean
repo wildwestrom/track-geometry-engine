@@ -39,21 +39,26 @@ def segColor (e : AnySegment RFloat) : Color :=
   | ⟨_, _, .transitionIn .., _⟩  => TRANSITION_COLOR
   | ⟨_, _, .transitionOut .., _⟩ => TRANSITION_COLOR
 
-/-- Auto-radius design parameters for the PI builder. `minRadius` is a hard floor (1
-    scene unit = 1 m): 40 m is the tightest radius the game builds (found experimentally). -/
-def designParams : DesignParams RFloat :=
-  { legBudget := rf 0.3, minRadius := rf 40.0, straightThreshold := rf 0.001,
-    -- comfort limits (1 scene unit = 1 m): V = √(a_max·R) per corner, clothoid sized
-    -- to the larger of the jerk- and yaw-acceleration-limited lengths.
-    -- a_max sizes V as the full lateral budget under the zero-cant model.
-    maxLateralAccel := rf 1.2, maxLateralJerk := rf 0.5, maxYawAccel := rf 0.2,
+/-- Layout policy for the PI builder. `minRadius` is a hard floor (1 scene unit = 1 m):
+    40 m is the tightest radius the game builds (found experimentally). -/
+def layoutPolicy : LayoutPolicy RFloat :=
+  { legBudget := rf 0.3, minRadius := rf 40.0 }
+
+/-- Speed and comfort model for the PI builder (1 scene unit = 1 m): `V = √(a_max·R)` per
+    corner, clothoid sized to the larger of the jerk- and yaw-acceleration-limited lengths.
+    `maxLateralAccel` sizes `V` as the full lateral budget under the zero-cant model. -/
+def speedModel : SpeedModel RFloat :=
+  { maxLateralAccel := rf 1.2, maxLateralJerk := rf 0.5, maxYawAccel := rf 0.2,
     maxDesignSpeed := rf 83.3333 }  -- 300 km/h
+
+/-- Collinearity threshold: corners whose `|sin Δ|` is at or below this are treated as straight. -/
+def straightThreshold : RFloat := rf 0.001
 
 /-! ### Speed view: per-segment operating speed and a green→red colour ramp. -/
 
 def MPS_TO_KMH : Float := 3.6
 /-- Design-speed ceiling, as a raw `Float`. -/
-def designSpeedF : Float := designParams.maxDesignSpeed.val
+def designSpeedF : Float := speedModel.maxDesignSpeed.val
 
 /-- Speed-view colour-ramp endpoints (m/s), an absolute scale independent of the
     route. Anything at or below `SPEED_RAMP_MIN` is red; at or above `SPEED_RAMP_MAX`
@@ -125,7 +130,7 @@ def RAIL_COLOR : Color := Color.mk 90 95 105 255
 
 Design applied cant comes from curvature and operating speed:
 `h = h_eq = G · V² · κ / g` (balanced). Rails bank by rolling the level frame about `T`.
-`a_max` in `designParams` sizes speed as the full lateral acceleration at zero cant;
+`maxLateralAccel` in `speedModel` sizes speed as the full lateral acceleration at zero cant;
 cant does not affect speed or clothoid length. -/
 
 /-- Gravitational acceleration (m/s²); 1 scene unit = 1 m. -/

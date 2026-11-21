@@ -22,9 +22,12 @@ primitives.
 To ground those closed-form formulas in *real geometry*, §2 defines the clothoid position
 by a genuine Mathlib interval integral (`clothoidOffsetExact`) and uses the Fundamental
 Theorem of Calculus to prove its derivative is exactly the `frameAt` tangent and its signed
-curvature is exactly `θ'(s)`. The numeric Gauss–Legendre `clothoidOffset` is a *separate*
-code path; the single, clearly documented `axiom clothoidOffset_eq_exact` (§6) is the only
-bridge between them, and the §4/§5 continuity theorems do **not** depend on it.
+curvature is exactly `θ'(s)`. Circular arcs are evaluated analytically via `sin`/`cos`, so
+§3 proves their exact derivative (`hasDerivAt_arc_pointAt`) and G⁰ endpoint closure
+(`pointAt_end_arc`, `pointAt_end_arc_eq_rotate_about_center`) directly over `ℝ` without any
+quadrature axiom. The numeric Gauss–Legendre `clothoidOffset` is a *separate* code path; the
+single, clearly documented `axiom clothoidOffset_eq_exact` (§6) is the only bridge between
+them, and the §3/§4/§5 theorems do **not** depend on it.
 -/
 
 namespace TrackGeometry.Continuity
@@ -130,8 +133,8 @@ lemma tangentAt_straight (p q : Vec3 ℝ) (t : ℝ) :
     (Segment.straight p q).tangentAt t
       = Vec3.rotateAxis (Vec3.normalize (Vec3.mk 0 0 1)) 0 (Vec3.normalize (q - p)) := rfl
 
-lemma tangentAt_arc (r : ℝ) (p q v Bref : Vec3 ℝ) (sw : Option ℝ) (t : ℝ) :
-    (Segment.arc r p q v Bref sw).tangentAt t
+lemma tangentAt_arc (r : ℝ) (p v Bref : Vec3 ℝ) (sw : ℝ) (t : ℝ) :
+    (Segment.arc r p v Bref sw).tangentAt t
       = Vec3.rotateAxis (Vec3.normalize Bref) (t / r) (Vec3.normalize v) := rfl
 
 lemma tangentAt_transitionIn (r : ℝ) (cont : GeometricContinuity) (p v Bref : Vec3 ℝ)
@@ -165,18 +168,18 @@ theorem curvature_continuity_straight_in (absR Ls : ℝ) (cont : GeometricContin
     end of the entry spiral the ramped curvature `(1/absR)/Ls · t` has reached `1/absR`. -/
 theorem curvature_continuity_in_arc (absR Ls : ℝ) (hLs : Ls ≠ 0)
     (cont : GeometricContinuity) (p v B : Vec3 ℝ) (ct : TransitionCurveType)
-    (ap aq atan : Vec3 ℝ) (sw : Option ℝ) :
+    (ap atan : Vec3 ℝ) (sw : ℝ) :
     (Segment.transitionIn absR cont p v B Ls ct).curvatureAt Ls
-      = (Segment.arc absR ap aq atan B sw).curvatureAt 0 := by
+      = (Segment.arc absR ap atan B sw).curvatureAt 0 := by
   show (1 / absR) / Ls * Ls = 1 / absR
   field_simp
 
 /-- G²: curvature matches at the `arc` → `transitionOut` junction (both `1/absR`). The exit
     spiral starts at the arc's constant curvature `1/absR` before ramping back to `0`. -/
 theorem curvature_continuity_arc_out (absR Ls φ : ℝ)
-    (ap aq atan B : Vec3 ℝ) (cont : GeometricContinuity) (p v : Vec3 ℝ)
+    (ap atan B : Vec3 ℝ) (cont : GeometricContinuity) (p v : Vec3 ℝ)
     (ct : TransitionCurveType) :
-    (Segment.arc absR ap aq atan B (some φ)).curvatureAt (absR * φ)
+    (Segment.arc absR ap atan B φ).curvatureAt (absR * φ)
       = (Segment.transitionOut absR cont p v B Ls ct).curvatureAt 0 := by
   show 1 / absR = 1 / absR - (1 / absR) / Ls * 0
   ring
@@ -210,9 +213,9 @@ theorem tangent_continuity_in_arc
     (ts uIn B tanSC : Vec3 ℝ) (cont : GeometricContinuity) (ct : TransitionCurveType)
     (hB : Vec3.normSq B = 1) (hu : Vec3.normSq uIn = 1)
     (htanSC : tanSC = Vec3.rotateAxisC (B 0) (B 1) (B 2) θs uIn)
-    (ap aq : Vec3 ℝ) (sw : Option ℝ) :
+    (ap : Vec3 ℝ) (sw : ℝ) :
     (Segment.transitionIn absR cont ts uIn B Ls ct).tangentAt Ls
-      = (Segment.arc absR ap aq tanSC B sw).tangentAt 0 := by
+      = (Segment.arc absR ap tanSC B sw).tangentAt 0 := by
   have hBaxis : B 0 * B 0 + B 1 * B 1 + B 2 * B 2 = 1 := hB
   have htanU : Vec3.normSq tanSC = 1 := by
     rw [htanSC, rotateAxisC_normSq _ _ _ _ _ hBaxis]; exact hu
@@ -230,7 +233,7 @@ theorem tangent_continuity_arc_out
     (sc cs tanSC tanCS B : Vec3 ℝ) (cont : GeometricContinuity) (ct : TransitionCurveType)
     (hB : Vec3.normSq B = 1) (htanSCU : Vec3.normSq tanSC = 1)
     (htanCS : tanCS = Vec3.rotateAxisC (B 0) (B 1) (B 2) φ tanSC) :
-    (Segment.arc absR sc cs tanSC B (some φ)).tangentAt (absR * φ)
+    (Segment.arc absR sc tanSC B φ).tangentAt (absR * φ)
       = (Segment.transitionOut absR cont cs tanCS B Ls ct).tangentAt 0 := by
   have hBaxis : B 0 * B 0 + B 1 * B 1 + B 2 * B 2 = 1 := hB
   have htanCSU : Vec3.normSq tanCS = 1 := by
@@ -370,6 +373,174 @@ noncomputable def clothoidOffsetExact (κ₀ κ' s : ℝ) : ℝ × ℝ :=
   (∫ u in (0:ℝ)..s, Real.cos (headingExact κ₀ κ' u),
    ∫ u in (0:ℝ)..s, Real.sin (headingExact κ₀ κ' u))
 
+/-! ## 3. Analytic circular arc continuity (axiom-free)
+
+Circular arcs are evaluated analytically via `sin`/`cos` in the local `(v̂, n̂)` frame rather
+than via Gauss–Legendre quadrature. Consequently, their exact derivative (`HasDerivAt`
+matching `Segment.tangentAt`) and exact G⁰ start/end closure are proven directly over `ℝ`
+without depending on `clothoidOffset_eq_exact`. -/
+
+private lemma dot_normalize_eq_zero {B v : Vec3 ℝ} (hBv : Vec3.dot B v = 0) :
+    B 0 * (Vec3.normalize v) 0 + B 1 * (Vec3.normalize v) 1 + B 2 * (Vec3.normalize v) 2 = 0 := by
+  by_cases hv : Vec3.normSq v = 0
+  · simp only [Vec3.normalize, hv, ↓reduceIte]
+    exact hBv
+  · simp only [Vec3.normalize, hv, ↓reduceIte]
+    have hmul : ∀ i : Fin 3,
+        (((1 : ℝ) / TrackScalar.sqrt (Vec3.normSq v)) • v) i
+          = (1 / Real.sqrt (Vec3.normSq v)) * v i := fun _ => rfl
+    rw [hmul 0, hmul 1, hmul 2]
+    have hdot : B 0 * v 0 + B 1 * v 1 + B 2 * v 2 = 0 := hBv
+    linear_combination (1 / Real.sqrt (Vec3.normSq v)) * hdot
+
+private lemma arc_pointAt_comp (r : ℝ) (p v B : Vec3 ℝ) (sw : ℝ) (i : Fin 3) (t : ℝ) :
+    (Segment.arc r p v B sw).pointAt t i
+      = p i + (r * Real.sin (t / r)) * (Vec3.normalize v) i
+          + (r * (1 - Real.cos (t / r))) * (Vec3.cross B (Vec3.normalize v)) i := by
+  fin_cases i <;>
+    simp [Segment.pointAt, Vec3.cross, Vec3.mk]
+
+/-- The arc-length derivative of each coordinate of an analytic circular arc's position
+    matches the corresponding coordinate of `Segment.tangentAt`.
+
+    Holds for any nonzero radius `r`, unit binormal `B`, and start tangent `v` orthogonal
+    to `B`. Proven directly from the derivatives of `sin` and `cos` without using
+    `clothoidOffset_eq_exact`. -/
+theorem hasDerivAt_arc_pointAt (r : ℝ) (p v B : Vec3 ℝ) (sw : ℝ) (i : Fin 3) (t : ℝ)
+    (hr : r ≠ 0) (hB : Vec3.normSq B = 1) (hBv : Vec3.dot B v = 0) :
+    HasDerivAt (fun s => (Segment.arc r p v B sw).pointAt s i)
+      ((Segment.arc r p v B sw).tangentAt t i) t := by
+  have hθ : HasDerivAt (fun s : ℝ => s / r) (1 / r) t := by
+    simpa using (hasDerivAt_id t).div_const r
+  have hsin : HasDerivAt (fun s : ℝ => r * Real.sin (s / r)) (Real.cos (t / r)) t := by
+    have h := ((Real.hasDerivAt_sin (t / r)).comp t hθ).const_mul r
+    have heq : r * (Real.cos (t / r) * (1 / r)) = Real.cos (t / r) := by field_simp
+    rwa [heq] at h
+  have hcos : HasDerivAt (fun s : ℝ => r * (1 - Real.cos (s / r))) (Real.sin (t / r)) t := by
+    have h := (((Real.hasDerivAt_cos (t / r)).comp t hθ).const_sub 1).const_mul r
+    have heq : r * -(-Real.sin (t / r) * (1 / r)) = Real.sin (t / r) := by field_simp
+    rwa [heq] at h
+  have hpos :
+      HasDerivAt
+        (fun s =>
+          p i + (r * Real.sin (s / r)) * (Vec3.normalize v) i
+              + (r * (1 - Real.cos (s / r))) * (Vec3.cross B (Vec3.normalize v)) i)
+        (Real.cos (t / r) * (Vec3.normalize v) i
+          + Real.sin (t / r) * (Vec3.cross B (Vec3.normalize v)) i) t :=
+    ((hsin.mul_const ((Vec3.normalize v) i)).const_add (p i)).add
+      (hcos.mul_const ((Vec3.cross B (Vec3.normalize v)) i))
+  have hfun :
+      (fun s => (Segment.arc r p v B sw).pointAt s i)
+        = (fun s =>
+            p i + (r * Real.sin (s / r)) * (Vec3.normalize v) i
+                + (r * (1 - Real.cos (s / r))) * (Vec3.cross B (Vec3.normalize v)) i) := by
+    funext s
+    exact arc_pointAt_comp r p v B sw i s
+  rw [hfun, tangentAt_arc, normalize_eq_self hB,
+    ← exactTangent_eq_rotate B (Vec3.normalize v) (t / r) i (dot_normalize_eq_zero hBv)]
+  exact hpos
+
+/-- Sampling an analytic circular arc at arc-length `r * sw` lands at its exact
+    local-frame endpoint `p + (r · sin sw) · v̂ + (r · (1 - cos sw)) · (B × v̂)`. -/
+theorem pointAt_end_arc (r : ℝ) (p v B : Vec3 ℝ) (sw : ℝ) (hr : r ≠ 0) :
+    (Segment.arc r p v B sw).pointAt (r * sw)
+      = p + (r * Real.sin sw) • Vec3.normalize v
+          + (r * (1 - Real.cos sw)) • Vec3.cross B (Vec3.normalize v) := by
+  have hdiv : r * sw / r = sw := by field_simp
+  funext i
+  rw [arc_pointAt_comp r p v B sw i (r * sw), hdiv]
+  rfl
+
+/-- Sampling an analytic circular arc at arc-length `r * sw` equals rotating the start
+    point around the circle center by angle `sw` about the unit binormal `B`. -/
+theorem pointAt_end_arc_eq_rotate_about_center (r : ℝ) (p v B : Vec3 ℝ) (sw : ℝ)
+    (hr : r ≠ 0) (hB : Vec3.normSq B = 1) (hBv : Vec3.dot B v = 0)
+    (hv : Vec3.normSq v ≠ 0) :
+    (Segment.arc r p v B sw).pointAt (r * sw)
+      = circleCenter p v r B + Vec3.rotateAxis B sw (p - circleCenter p v r B) := by
+  rw [pointAt_end_arc r p v B sw hr]
+  have hBaxis : B 0 * B 0 + B 1 * B 1 + B 2 * B 2 = 1 := hB
+  have hdot : B 0 * (Vec3.normalize v) 0 + B 1 * (Vec3.normalize v) 1 + B 2 * (Vec3.normalize v) 2 = 0 :=
+    dot_normalize_eq_zero hBv
+  have hcenter : circleCenter p v r B = p + r • Vec3.cross B (Vec3.normalize v) := by
+    funext i
+    simp only [circleCenter, Vec3.norm, Vec3.normalize, hv, ↓reduceIte, Vec3.cross]
+    fin_cases i
+    · show p 0 + r / Real.sqrt (Vec3.normSq v) * (B 1 * v 2 - B 2 * v 1)
+          = p 0 + r * (B 1 * ((1 / Real.sqrt (Vec3.normSq v)) * v 2)
+              - B 2 * ((1 / Real.sqrt (Vec3.normSq v)) * v 1))
+      ring
+    · show p 1 + r / Real.sqrt (Vec3.normSq v) * (B 2 * v 0 - B 0 * v 2)
+          = p 1 + r * (B 2 * ((1 / Real.sqrt (Vec3.normSq v)) * v 0)
+              - B 0 * ((1 / Real.sqrt (Vec3.normSq v)) * v 2))
+      ring
+    · show p 2 + r / Real.sqrt (Vec3.normSq v) * (B 0 * v 1 - B 1 * v 0)
+          = p 2 + r * (B 0 * ((1 / Real.sqrt (Vec3.normSq v)) * v 1)
+              - B 1 * ((1 / Real.sqrt (Vec3.normSq v)) * v 0))
+      ring
+  rw [hcenter]
+  set vh := Vec3.normalize v
+  funext i
+  fin_cases i
+  · show p 0 + (r * Real.sin sw) * vh 0 + (r * (1 - Real.cos sw)) * (Vec3.cross B vh) 0
+        = (p 0 + r * (Vec3.cross B vh) 0)
+          + (Vec3.rotateAxis B sw (p - (p + r • Vec3.cross B vh))) 0
+    simp only [Vec3.rotateAxis, Vec3.rotateAxisC, Vec3.cross, Vec3.mk,
+      trackScalar_cos_real, trackScalar_sin_real, Fin.isValue, Fin.reduceEq, reduceIte]
+    show p 0 + r * Real.sin sw * vh 0 + r * (1 - Real.cos sw) * (B 1 * vh 2 - B 2 * vh 1)
+        = (p 0 + r * (B 1 * vh 2 - B 2 * vh 1))
+          + (Real.cos sw * (p 0 - (p 0 + r * (B 1 * vh 2 - B 2 * vh 1)))
+            + Real.sin sw *
+              (B 1 * (p 2 - (p 2 + r * (B 0 * vh 1 - B 1 * vh 0)))
+                - B 2 * (p 1 - (p 1 + r * (B 2 * vh 0 - B 0 * vh 2))))
+            + (B 0 * (p 0 - (p 0 + r * (B 1 * vh 2 - B 2 * vh 1)))
+                + B 1 * (p 1 - (p 1 + r * (B 2 * vh 0 - B 0 * vh 2)))
+                + B 2 * (p 2 - (p 2 + r * (B 0 * vh 1 - B 1 * vh 0))))
+              * (1 - Real.cos sw) * B 0)
+    linear_combination (-(r * Real.sin sw * vh 0)) * hBaxis + (r * Real.sin sw * B 0) * hdot
+  · show p 1 + (r * Real.sin sw) * vh 1 + (r * (1 - Real.cos sw)) * (Vec3.cross B vh) 1
+        = (p 1 + r * (Vec3.cross B vh) 1)
+          + (Vec3.rotateAxis B sw (p - (p + r • Vec3.cross B vh))) 1
+    simp only [Vec3.rotateAxis, Vec3.rotateAxisC, Vec3.cross, Vec3.mk,
+      trackScalar_cos_real, trackScalar_sin_real, Fin.isValue, Fin.reduceEq, reduceIte]
+    show p 1 + r * Real.sin sw * vh 1 + r * (1 - Real.cos sw) * (B 2 * vh 0 - B 0 * vh 2)
+        = (p 1 + r * (B 2 * vh 0 - B 0 * vh 2))
+          + (Real.cos sw * (p 1 - (p 1 + r * (B 2 * vh 0 - B 0 * vh 2)))
+            + Real.sin sw *
+              (B 2 * (p 0 - (p 0 + r * (B 1 * vh 2 - B 2 * vh 1)))
+                - B 0 * (p 2 - (p 2 + r * (B 0 * vh 1 - B 1 * vh 0))))
+            + (B 0 * (p 0 - (p 0 + r * (B 1 * vh 2 - B 2 * vh 1)))
+                + B 1 * (p 1 - (p 1 + r * (B 2 * vh 0 - B 0 * vh 2)))
+                + B 2 * (p 2 - (p 2 + r * (B 0 * vh 1 - B 1 * vh 0))))
+              * (1 - Real.cos sw) * B 1)
+    linear_combination (-(r * Real.sin sw * vh 1)) * hBaxis + (r * Real.sin sw * B 1) * hdot
+  · show p 2 + (r * Real.sin sw) * vh 2 + (r * (1 - Real.cos sw)) * (Vec3.cross B vh) 2
+        = (p 2 + r * (Vec3.cross B vh) 2)
+          + (Vec3.rotateAxis B sw (p - (p + r • Vec3.cross B vh))) 2
+    simp only [Vec3.rotateAxis, Vec3.rotateAxisC, Vec3.cross, Vec3.mk,
+      trackScalar_cos_real, trackScalar_sin_real, Fin.isValue, Fin.reduceEq, reduceIte]
+    show p 2 + r * Real.sin sw * vh 2 + r * (1 - Real.cos sw) * (B 0 * vh 1 - B 1 * vh 0)
+        = (p 2 + r * (B 0 * vh 1 - B 1 * vh 0))
+          + (Real.cos sw * (p 2 - (p 2 + r * (B 0 * vh 1 - B 1 * vh 0)))
+            + Real.sin sw *
+              (B 0 * (p 1 - (p 1 + r * (B 2 * vh 0 - B 0 * vh 2)))
+                - B 1 * (p 0 - (p 0 + r * (B 1 * vh 2 - B 2 * vh 1))))
+            + (B 0 * (p 0 - (p 0 + r * (B 1 * vh 2 - B 2 * vh 1)))
+                + B 1 * (p 1 - (p 1 + r * (B 2 * vh 0 - B 0 * vh 2)))
+                + B 2 * (p 2 - (p 2 + r * (B 0 * vh 1 - B 1 * vh 0))))
+              * (1 - Real.cos sw) * B 2)
+    linear_combination (-(r * Real.sin sw * vh 2)) * hBaxis + (r * Real.sin sw * B 2) * hdot
+
+/-- When `r * sw ≥ 0`, the arc's length is `r * sw`, so sampling at `seg.length` agrees
+    with sampling at `r * sw`. -/
+theorem pointAt_length_arc (r : ℝ) (p v B : Vec3 ℝ) (sw : ℝ) (h : 0 ≤ r * sw) :
+    (Segment.arc r p v B sw).pointAt (Segment.arc r p v B sw).length
+      = (Segment.arc r p v B sw).pointAt (r * sw) := by
+  have hlen : (Segment.arc r p v B sw).length = r * sw := by
+    show absScalar (r * sw) = r * sw
+    simp [absScalar, not_lt.mpr h]
+  rw [hlen]
+
 /-! ## 5. Corner-level aggregate (within-corner G¹ + G² capstone)
 
 Packages the §4 junction lemmas for a full spiral corner exactly as
@@ -384,7 +555,7 @@ theorem spiralCorner_within_G1_G2
     (htanSC : tanSC = Vec3.rotateAxisC (B 0) (B 1) (B 2) θs uIn)
     (htanCS : tanCS = Vec3.rotateAxisC (B 0) (B 1) (B 2) φ tanSC) :
     let entry := Segment.transitionIn absR (.gn 2) ts uIn B Ls .clothoid
-    let arcP  := Segment.arc absR sc cs tanSC B (some φ)
+    let arcP  := Segment.arc absR sc tanSC B φ
     let exitP := Segment.transitionOut absR (.gn 2) cs tanCS B Ls .clothoid
     -- G¹ (tangent) continuity at the two internal junctions:
     (entry.tangentAt Ls = arcP.tangentAt 0
@@ -396,11 +567,11 @@ theorem spiralCorner_within_G1_G2
     rw [htanSC, rotateAxisC_normSq _ _ _ _ _ hB]; exact hu
   refine ⟨⟨?_, ?_⟩, ?_, ?_⟩
   · exact tangent_continuity_in_arc absR Ls θs hR hLs hLsθ ts uIn B tanSC
-      (.gn 2) .clothoid hB hu htanSC sc cs (some φ)
+      (.gn 2) .clothoid hB hu htanSC sc φ
   · exact tangent_continuity_arc_out absR φ Ls hR sc cs tanSC tanCS B
       (.gn 2) .clothoid hB htanSCU htanCS
-  · exact curvature_continuity_in_arc absR Ls hLs (.gn 2) ts uIn B .clothoid sc cs tanSC (some φ)
-  · exact curvature_continuity_arc_out absR Ls φ sc cs tanSC B (.gn 2) cs tanCS .clothoid
+  · exact curvature_continuity_in_arc absR Ls hLs (.gn 2) ts uIn B .clothoid sc tanSC φ
+  · exact curvature_continuity_arc_out absR Ls φ sc tanSC B (.gn 2) cs tanCS .clothoid
 
 /-! ## 6. The single bridge assumption
 
@@ -451,14 +622,27 @@ theorem pointAt_zero_transitionIn (r : ℝ) (cont : GeometricContinuity) (p v B 
   clothoidPoint_zero p v 0 (1 / r) len B
 
 /-- G⁰: a circular arc starts at its `startPt`. -/
-theorem pointAt_zero_arc (r : ℝ) (p q v B : Vec3 ℝ) (sw : Option ℝ) :
-    (Segment.arc r p q v B sw).pointAt 0 = p :=
-  clothoidPoint_zero p v (1 / r) (1 / r) 1 B
+theorem pointAt_zero_arc (r : ℝ) (p v B : Vec3 ℝ) (sw : ℝ) :
+    (Segment.arc r p v B sw).pointAt 0 = p := by
+  simp [Segment.pointAt, Real.sin_zero, Real.cos_zero]
 
 /-- G⁰: an exit spiral starts at its `startPt`. -/
 theorem pointAt_zero_transitionOut (r : ℝ) (cont : GeometricContinuity) (p v B : Vec3 ℝ)
     (len : ℝ) :
     (Segment.transitionOut r cont p v B len .clothoid).pointAt 0 = p :=
   clothoidPoint_zero p v (1 / r) 0 len B
+
+/-- Positional (G⁰) continuity at the `arc` → `transitionOut` junction when the exit
+    transition starts at the analytic arc endpoint `pointAt (r * sw)`. -/
+theorem pointAt_continuity_arc_out (r Ls sw : ℝ) (hr : r ≠ 0) (h : 0 ≤ r * sw)
+    (sc tanSC tanCS B : Vec3 ℝ) (cont : GeometricContinuity) :
+    let arcSeg := Segment.arc r sc tanSC B sw
+    let cs := sc + (r * Real.sin sw) • Vec3.normalize tanSC
+                 + (r * (1 - Real.cos sw)) • Vec3.cross B (Vec3.normalize tanSC)
+    arcSeg.pointAt arcSeg.length
+      = (Segment.transitionOut r cont cs tanCS B Ls .clothoid).pointAt 0 := by
+  dsimp only
+  rw [pointAt_length_arc r sc tanSC B sw h, pointAt_end_arc r sc tanSC B sw hr,
+    pointAt_zero_transitionOut]
 
 end TrackGeometry.Continuity

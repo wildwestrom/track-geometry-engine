@@ -101,9 +101,10 @@ def handleActiveMode (fr : InputCtx) (lines : Array Line) (e : Edit) : IO Edit :
             let line := lines[lineIdx]
             if 1 ≤ piIdx ∧ piIdx + 1 < line.size then
               let b := line[piIdx]!.pos
-              match ((lineLayouts line)[piIdx]?).bind id with
-              | none => return e
-              | some geom =>
+              let layouts := lineLayouts line
+              let dragBounds := lineDragBounds line layouts
+              match (layouts[piIdx]?).bind id, (dragBounds[piIdx]?).bind id with
+              | some geom, some bounds =>
                 -- new budget = distance from the PI to the cursor projected onto the grabbed
                 -- leg, clamped to [min-radius floor, room the neighbouring curves leave] so it
                 -- can't cross the PI, overlap a neighbour, nor make the arc tighter than
@@ -112,13 +113,14 @@ def handleActiveMode (fr : InputCtx) (lines : Array Line) (e : Edit) : IO Edit :
                 -- winding loop's handles sit on the *extension* rays, flipping the raw sign.
                 let uIn := ofGeo geom.uIn
                 let uOut := ofGeo geom.uOut
-                let hi := geom.maxBudget.val
-                let lo := max 0.001 geom.minBudget.val
+                let hi := bounds.maxBudget.val
+                let lo := max 0.001 bounds.minBudget.val
                 let dRaw := if isEntry then dot3 (sub3 mw b) uIn else dot3 (sub3 mw b) uOut
                 let d := if dRaw < 0.0 then -dRaw else dRaw
                 let d' := max lo (min hi d)
                 return { e with hist := History.setCurrent e.hist (setPIBudget! lines lineIdx piIdx d'),
                                 dragIdx := some lineIdx }
+              | _, _ => return e
             else return e
           else return e
   | .axisPressed lineIdx ptIdx axis press =>

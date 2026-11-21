@@ -54,8 +54,19 @@ structure CurveEnd where
 /-- The resolved corners of `line`, indexed like its PIs — exactly the ones `buildPath`
     rounds (see `cornerLayouts`). -/
 def lineLayouts (line : Line) : Array (Option (CornerLayout RFloat)) :=
-  cornerLayouts (line.map fun q => toGeo q.pos) designParams
+  cornerLayouts (line.map fun q => toGeo q.pos) layoutPolicy speedModel straightThreshold
     (line.map fun q => q.budget.map rf) (line.map (·.winding))
+
+/-- Compute the interactive bracket-drag budget limits for every PI of `line` from its
+    resolved layouts. -/
+def lineDragBounds (line : Line) (layouts : Array (Option (CornerLayout RFloat))) :
+    Array (Option (DragBounds RFloat)) :=
+  let pts := line.map fun q => toGeo q.pos
+  let legLengths := polylineLegLengths pts
+  let specs := layouts.map (·.map fun l => l.toCornerGeometry.budgetSpec)
+  let budgets := layouts.map (·.map (·.budget))
+  let overrides := line.map fun q => q.budget.map rf
+  cornerDragBounds legLengths specs budgets overrides
 
 /-- Curve-end data for interior PI `i` (index `li`), from the line's resolved corners
     `layouts`, or `none` when that corner is degenerate or near-straight — the same

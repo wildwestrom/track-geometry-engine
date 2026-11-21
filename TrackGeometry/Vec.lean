@@ -1,50 +1,14 @@
-/-! # Scalar typeclass and 3D vectors
+import TrackGeometry.Scalar
 
-`TrackScalar`, `Vec3`, and small scalar helpers shared by the geometry core.
+/-! # 3D vectors
+
+Re-exports `TrackGeometry.Scalar` and defines `Vec3`, the 3D vector type shared by
+the 3D geometry core.
 -/
 
-/-! ## Scalar typeclass for track geometry
+/-- Three-dimensional vector with components of scalar type `α`.
 
-`TrackScalar α` captures everything we need from a scalar type to do track geometry:
-basic arithmetic, order, trig functions, and square roots. Clothoid offsets are
-obtained by Gauss–Legendre quadrature over these primitives, so no special
-integral functions are needed in the interface.
-
-We deliberately extend only the individual operation typeclasses that both `ℝ` and
-`Float` satisfy, avoiding `Field` and `LinearOrder` (which `Float` doesn't satisfy).
-
-`Zero`/`One` give us `0`/`1` literals. We avoid `2` in generic code (use `1+1` instead)
-because `OfNat α 2` can't be a superclass (value parameter).
-
-`DecidableEq`/`DecidableRel` are NOT superclasses (they're `abbrev`s, not `class`es),
-but we provide them as fields and derive global instances below.
--/
-
-class TrackScalar (α : Type) extends
-  Add α, Sub α, Mul α, Div α, Neg α,
-  Zero α, One α,
-  LT α, LE α, Max α, Min α where
-  cos : α → α
-  sin : α → α
-  arccos : α → α
-  sqrt : α → α
-  pi : α
-  decEq : (a b : α) → Decidable (a = b)
-  decLe : (a b : α) → Decidable (a ≤ b)
-  decLt : (a b : α) → Decidable (a < b)
-
-/-- Every `TrackScalar` carries decidability of equality and order. -/
-instance [h : TrackScalar α] : DecidableEq α := h.decEq
-instance [h : TrackScalar α] : DecidableRel (· ≤ · : α → α → Prop) := h.decLe
-instance [h : TrackScalar α] : DecidableRel (· < · : α → α → Prop) := h.decLt
-
-/-! ## 3D vector type
-
-`Vec3 α` is `Fin 3 → α` — three components of scalar type `α`.
-Use `Vec3.mk x y z` to construct vectors.
-All arithmetic (`+`, `-`, `•`, etc.) comes from the `Pi` instances automatically.
--/
-
+Use `Vec3.mk x y z` to construct vectors. -/
 def Vec3 (α : Type) := Fin 3 → α
 
 namespace Vec3
@@ -132,20 +96,4 @@ def rotateBy [TrackScalar α] (ω : Vec3 α) (v : Vec3 α) : Vec3 α :=
     rotateAxis ((1 / φ) • ω) φ v
 
 end Vec3
-
-/-- `natToScalar` injects a `Nat` into `α` by repeated addition from `Zero`/`One`.
-    O(n), but only ever called on small constants (quadrature orders, panel counts).
-    Lets generic `[TrackScalar α]` code use integer literals beyond `0`/`1` without an
-    `OfNat` superclass. -/
-def natToScalar [TrackScalar α] : Nat → α
-  | 0 => 0
-  | n + 1 => natToScalar n + 1
-
-/-- Inject an `Int` into `α`. Used for per-corner turn windings. -/
-def intToScalar [TrackScalar α] : Int → α
-  | .ofNat n => natToScalar n
-  | .negSucc n => -natToScalar (n + 1)
-
-/-- Absolute value using only the order operations in `TrackScalar`. -/
-def absScalar [TrackScalar α] (x : α) : α := if x < 0 then -x else x
 
