@@ -410,10 +410,10 @@ local function towardGround(a : End, b : End, dist : number) : {geometry.Vec}, s
 	if t > MAX_REACH then t, how = math.min(M.LEAD, dist / 3), "turn on the ray" end
 	local tS = isSwitch(a) and switchLead(a, b.x, b.y) or nil
 	if tS ~= nil and tS < t then t, how = tS, "switch" end
-	return { geometry.vec(a.x, a.y, 0), geometry.vec(a.x + t * a.dx, a.y + t * a.dy, 0), geometry.vec(b.x, b.y, 0) }, how
+	return { geometry.vec(a.x, a.y), geometry.vec(a.x + t * a.dx, a.y + t * a.dy), geometry.vec(b.x, b.y) }, how
 end
 
--- The PIs from a to b, at z = 0, and how they were laid. With a ground end:
+-- The 2D PIs from a to b, and how they were laid. With a ground end:
 --   "straight"    : both on the ground (no turns);
 --   "arc", "turn on the ray", "switch": one ground end (towardGround).
 -- Between two ends with headings, in order:
@@ -433,14 +433,14 @@ function M.initialPis(a : End, b : End) : {geometry.Vec}, string
 	local dist = math.sqrt(ex * ex + ey * ey)
 	if dist < 2 * M.MIN_LEG then return nil, "the ends are too close" end
 	local ha, hb = M.hasHeading(a), M.hasHeading(b)
-	if not ha and not hb then return { geometry.vec(a.x, a.y, 0), geometry.vec(b.x, b.y, 0) }, "straight" end
+	if not ha and not hb then return { geometry.vec(a.x, a.y), geometry.vec(b.x, b.y) }, "straight" end
 	if not hb then return towardGround(a, b, dist) end
 	if not ha then
 		local back, how = towardGround(b, a, dist)
 		return { back[3], back[2], back[1] }, how
 	end
-	local pa, pb = geometry.vec(a.x, a.y, 0), geometry.vec(b.x, b.y, 0)
-	local function out(e : End, l : number) : geometry.Vec return geometry.vec(e.x + l * e.dx, e.y + l * e.dy, 0) end
+	local pa, pb = geometry.vec(a.x, a.y), geometry.vec(b.x, b.y)
+	local function out(e : End, l : number) : geometry.Vec return geometry.vec(e.x + l * e.dx, e.y + l * e.dy) end
 	-- a + s (a.dx, a.dy) = b + t (b.dx, b.dy)
 	local cross = a.dx * b.dy - a.dy * b.dx
 	local along = ex * a.dx + ey * a.dy
@@ -453,7 +453,7 @@ function M.initialPis(a : End, b : End) : {geometry.Vec}, string
 	local capB = isSwitch(b) and (switchLead(b, a.x, a.y) or math.huge) or math.huge
 	if dist > FAR then
 		local la, lb = out(a, math.min(M.LEAD, capA)), out(b, math.min(M.LEAD, capB))
-		return { pa, la, geometry.vec((la.x + lb.x) / 2, (la.y + lb.y) / 2, 0), lb, pb }, "long s-curve"
+		return { pa, la, geometry.vec((la.x + lb.x) / 2, (la.y + lb.y) / 2), lb, pb }, "long s-curve"
 	end
 	if cross ~= 0 then
 		local s = (ex * b.dy - ey * b.dx) / cross

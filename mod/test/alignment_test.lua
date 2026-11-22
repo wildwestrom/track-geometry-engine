@@ -26,7 +26,7 @@ end
 
 -- A test path: 350 m legs, 40° left turn at the middle PI.
 local TURN = math.rad(40)
-local pis = { G.vec(0, 0, 0), G.vec(350, 0, 0), G.vec(350 + 350 * math.cos(TURN), 350 * math.sin(TURN), 0) }
+local pis = { G.vec(0, 0), G.vec(350, 0), G.vec(350 + 350 * math.cos(TURN), 350 * math.sin(TURN)) }
 local path = G.buildPath(pis, G.DEFAULT_PARAMS, nil)
 local step = 10
 local nodes = A.sample(path, step)
@@ -116,7 +116,7 @@ do
 	local dp = {}
 	for k, v in pairs(G.DEFAULT_PARAMS) do dp[k] = v end
 	dp.legBudget = 0.5
-	local p = G.buildPath({ G.vec(0, 0, 0), G.vec(300, 0, 0), G.vec(300, 300, 0), G.vec(600, 300, 0) }, dp, nil)
+	local p = G.buildPath({ G.vec(0, 0), G.vec(300, 0), G.vec(300, 300), G.vec(600, 300) }, dp, nil)
 	local zero = false
 	for _, seg in ipairs(p) do if G.length(seg) < 1e-6 then zero = true end end
 	local ns = A.sample(p, step)
@@ -154,7 +154,7 @@ end
 --    at most 15° a piece, with a node at each break. The straights are one piece from break to
 --    break, and the Hermite pieces still follow the curve within a millimetre.
 do
-	local p = G.buildPath({ G.vec(0, 0, 0), G.vec(400, 0, 0), G.vec(400, 400, 0) }, G.DEFAULT_PARAMS, nil)
+	local p = G.buildPath({ G.vec(0, 0), G.vec(400, 0), G.vec(400, 400) }, G.DEFAULT_PARAMS, nil)
 	local maxTurn, breaks = math.rad(15), { 123.4, 7.5 }
 	local ns = A.sample(p, math.huge, maxTurn, breaks)
 	local sharpest = 0
@@ -200,7 +200,7 @@ end
 -- 7. A break just past a segment boundary keeps its node (the boundary's node moves onto it);
 --    of two breaks closer than MIN_PIECE, the first keeps its node. No piece is shorter for it.
 do
-	local p = G.buildPath({ G.vec(0, 0, 0), G.vec(400, 0, 0), G.vec(400, 400, 0) }, G.DEFAULT_PARAMS, nil)
+	local p = G.buildPath({ G.vec(0, 0), G.vec(400, 0), G.vec(400, 400) }, G.DEFAULT_PARAMS, nil)
 	local first = G.length(p[1]) + G.length(p[2]) -- where the entry spiral meets the arc
 	local function has(ns, s)
 		for _, nd in ipairs(ns) do if near(nd.s, s, 1e-9) then return true end end

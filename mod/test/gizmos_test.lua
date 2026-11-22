@@ -315,8 +315,9 @@ end
 local function osculates(e, side, what)
 	local cs, as = Gz.circles(e), arcsOf(e)
 	local a = as[1]
+	local q = G.pointAt(a, G.length(a))
 	check(#cs == 1 and #as == 1 and osculatesAt(cs[1], a, a.p, a.v, side)
-		and math.abs(math.sqrt((a.q.x - cs[1].x) ^ 2 + (a.q.y - cs[1].y) ^ 2) - a.radius) < 1e-6,
+		and math.abs(math.sqrt((q.x - cs[1].x) ^ 2 + (q.y - cs[1].y) ^ 2) - a.radius) < 1e-6,
 		what .. ": one circle, centred inside the curve, of the arc's radius")
 end
 osculates(E.new(endAt(0, 0, 0), endAt(500, 400, -90)), 1, "a left turn")

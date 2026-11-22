@@ -335,7 +335,7 @@ function M.movePi(e : Edit, i : integer, x : number, y : number) : boolean
 	if not roomAt(e, i, x, y) then return false end
 	local p = e.turns[i].pos
 	if p.x == x and p.y == y then return true end
-	e.turns[i].pos = geometry.vec(x, y, 0)
+	e.turns[i].pos = geometry.vec(x, y)
 	bumpH(e)
 	return true
 end
@@ -357,7 +357,7 @@ function M.insertOnLeg(e : Edit, leg : integer, x : number, y : number) : intege
 	local lo, hi = MIN_GAP, len - MIN_GAP
 	if straightBetweenTrackEnds then lo, hi = 2 * MIN_GAP, len - 2 * MIN_GAP end
 	local t = math.max(lo, math.min(hi, (x - p.x) * ux + (y - p.y) * uy))
-	local function at(s : number) : Turn return { pos = geometry.vec(p.x + s * ux, p.y + s * uy, 0) } end
+	local function at(s : number) : Turn return { pos = geometry.vec(p.x + s * ux, p.y + s * uy) } end
 	if straightBetweenTrackEnds then
 		-- the straight layout: a turn next to each end (on the line, sliding along it; ends.LEAD out
 		-- when the room allows) and a free one
@@ -405,16 +405,17 @@ function M.dragBracket(e : Edit, i : integer, isEntry : boolean, x : number, y :
 end
 
 -- The arc radius of the curve at turn i if its tangent size were `budget` (m).
-local function radiusForBudget(e : Edit, i : integer, l : geometry.CornerLayout, budget : number) : number
-	return geometry.solveCorner(e.turns[i].pos, budget, e.dp, l.geometry).radius
+local function radiusForBudget(e : Edit, l : geometry.CornerLayout, budget : number) : number
+	local g = l.geometry
+	return geometry.solveCornerParams(budget, g.tanHalf, g.delta, e.dp).radius
 end
 
 -- The curve at turn i as laid; nil with no curve there.
 function M.curve(e : Edit, i : integer) : CurveRead
 	local l = M.corners(e)[i]
 	if l == nil then return nil end
-	return { radius = radiusForBudget(e, i, l, l.budget), minRadius = radiusForBudget(e, i, l, l.geometry.minBudget),
-		maxRadius = radiusForBudget(e, i, l, l.geometry.maxBudget) }
+	return { radius = radiusForBudget(e, l, l.budget), minRadius = radiusForBudget(e, l, l.geometry.minBudget),
+		maxRadius = radiusForBudget(e, l, l.geometry.maxBudget) }
 end
 
 -- Where turn t is now; nil when it is gone (removed, or the turns were laid afresh).
@@ -425,24 +426,14 @@ function M.turnIndex(e : Edit, t : Turn) : integer
 	return nil
 end
 
--- Set the curve at turn i to radius r (m), by the curve size that gives it (found by bisection: the
--- radius grows with the size). A radius out of reach (below the minimum radius, or above what the
--- legs leave room for) gives the nearest size that can be. false when there is no curve there or r is
+-- Set the curve at turn i to radius r (m), by the curve size that gives it (pullback(r), clamped
+-- to the minimum radius and the room the legs leave). false when there is no curve there or r is
 -- no radius.
 function M.setRadius(e : Edit, i : integer, r : number) : boolean
 	local l = M.corners(e)[i]
 	if l == nil or r == nil or r ~= r or r <= 0 then return false end
-	local lo, hi = l.geometry.minBudget, l.geometry.maxBudget
-	local d : number
-	if r <= radiusForBudget(e, i, l, lo) then d = lo
-	elseif r >= radiusForBudget(e, i, l, hi) then d = hi
-	else
-		for _ = 1, 50 do
-			local mid = (lo + hi) / 2
-			if radiusForBudget(e, i, l, mid) < r then lo = mid else hi = mid end
-		end
-		d = (lo + hi) / 2
-	end
+	local g = l.geometry
+	local d = math.max(g.minBudget, math.min(g.maxBudget, geometry.pullback(e.dp, g.tanHalf, g.delta, r)))
 	if e.turns[i].budget == d then return true end
 	e.turns[i].budget = d
 	bumpH(e)
@@ -496,7 +487,7 @@ function M.moveEnd(e : Edit, i : integer, to : ends.End) : boolean
 	local q = turns[j].pos
 	if not onTrack then
 		if d2(to.x, to.y, q.x, q.y) < MIN_GAP * MIN_GAP then return false end
-		turns[k].pos = geometry.vec(to.x, to.y, 0)
+		turns[k].pos = geometry.vec(to.x, to.y)
 	elseif n == 2 or (n == 3 and ends.hasHeading(other)) then
 		local pis = ends.initialPis(first and to or other, first and other or to)
 		if pis == nil then return false end
@@ -507,7 +498,7 @@ function M.moveEnd(e : Edit, i : integer, to : ends.End) : boolean
 		local x, y = to.x + t * to.dx, to.y + t * to.dy
 		local r = turns[first and 3 or n - 2].pos
 		if d2(x, y, r.x, r.y) < MIN_GAP * MIN_GAP then return false end
-		turns[k].pos, turns[j].pos = geometry.vec(to.x, to.y, 0), geometry.vec(x, y, 0)
+		turns[k].pos, turns[j].pos = geometry.vec(to.x, to.y), geometry.vec(x, y)
 	end
 	if not onTrack then e.held = nil
 	elseif held == nil then e.held = { first = first, turns = before } end

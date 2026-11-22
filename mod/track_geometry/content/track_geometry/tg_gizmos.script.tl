@@ -150,7 +150,7 @@ local function circlesOf(path : {geometry.Segment}, p : profiles.Profile) : {Cir
 			m, v, s = seg.p, seg.v, s0
 		end
 		if m ~= nil then
-			local o = geometry.circleCenter(m, v, seg.radius, seg.B)
+			local o = geometry.circleCenter(m, v, seg.radius, seg.dir)
 			cs[#cs + 1] = { x = o.x, y = o.y, r = seg.radius, mx = m.x, my = m.y, z = p and profiles.heightAt(p, s) }
 		end
 		s0 = s0 + len

@@ -82,9 +82,9 @@ def kindAndRadius (e : Segment2D RFloat) : String × RFloat :=
   | .transitionIn r .. => ("in", r)
   | .transitionOut r .. => ("out", r)
 
-/-- Format a 2D vector as Lua `x`, `y`, and zero `z` fields in hex. -/
+/-- Format a 2D vector as Lua `x` and `y` fields in hex. -/
 def vec (pre : String) (v : Vec2 RFloat) : String :=
-  s!"{pre}x = {hex v.x}, {pre}y = {hex v.y}, {pre}z = {hex 0}"
+  s!"{pre}x = {hex v.x}, {pre}y = {hex v.y}"
 
 /-- Format a 2D segment sampled at five evenly spaced local arc-lengths. -/
 def dumpSegment (e : Segment2D RFloat) : String :=

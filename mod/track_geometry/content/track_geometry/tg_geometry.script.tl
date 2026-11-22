@@ -1,13 +1,17 @@
--- Port of the Lean geometry core (TrackGeometry/{Vec,Segment,Path}.lean), which is the spec.
--- Each function keeps the Lean operations in the same order, so results match the Lean RFloat
--- build to the last bits; test/geometry_test.lua checks that against fixtures written by
--- `lake exe fixtures` (Fixtures.lean). Not ported: RMF frames, cant, loop windings.
+-- Port of the 2D Lean geometry core (TrackGeometry/{Clothoid,Design,Planar}.lean), which is the
+-- spec. Each function keeps the Lean operations in the same order, so results match the Lean
+-- RFloat build to the last bits; test/geometry_test.lua checks that against fixtures written by
+-- `lake exe fixtures` (Fixtures.lean).
 -- No game API here.
 
 local record Vec
 	x : number
 	y : number
-	z : number
+end
+
+local enum TurnDir
+	"left"
+	"right"
 end
 
 local enum Kind
@@ -17,15 +21,15 @@ local enum Kind
 	"out" -- transitionOut: clothoid from the arc's curvature to straight
 end
 
--- Lean `Segment`. Which fields are set depends on `kind`, as in the Lean constructors:
--- straight: p, q; arc: radius, p, q, v, B, sweep; in/out: radius, p, v, B, len.
+-- Lean `Segment2D`. Which fields are set depends on `kind`, as in the Lean constructors:
+-- straight: p, q; arc: radius, p, v, dir, sweep; in/out: radius, p, v, dir, len.
 local record Segment
 	kind : Kind
 	radius : number -- unsigned
 	p : Vec -- start point
-	q : Vec -- end point
-	v : Vec -- start tangent
-	B : Vec -- binormal of the segment's plane; its orientation carries the turn sense
+	q : Vec -- end point (straights only)
+	v : Vec -- start tangent (curved segments only)
+	dir : TurnDir -- turn handedness (curved segments only)
 	sweep : number -- arc central angle
 	len : number -- transition length
 	opSpeed : number -- design operating speed (m/s)
@@ -42,16 +46,24 @@ local record DesignParams
 	maxDesignSpeed : number
 end
 
+local record CornerParams
+	radius : number
+	spiralAngle : number
+	spiralLength : number
+	arcAngle : number
+	opSpeed : number
+end
+
 local record CornerGeometry
 	uIn : Vec
 	uOut : Vec
-	binormal : Vec
+	turnDir : TurnDir
 	sinSigned : number
 	cosDelta : number
-	turn : number
 	tanHalf : number
 	delta : number
 	shorterLeg : number
+	floorBudget : number
 	maxBudget : number
 	minBudget : number
 end
@@ -73,21 +85,26 @@ end
 
 local record Geometry
 	Vec : Vec
+	TurnDir : TurnDir
 	Segment : Segment
 	DesignParams : DesignParams
+	CornerParams : CornerParams
 	CornerGeometry : CornerGeometry
 	CornerLayout : CornerLayout
 	CornerSolution : CornerSolution
 	DEFAULT_PARAMS : DesignParams
 
-	vec : function(number, number, number) : Vec
+	vec : function(number, number) : Vec
 	clothoidOffset : function(k0 : number, kp : number, s : number) : number, number
-	circleCenter : function(p : Vec, v : Vec, r : number, B : Vec) : Vec
+	circleCenter : function(p : Vec, v : Vec, r : number, dir : TurnDir) : Vec
 	length : function(Segment) : number
 	pointAt : function(Segment, t : number) : Vec
 	tangentAt : function(Segment, t : number) : Vec
 	headingAt : function(Segment, t : number) : number
 	curvatureAt : function(Segment, t : number) : number
+	signedCurvatureAt : function(Segment, t : number) : number
+	pullback : function(dp : DesignParams, tanHalf : number, delta : number, R : number) : number
+	solveCornerParams : function(budget : number, tanHalf : number, delta : number, dp : DesignParams) : CornerParams
 	cornerGeometry : function(a : Vec, b : Vec, c : Vec, dp : DesignParams) : CornerGeometry
 	cornerLayout : function(a : Vec, b : Vec, c : Vec, dp : DesignParams, override : number) : CornerLayout
 	cornerLayouts : function(pts : {Vec}, dp : DesignParams, overrides : {integer : number}) : {integer : CornerLayout}
@@ -98,32 +115,27 @@ end
 
 local M : Geometry = {}
 
--- The Lean UI's design parameters (TrackGeometry/UI/Config.lean `designParams`), 1 unit = 1 m.
+-- The Lean UI's design parameters (TrackGeometry/UI/Config.lean), 1 unit = 1 m.
 M.DEFAULT_PARAMS = {
 	legBudget = 0.3, minRadius = 40.0, straightThreshold = 0.001,
 	maxLateralAccel = 1.2, maxLateralJerk = 0.5, maxYawAccel = 0.2,
 	maxDesignSpeed = 83.3333, -- 300 km/h
 }
 
----------------------------------------------------------------------------- Vec.lean
+------------------------------------------------------------------------- Planar.lean (Vec2)
 
-local function vec(x : number, y : number, z : number) : Vec
-	return { x = x, y = y, z = z }
+local function vec(x : number, y : number) : Vec
+	return { x = x, y = y }
 end
 M.vec = vec
 
-local ZHAT = vec(0, 0, 1)
-
-local function add(v : Vec, w : Vec) : Vec return vec(v.x + w.x, v.y + w.y, v.z + w.z) end
-local function sub(v : Vec, w : Vec) : Vec return vec(v.x - w.x, v.y - w.y, v.z - w.z) end
-local function scale(r : number, v : Vec) : Vec return vec(r * v.x, r * v.y, r * v.z) end
-local function dot(v : Vec, w : Vec) : number return v.x * w.x + v.y * w.y + v.z * w.z end
+local function add(v : Vec, w : Vec) : Vec return vec(v.x + w.x, v.y + w.y) end
+local function sub(v : Vec, w : Vec) : Vec return vec(v.x - w.x, v.y - w.y) end
+local function scale(r : number, v : Vec) : Vec return vec(r * v.x, r * v.y) end
+local function dot(v : Vec, w : Vec) : number return v.x * w.x + v.y * w.y end
+local function cross(v : Vec, w : Vec) : number return v.x * w.y - v.y * w.x end
 local function norm(v : Vec) : number return math.sqrt(dot(v, v)) end
 local function dist(v : Vec, w : Vec) : number return norm(sub(v, w)) end
-
-local function cross(v : Vec, w : Vec) : Vec
-	return vec(v.y * w.z - v.z * w.y, v.z * w.x - v.x * w.z, v.x * w.y - v.y * w.x)
-end
 
 -- `v` unchanged when it has zero length.
 local function normalize(v : Vec) : Vec
@@ -132,14 +144,22 @@ local function normalize(v : Vec) : Vec
 	return scale(1 / math.sqrt(n2), v)
 end
 
--- Rotate `v` about the unit axis (nx, ny, nz) by `phi` (Rodrigues).
-local function rotateAxisC(nx : number, ny : number, nz : number, phi : number, v : Vec) : Vec
+local function rotate(phi : number, v : Vec) : Vec
 	local c, s = math.cos(phi), math.sin(phi)
-	local d = nx * v.x + ny * v.y + nz * v.z
-	local k = d * (1 - c)
-	return vec(c * v.x + s * (ny * v.z - nz * v.y) + k * nx,
-		c * v.y + s * (nz * v.x - nx * v.z) + k * ny,
-		c * v.z + s * (nx * v.y - ny * v.x) + k * nz)
+	return vec(c * v.x - s * v.y, s * v.x + c * v.y)
+end
+
+local function turnSign(dir : TurnDir) : number
+	return dir == "left" and 1 or -1
+end
+
+local function turnNormal(dir : TurnDir, v : Vec) : Vec
+	if dir == "left" then return vec(-v.y, v.x) end
+	return vec(v.y, -v.x)
+end
+
+local function turnRotate(dir : TurnDir, phi : number, v : Vec) : Vec
+	return rotate(turnSign(dir) * phi, v)
 end
 
 local function abs(x : number) : number
@@ -147,7 +167,7 @@ local function abs(x : number) : number
 	return x
 end
 
------------------------------------------------------------------------- Segment.lean
+---------------------------------------------------------------------- Clothoid.lean
 
 local PANELS = 16 -- clothoidPanels
 
@@ -167,26 +187,38 @@ function M.clothoidOffset(k0 : number, kp : number, s : number) : number, number
 	return half * sumC, half * sumS
 end
 
--- Centre of the circle through `p` with tangent `v` and radius `r`, in the plane with binormal `B`.
-local function circleCenter(p : Vec, v : Vec, r : number, B : Vec) : Vec
-	return add(p, scale(r / norm(v), cross(B, v)))
+-- Shift (P, K) of a unit clothoid of spiral angle theta > 0. See Lean `clothoidShift`.
+local function clothoidShift(theta : number) : number, number
+	local Ls1 = 2 * theta
+	local X1, Y1 = M.clothoidOffset(0, 1 / Ls1, Ls1)
+	return Y1 - (1 - math.cos(theta)), X1 - math.sin(theta)
 end
-M.circleCenter = circleCenter
 
--- Point at arc length `s` on a curve from `p` with start tangent `v`, curvature linear from k0
--- to k1 over length L, in the plane with binormal `B`.
-local function clothoidPoint(p : Vec, v : Vec, k0 : number, k1 : number, L : number, s : number, B : Vec) : Vec
+------------------------------------------------------------------- Planar.lean (Segment2D)
+
+-- Centre of the osculating circle through `p` with tangent `v`, radius `r`, turning `dir`.
+function M.circleCenter(p : Vec, v : Vec, r : number, dir : TurnDir) : Vec
+	local nUnit = turnNormal(dir, normalize(v))
+	return vec(p.x + r * nUnit.x, p.y + r * nUnit.y)
+end
+
+-- Place a local offset (xL along start tangent v, yL along inward normal for dir) at world point p.
+local function placeLocal(p : Vec, v : Vec, dir : TurnDir, xL : number, yL : number) : Vec
+	local vUnit = normalize(v)
+	local nUnit = turnNormal(dir, vUnit)
+	return vec(p.x + xL * vUnit.x + yL * nUnit.x, p.y + xL * vUnit.y + yL * nUnit.y)
+end
+
+-- Point at arc length `s` on a 2D clothoid from `p` with start tangent `v`, turning `dir`,
+-- curvature linear from k0 to k1 over length L. See Lean `clothoidPoint2D`.
+local function clothoidPoint(p : Vec, v : Vec, dir : TurnDir, k0 : number, k1 : number, L : number, s : number) : Vec
 	local xL, yL = M.clothoidOffset(k0, (k1 - k0) / L, s)
-	local t = normalize(v)
-	local nx = B.y * t.z - B.z * t.y
-	local ny = B.z * t.x - B.x * t.z
-	local nz = B.x * t.y - B.y * t.x
-	return vec(p.x + xL * t.x + yL * nx, p.y + xL * t.y + yL * ny, p.z + xL * t.z + yL * nz)
+	return placeLocal(p, v, dir, xL, yL)
 end
 
 function M.length(seg : Segment) : number
 	if seg.kind == "straight" then return dist(seg.p, seg.q) end
-	if seg.kind == "arc" then return abs(seg.radius) * abs(seg.sweep) end
+	if seg.kind == "arc" then return abs(seg.radius * seg.sweep) end
 	return seg.len
 end
 
@@ -197,15 +229,17 @@ function M.pointAt(seg : Segment, t : number) : Vec
 		local frac = len == 0 and 0 or t / len
 		return add(seg.p, scale(frac, sub(seg.q, seg.p)))
 	elseif k == "arc" then
-		return clothoidPoint(seg.p, seg.v, 1 / seg.radius, 1 / seg.radius, 1, t, seg.B)
+		local r = seg.radius
+		local th = t / r
+		return placeLocal(seg.p, seg.v, seg.dir, r * math.sin(th), r * (1 - math.cos(th)))
 	elseif k == "in" then
-		return clothoidPoint(seg.p, seg.v, 0, 1 / seg.radius, seg.len, t, seg.B)
+		return clothoidPoint(seg.p, seg.v, seg.dir, 0, 1 / seg.radius, seg.len, t)
 	else
-		return clothoidPoint(seg.p, seg.v, 1 / seg.radius, 0, seg.len, t, seg.B)
+		return clothoidPoint(seg.p, seg.v, seg.dir, 1 / seg.radius, 0, seg.len, t)
 	end
 end
 
--- Running turn angle at arc length `t`.
+-- Running unsigned turn angle at arc length `t`.
 function M.headingAt(seg : Segment, t : number) : number
 	local k, r, len = seg.kind, seg.radius, seg.len
 	if k == "straight" then return 0 end
@@ -216,10 +250,9 @@ end
 
 -- Unit tangent at arc length `t`.
 function M.tangentAt(seg : Segment, t : number) : Vec
-	local straight = seg.kind == "straight"
-	local B = normalize(straight and ZHAT or seg.B)
-	local dir = straight and sub(seg.q, seg.p) or seg.v
-	return rotateAxisC(B.x, B.y, B.z, M.headingAt(seg, t), normalize(dir))
+	local k = seg.kind
+	if k == "straight" then return normalize(sub(seg.q, seg.p)) end
+	return turnRotate(seg.dir, M.headingAt(seg, t), normalize(seg.v))
 end
 
 -- Unsigned curvature at arc length `t`.
@@ -231,19 +264,29 @@ function M.curvatureAt(seg : Segment, t : number) : number
 	return 1 / r - (1 / r) / len * t
 end
 
---------------------------------------------------------------------------- Path.lean
+-- Signed curvature at arc length `t` (positive on left turns, negative on right turns).
+function M.signedCurvatureAt(seg : Segment, t : number) : number
+	if seg.kind == "straight" then return 0 end
+	return turnSign(seg.dir) * M.curvatureAt(seg, t)
+end
+
+------------------------------------------------------------------------ Design.lean
+
+local BISECTION_STEPS = 52 -- bisectionSteps
 
 -- Operating speed on an arc of radius R: sqrt(a_max·R), capped at the design speed.
--- See Lean `DesignParams.speedAt`.
+-- See Lean `SpeedModel.speedAt`.
 local function speedAt(dp : DesignParams, R : number) : number
+	if dp.maxLateralAccel <= 0 or R <= 0 then return 0 end
 	local v = math.sqrt(dp.maxLateralAccel * R)
 	if dp.maxDesignSpeed > 0 then return math.min(dp.maxDesignSpeed, v) end
 	return v
 end
 
 -- Transition length on an arc of radius R: the larger of the jerk- and yaw-limited lengths.
--- See Lean `DesignParams.transitionLength`.
+-- See Lean `SpeedModel.transitionLength`.
 local function transitionLength(dp : DesignParams, R : number) : number
+	if dp.maxLateralAccel <= 0 or R <= 0 then return 0 end
 	local V = speedAt(dp, R)
 	local lsJerk = dp.maxLateralJerk > 0 and (V * V * V) / (R * dp.maxLateralJerk) or 0
 	local lsYaw = dp.maxYawAccel > 0 and (V * V) / (R * dp.maxYawAccel) or 0
@@ -251,54 +294,131 @@ local function transitionLength(dp : DesignParams, R : number) : number
 end
 
 -- Spiral angle Ls/(2R) of a corner of turn delta on an arc of radius R, clamped to delta/2.
--- See Lean `DesignParams.spiralAngle`.
+-- See Lean `SpeedModel.spiralAngle`.
 local function spiralAngle(dp : DesignParams, R : number, delta : number) : number
+	if dp.maxLateralAccel <= 0 or R <= 0 then return 0 end
 	return math.min(transitionLength(dp, R) / (2 * R), delta / 2)
 end
 
--- Shift (P, K) of a unit clothoid of spiral angle theta > 0. See Lean `clothoidShift`.
-local function clothoidShift(theta : number) : number, number
-	local Ls1 = 2 * theta
-	local X1, Y1 = M.clothoidOffset(0, 1 / Ls1, Ls1)
-	return Y1 - (1 - math.cos(theta)), X1 - math.sin(theta)
-end
-
--- The tangent budget whose corner has an arc of radius minRadius, transitions included; 0
--- when the floor is off. See Lean `DesignParams.radiusFloorBudget`.
-local function radiusFloorBudget(dp : DesignParams, tanHalf : number, delta : number) : number
-	local R = dp.minRadius
+-- Tangent pullback consumed by a corner of arc radius R. See Lean `SpeedModel.pullback`.
+function M.pullback(dp : DesignParams, tanHalf : number, delta : number, R : number) : number
 	if R <= 0 then return 0 end
-	local theta = dp.maxLateralAccel <= 0 and 0 or spiralAngle(dp, R, delta)
-	if theta <= 0 then return R * abs(tanHalf) end
-	local P, K = clothoidShift(theta)
-	return R * abs((1 + P) * tanHalf + K)
+	local th = dp.maxLateralAccel <= 0 and 0 or spiralAngle(dp, R, delta)
+	if th <= 0 then return R * tanHalf end
+	local P, K = clothoidShift(th)
+	return R * ((1 + P) * tanHalf + K)
 end
 
--- Directions, turn and budget bounds for the corner at PI `b`; nil when degenerate or straight.
+-- Minimum tangent budget needed to achieve arc radius minRadius, transitions included; 0 when
+-- the floor is off. See Lean `radiusFloorBudget`.
+local function radiusFloorBudget(dp : DesignParams, tanHalf : number, delta : number) : number
+	return abs(M.pullback(dp, tanHalf, delta, dp.minRadius))
+end
+
+-- Solve scalar corner parameters for a standard 2D corner (tanHalf > 0) by 52-step bracketed
+-- bisection with the R_cap regime split. See Lean `solveCornerParamsBisect`.
+function M.solveCornerParams(budget : number, tanHalf : number, delta : number, dp : DesignParams) : CornerParams
+	if dp.maxLateralAccel <= 0 then
+		local R = budget / tanHalf
+		return { radius = R, spiralAngle = 0, spiralLength = 0, arcAngle = delta, opSpeed = 0 }
+	elseif budget <= 0 then
+		return { radius = 0, spiralAngle = 0, spiralLength = 0, arcAngle = delta, opSpeed = 0 }
+	end
+	local rFillet = budget / tanHalf
+	local lo, hi : number, number = 0.0, rFillet
+	if dp.maxDesignSpeed > 0 then
+		local rCap = dp.maxDesignSpeed * dp.maxDesignSpeed / dp.maxLateralAccel
+		if M.pullback(dp, tanHalf, delta, rCap) >= budget then
+			lo, hi = 0.0, math.min(rCap, rFillet)
+		else
+			lo, hi = rCap, rFillet
+		end
+	end
+	for _ = 1, BISECTION_STEPS do
+		local mid = (lo + hi) / 2
+		if M.pullback(dp, tanHalf, delta, mid) <= budget then lo = mid else hi = mid end
+	end
+	local R = (lo + hi) / 2
+	local ths = spiralAngle(dp, R, delta)
+	local opSpeed = speedAt(dp, R)
+	if ths <= 0 then
+		return { radius = R, spiralAngle = 0, spiralLength = 0, arcAngle = delta, opSpeed = opSpeed }
+	end
+	local Ls = 2 * R * ths
+	local phi = delta - 2 * ths
+	return { radius = R, spiralAngle = ths, spiralLength = Ls, arcAngle = phi, opSpeed = opSpeed }
+end
+
+-- Shared-leg budget pipeline (Lean `desiredBudgets`, `resolveSharedLegs`, `cornerDragBounds`).
+local function isAutoEndCorner(n : integer, i : integer, overrides : {integer : number}) : boolean
+	return (i == 2 or i == n - 1) and overrides[i] == nil
+end
+
+local function desiredBudgets(n : integer, legLengths : {number}, geoms : {integer : CornerGeometry}, dp : DesignParams, overrides : {integer : number}) : {integer : number}
+	local function clampAsk(g : CornerGeometry, cand : number) : number
+		local lo = math.min(g.floorBudget, g.shorterLeg)
+		return math.max(lo, math.min(g.shorterLeg, cand))
+	end
+	local base : {integer : number} = {}
+	for i, g in pairs(geoms) do
+		base[i] = clampAsk(g, overrides[i] or dp.legBudget * g.shorterLeg)
+	end
+	local function free(j : integer, k : integer) : number
+		local len = legLengths[k] or 0
+		if geoms[j] ~= nil then return len - base[j] end
+		return len
+	end
+	local asks : {integer : number} = {}
+	for i, g in pairs(geoms) do
+		if isAutoEndCorner(n, i, overrides) then
+			asks[i] = clampAsk(g, math.min(free(i - 1, i - 1), free(i + 1, i)))
+		else
+			asks[i] = base[i]
+		end
+	end
+	return asks
+end
+
+local function resolveSharedLegs(legLengths : {number}, asks : {integer : number}) : {integer : number}
+	local function share(ai : number, j : integer, k : integer) : number
+		local len = legLengths[k] or 0
+		local aj = asks[j]
+		if aj ~= nil then
+			if ai + aj <= len then return ai end
+			return len * ai / (ai + aj)
+		end
+		return math.min(ai, len)
+	end
+	local budgets : {integer : number} = {}
+	for i, ai in pairs(asks) do
+		budgets[i] = math.min(share(ai, i - 1, i - 1), share(ai, i + 1, i))
+	end
+	return budgets
+end
+
+------------------------------------------------------------------ Planar.lean (corners & path)
+
+-- Directions, turn handedness and floor budget for the 2D corner at PI `b`; nil when degenerate,
+-- near-straight, or a 180-degree reversal. See Lean `cornerGeometry2D`.
 function M.cornerGeometry(a : Vec, b : Vec, c : Vec, dp : DesignParams) : CornerGeometry
 	local dIn, dOut = sub(b, a), sub(c, b)
 	local nIn, nOut = norm(dIn), norm(dOut)
 	if nIn == 0 or nOut == 0 then return nil end
 	local uIn, uOut = scale(1 / nIn, dIn), scale(1 / nOut, dOut)
-	local cr = cross(uIn, uOut)
-	local sinSigned = cr.z
-	local sinAbs = norm(cr)
+	local sinSigned = cross(uIn, uOut)
+	local sinAbs = abs(sinSigned)
 	local cosD = math.max(-1, math.min(1, dot(uIn, uOut)))
-	local minor = math.acos(cosD)
-	local principal = sinSigned < 0 and -minor or minor
-	local selected = sinAbs <= dp.straightThreshold and 0 or principal
-	local delta = abs(selected)
-	if delta <= dp.straightThreshold then return nil end
+	local delta = math.acos(cosD)
+	if sinAbs <= dp.straightThreshold or delta <= dp.straightThreshold then return nil end
+	local dir : TurnDir = sinSigned < 0 and "right" or "left"
 	local shorter = math.min(nIn, nOut)
-	local hi = shorter
 	local tanHalf = math.sin(delta) / (1 + math.cos(delta))
-	local lo = math.min(radiusFloorBudget(dp, tanHalf, delta), hi)
-	-- Without windings the turn is never reversed and sinAbs > straightThreshold here, so the
-	-- binormal is the leg plane's normal.
+	local floor = radiusFloorBudget(dp, tanHalf, delta)
 	return {
-		uIn = uIn, uOut = uOut, binormal = scale(1 / sinAbs, cr), sinSigned = sinSigned,
-		cosDelta = cosD, turn = selected, tanHalf = tanHalf, delta = delta,
-		shorterLeg = shorter, maxBudget = hi, minBudget = lo,
+		uIn = uIn, uOut = uOut, turnDir = dir, sinSigned = sinSigned,
+		cosDelta = cosD, tanHalf = tanHalf, delta = delta,
+		shorterLeg = shorter, floorBudget = floor,
+		maxBudget = shorter, minBudget = math.min(floor, shorter),
 	}
 end
 
@@ -316,156 +436,97 @@ function M.cornerLayout(a : Vec, b : Vec, c : Vec, dp : DesignParams, override :
 	}
 end
 
--- The corners of a PI polyline, by PI index (nil at the ends and at PIs that do not curve).
--- Each corner asks for its budget (override, else auto, within its own legs) and gets it,
--- leaving room for its neighbours. The auto budget is legBudget × the shorter leg, except at a
--- corner next to a path end, which asks for all its room: the whole leg to the end, and on its
--- other leg the leg less the neighbour's own ask when the neighbour curves. Then: a leg whose far end does not curve is the corner's alone; a
--- leg shared with another curve holds both asks when they fit, else is split in proportion;
--- the budget is the lesser of the two legs' shares. maxBudget becomes the room the neighbours
--- leave (an auto end corner leaves room down to its floor, since it gives way) and minBudget the
--- minRadius floor capped to it. See Lean `cornerLayouts`.
+-- Polyline leg lengths, interior corner geometries, and resolved non-overlapping budgets.
+local function resolvePathBudgets(pts : {Vec}, dp : DesignParams, overrides : {integer : number}) : {number}, {integer : CornerGeometry}, {integer : number}
+	local n = #pts
+	local legLengths : {number} = {}
+	for k = 1, n - 1 do legLengths[k] = dist(pts[k + 1], pts[k]) end
+	local geoms : {integer : CornerGeometry} = {}
+	for i = 2, n - 1 do
+		local g = M.cornerGeometry(pts[i - 1], pts[i], pts[i + 1], dp)
+		if g ~= nil then geoms[i] = g end
+	end
+	local asks = desiredBudgets(n, legLengths, geoms, dp, overrides)
+	return legLengths, geoms, resolveSharedLegs(legLengths, asks)
+end
+
+-- The corners of a PI polyline, by PI index (nil at the ends and at PIs that do not curve),
+-- with resolved budgets and interactive drag bounds (`cornerDragBounds`).
 function M.cornerLayouts(pts : {Vec}, dp : DesignParams, overrides : {integer : number}) : {integer : CornerLayout}
 	local n = #pts
 	overrides = overrides or {}
-	local geoms : {integer : CornerGeometry} = {}
-	-- what each corner asks before the end corners take their room
-	local base : {integer : number} = {}
-	for i = 2, n - 1 do
-		local g = M.cornerGeometry(pts[i - 1], pts[i], pts[i + 1], dp)
-		if g ~= nil then
-			geoms[i] = g
-			local cand = overrides[i] or dp.legBudget * g.shorterLeg
-			base[i] = math.max(g.minBudget, math.min(g.maxBudget, cand))
-		end
-	end
-	-- leg k runs from PI k to PI k + 1
-	local function legLen(k : integer) : number return dist(pts[k + 1], pts[k]) end
-	-- the room on leg k, whose far end is PI j, left by the neighbour's base ask
-	local function free(j : integer, k : integer) : number
-		if geoms[j] ~= nil then return legLen(k) - base[j] end
-		return legLen(k)
-	end
-	-- an end corner with no override: it takes the room left, so it gives way to a neighbour
-	local function autoEnd(i : integer) : boolean return (i == 2 or i == n - 1) and overrides[i] == nil end
-	local ask : {integer : number} = {}
-	for i, g in pairs(geoms) do
-		if autoEnd(i) then
-			local cand = math.min(free(i - 1, i - 1), free(i + 1, i))
-			ask[i] = math.max(g.minBudget, math.min(g.maxBudget, cand))
-		else
-			ask[i] = base[i]
-		end
-	end
-	-- what corner i may take of leg k, whose far end is PI j
-	local function share(i : integer, j : integer, k : integer) : number
-		local len, ai = legLen(k), ask[i]
-		if geoms[j] ~= nil then
-			local aj = ask[j]
-			if ai + aj <= len then return ai end
-			return len * ai / (ai + aj)
-		end
-		return math.min(ai, len)
-	end
-	local budget : {integer : number} = {}
-	for i in pairs(geoms) do budget[i] = math.min(share(i, i - 1, i - 1), share(i, i + 1, i)) end
-	-- an auto end corner can shrink to its floor, so it leaves room down to that
+	local legLengths, geoms, budgets = resolvePathBudgets(pts, dp, overrides)
+	-- an auto end corner can shrink to its floor, so it leaves room down to that (Lean `cornerDragBounds`)
 	local function room(j : integer, k : integer) : number
+		local len = legLengths[k] or 0
 		local gj = geoms[j]
-		if gj == nil then return legLen(k) end
-		return legLen(k) - (autoEnd(j) and gj.minBudget or budget[j])
+		if gj == nil then return len end
+		local used = isAutoEndCorner(n, j, overrides) and math.min(gj.floorBudget, gj.shorterLeg) or (budgets[j] or 0)
+		return len - used
 	end
 	local out : {integer : CornerLayout} = {}
 	for i, g in pairs(geoms) do
 		local hi = math.min(room(i - 1, i - 1), room(i + 1, i))
-		local lo = math.min(radiusFloorBudget(dp, g.tanHalf, g.delta), hi)
-		local g2 : CornerGeometry = {}
-		for k, v in pairs(g as {string : any}) do (g2 as {string : any})[k] = v end
-		g2.maxBudget, g2.minBudget = hi, lo
-		local bud, b = budget[i], pts[i]
+		local lo = math.min(g.floorBudget, hi)
+		local g2 : CornerGeometry = {
+			uIn = g.uIn, uOut = g.uOut, turnDir = g.turnDir, sinSigned = g.sinSigned,
+			cosDelta = g.cosDelta, tanHalf = g.tanHalf, delta = g.delta,
+			shorterLeg = g.shorterLeg, floorBudget = g.floorBudget,
+			maxBudget = hi, minBudget = lo,
+		}
+		local bud, b = budgets[i], pts[i]
 		out[i] = { geometry = g2, budget = bud, entryPoint = sub(b, scale(bud, g.uIn)), exitPoint = add(b, scale(bud, g.uOut)) }
 	end
 	return out
 end
 
--- The curved pieces through the corner at PI `b`: entry clothoid, arc, exit clothoid, or a plain
--- arc when the speed model is off. See Lean `solveCornerWithGeometry`.
-function M.solveCorner(b : Vec, budget : number, dp : DesignParams, g : CornerGeometry) : CornerSolution
-	local uIn, B = g.uIn, g.binormal
-	local entryBase, exitBase = sub(b, scale(budget, uIn)), add(b, scale(budget, g.uOut))
-	local tanHalf, delta = g.tanHalf, g.delta
-	local function safeDenom(x : number) : number
-		local ax = abs(x)
-		if ax <= dp.straightThreshold then return dp.straightThreshold end
-		return ax
+-- Construct the 2D segments for a corner from solved scalar CornerParams. See Lean `buildCorner2D`.
+local function buildCorner(b : Vec, budget : number, g : CornerGeometry, cp : CornerParams, straightThreshold : number) : CornerSolution
+	local uIn, dir = g.uIn, g.turnDir
+	local entryBase = sub(b, scale(budget, uIn))
+	if cp.spiralAngle <= 0 then
+		local absR = cp.radius
+		local arcSeg : Segment = { kind = "arc", radius = absR, p = entryBase, v = uIn, dir = dir, sweep = cp.arcAngle, opSpeed = cp.opSpeed }
+		local pt = M.pointAt(arcSeg, M.length(arcSeg))
+		return { entryPoint = entryBase, exitPoint = pt, opSpeed = cp.opSpeed, radius = absR, pieces = { arcSeg } }
 	end
-	local aMax = dp.maxLateralAccel
-	local function radiusOf(th : number) : number
-		local P, K = clothoidShift(th)
-		return budget / safeDenom((1 + P) * tanHalf + K)
-	end
-	local function stepTheta(R : number) : number
-		return spiralAngle(dp, R, delta)
-	end
-	local ths = 0.0
-	if aMax > 0 then
-		local R = budget / safeDenom(tanHalf)
-		ths = stepTheta(R)
-		for _ = 1, 4 do
-			if ths > 0 then
-				R = radiusOf(ths)
-				ths = stepTheta(R)
-			end
-		end
-	end
-
-	if ths <= 0 then
-		local absR = budget / safeDenom(tanHalf)
-		local opSpeed = aMax > 0 and speedAt(dp, absR) or 0
-		return {
-			entryPoint = entryBase, exitPoint = exitBase, opSpeed = opSpeed, radius = absR,
-			pieces = { { kind = "arc", radius = absR, p = entryBase, q = exitBase, v = uIn, B = B, sweep = delta, opSpeed = opSpeed } },
-		}
-	end
-
-	local absR = radiusOf(ths)
-	local opSpeed = speedAt(dp, absR)
-	local Ls = 2 * absR * ths
-	local bx, by, bz = B.x, B.y, B.z
+	local absR, ths, Ls, phi, opSpeed = cp.radius, cp.spiralAngle, cp.spiralLength, cp.arcAngle, cp.opSpeed
 	local ts = entryBase
-	local sc = clothoidPoint(ts, uIn, 0, 1 / absR, Ls, Ls, B)
-	local tanSC = rotateAxisC(bx, by, bz, ths, uIn)
-	local phi = delta - 2 * ths
-	local o = circleCenter(sc, tanSC, absR, B)
-	local cs = add(o, rotateAxisC(bx, by, bz, phi, sub(sc, o)))
-	local tanCS = rotateAxisC(bx, by, bz, phi, tanSC)
-	local entrySeg : Segment = { kind = "in", radius = absR, p = ts, v = uIn, B = B, len = Ls, opSpeed = opSpeed }
-	local exitSeg : Segment = { kind = "out", radius = absR, p = cs, v = tanCS, B = B, len = Ls, opSpeed = opSpeed }
-	local pieces : {Segment}
-	if phi <= dp.straightThreshold then
-		pieces = { entrySeg, exitSeg }
-	else
-		pieces = { entrySeg, { kind = "arc", radius = absR, p = sc, q = cs, v = tanSC, B = B, sweep = phi, opSpeed = opSpeed }, exitSeg }
+	local sc = clothoidPoint(ts, uIn, dir, 0, 1 / absR, Ls, Ls)
+	local tanSC = turnRotate(dir, ths, uIn)
+	local entrySeg : Segment = { kind = "in", radius = absR, p = ts, v = uIn, dir = dir, len = Ls, opSpeed = opSpeed }
+	if phi <= straightThreshold then
+		local exitSeg : Segment = { kind = "out", radius = absR, p = sc, v = tanSC, dir = dir, len = Ls, opSpeed = opSpeed }
+		return { entryPoint = ts, exitPoint = M.pointAt(exitSeg, Ls), pieces = { entrySeg, exitSeg }, opSpeed = opSpeed, radius = absR }
 	end
-	return { entryPoint = ts, exitPoint = M.pointAt(exitSeg, Ls), pieces = pieces, opSpeed = opSpeed, radius = absR }
+	local arcSeg : Segment = { kind = "arc", radius = absR, p = sc, v = tanSC, dir = dir, sweep = phi, opSpeed = opSpeed }
+	local cs = M.pointAt(arcSeg, M.length(arcSeg))
+	local tanCS = turnRotate(dir, phi, tanSC)
+	local exitSeg : Segment = { kind = "out", radius = absR, p = cs, v = tanCS, dir = dir, len = Ls, opSpeed = opSpeed }
+	return { entryPoint = ts, exitPoint = M.pointAt(exitSeg, Ls), pieces = { entrySeg, arcSeg, exitSeg }, opSpeed = opSpeed, radius = absR }
 end
 
--- The alignment through PIs `pts`: straights along the legs and a solved corner at each interior
--- PI. `overrides[i]` replaces the auto tangent budget (m) at PI i (legBudget × the shorter leg, or
--- all the room at the first and last corners); cornerLayouts resolves them.
+-- The curved pieces through the corner at PI `b`: entry clothoid, arc, exit clothoid, or a plain
+-- arc when the speed model is off. See Lean `solveCornerWithGeometry2D`.
+function M.solveCorner(b : Vec, budget : number, dp : DesignParams, g : CornerGeometry) : CornerSolution
+	local cp = M.solveCornerParams(budget, g.tanHalf, g.delta, dp)
+	return buildCorner(b, budget, g, cp, dp.straightThreshold)
+end
+
+-- The 2D horizontal alignment through PIs `pts`: straights along the legs and a solved corner at
+-- each interior PI. `overrides[i]` replaces the auto tangent budget (m) at PI i. See Lean `buildPath2D`.
 function M.buildPath(pts : {Vec}, dp : DesignParams, overrides : {integer : number}) : {Segment}
 	local n = #pts
 	if n < 2 then return {} end
 	overrides = overrides or {}
 	local straightSpeed = dp.maxDesignSpeed > 0 and dp.maxDesignSpeed or 0
+	local _, geoms, budgets = resolvePathBudgets(pts, dp, overrides)
 	local out : {Segment} = {}
 	local cursor = pts[1]
-	local layouts = M.cornerLayouts(pts, dp, overrides)
 	for i = 2, n - 1 do
-		local b = pts[i]
-		local layout = layouts[i]
-		if layout ~= nil then
-			local sol = M.solveCorner(b, layout.budget, dp, layout.geometry)
+		local g, bud = geoms[i], budgets[i]
+		if g ~= nil and bud ~= nil then
+			local sol = M.solveCorner(pts[i], bud, dp, g)
 			out[#out + 1] = { kind = "straight", p = cursor, q = sol.entryPoint, opSpeed = straightSpeed }
 			for _, piece in ipairs(sol.pieces) do
 				piece.corner = i

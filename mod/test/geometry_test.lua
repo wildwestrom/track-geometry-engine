@@ -24,7 +24,7 @@ for _, fx in ipairs(fixtures) do
 	local dp = {}
 	for k, v in pairs(fx.params) do dp[k] = f64(v) end
 	local pts = {}
-	for i, p in ipairs(fx.pis) do pts[i] = G.vec(f64(p[1]), f64(p[2]), 0) end
+	for i, p in ipairs(fx.pis) do pts[i] = G.vec(f64(p[1]), f64(p[2])) end
 	local overrides = {}
 	for i, v in pairs(fx.overrides) do overrides[i] = f64(v) end
 	local path = G.buildPath(pts, dp, overrides)
@@ -49,8 +49,8 @@ for _, fx in ipairs(fixtures) do
 			local t = f64(s.t)
 			local p, tan = G.pointAt(seg, t), G.tangentAt(seg, t)
 			local at = string.format("%s at t = %.3f", name, t)
-			cmp(p.x, f64(s.x), at .. " x"); cmp(p.y, f64(s.y), at .. " y"); cmp(p.z, f64(s.z), at .. " z")
-			cmp(tan.x, f64(s.tx), at .. " tx"); cmp(tan.y, f64(s.ty), at .. " ty"); cmp(tan.z, f64(s.tz), at .. " tz")
+			cmp(p.x, f64(s.x), at .. " x"); cmp(p.y, f64(s.y), at .. " y")
+			cmp(tan.x, f64(s.tx), at .. " tx"); cmp(tan.y, f64(s.ty), at .. " ty")
 			cmp(G.curvatureAt(seg, t), f64(s.k), at .. " curvature")
 		end
 	end
@@ -64,12 +64,30 @@ for _, fx in ipairs(fixtures) do
 end
 
 -- a path's curve pieces say which corner they are the curve of
-local cornerPath = G.buildPath({ G.vec(0, 0, 0), G.vec(1000, 0, 0), G.vec(1000, 1000, 0), G.vec(2000, 1000, 0) }, G.DEFAULT_PARAMS, {})
+local cornerPath = G.buildPath({ G.vec(0, 0), G.vec(1000, 0), G.vec(1000, 1000), G.vec(2000, 1000) }, G.DEFAULT_PARAMS, {})
 local corners, straightsPlain = {}, true
 for _, seg in ipairs(cornerPath) do
 	if seg.kind == "straight" then straightsPlain = straightsPlain and seg.corner == nil
 	else corners[seg.corner or 0] = true end
 end
 check(straightsPlain and corners[2] and corners[3] and not corners[0], "corner: curve pieces carry their corner's index, straights none")
+
+-- pullback inverts solveCornerParams, and signedCurvatureAt / circleCenter respect TurnDir
+do
+	local gL = G.cornerGeometry(G.vec(0, 0), G.vec(400, 0), G.vec(700, 300), G.DEFAULT_PARAMS)
+	local cp = G.solveCornerParams(200, gL.tanHalf, gL.delta, G.DEFAULT_PARAMS)
+	local pb = G.pullback(G.DEFAULT_PARAMS, gL.tanHalf, gL.delta, cp.radius)
+	check(math.abs(pb - 200) < 1e-9, string.format("pullback inverts solveCornerParams (diff %.3g)", math.abs(pb - 200)))
+
+	local leftPath = G.buildPath({ G.vec(0, 0), G.vec(400, 0), G.vec(700, 300) }, G.DEFAULT_PARAMS, {})
+	local rightPath = G.buildPath({ G.vec(0, 0), G.vec(400, 0), G.vec(700, -300) }, G.DEFAULT_PARAMS, {})
+	local leftArc, rightArc = leftPath[3], rightPath[3]
+	check(G.signedCurvatureAt(leftArc, 0) > 0 and G.signedCurvatureAt(rightArc, 0) < 0,
+		"signedCurvatureAt: positive on left turns, negative on right turns")
+	local cL = G.circleCenter(G.vec(0, 0), G.vec(1, 0), 100, "left")
+	local cR = G.circleCenter(G.vec(0, 0), G.vec(1, 0), 100, "right")
+	check(math.abs(cL.x) < 1e-12 and math.abs(cL.y - 100) < 1e-12 and math.abs(cR.x) < 1e-12 and math.abs(cR.y + 100) < 1e-12,
+		"circleCenter: left is +y, right is -y from +x tangent")
+end
 
 H.done()
