@@ -6,14 +6,16 @@
 --               transition spiral (display only), a circle at each turn and ground end (coloured
 --               by how it can move) and a bracket at each curve's start and end, open towards its
 --               curve.
---   vertical  : at each end and elevation point a circle on the ground (where the mouse grabs it)
---               and a post from the ground up to the track (a point's own height).
+--   vertical  : the PVI grade-tangent polyline along the path (connecting consecutive active PVIs,
+--               drawn first), and at each end and elevation point a circle on the ground (where
+--               the mouse grabs it) and a post from the ground up to the PVI's elevation.
 -- Widths and steps are in metres. The width is GIZMO_WIDTH near the eye (Network Toolkit's
 -- settings: 1.5, with the geometry 1 wide and 1 m steps) and grows with the distance from it
 -- (widthAt), so the lines stay visible zoomed out; each circle is at its handle's own grab radius
 -- (tg_edit.grabAt, from the eye of the session's view ray; a bracket at its own size,
 -- tg_edit.bracketAt), so what is drawn is what the mouse picks.
 
+local alignment = require("track_geometry_tool::/track_geometry/tg_alignment.script.tl")
 local edits = require("track_geometry_tool::/track_geometry/tg_edit.script.tl")
 local ends = require("track_geometry_tool::/track_geometry/tg_ends.script.tl")
 local geometry = require("track_geometry_tool::/track_geometry/tg_geometry.script.tl")
@@ -136,7 +138,7 @@ local POST_GAP = 0.1 -- a point this far (m) or less off the ground gets no post
 -- The osculating circle of every arc of the path, in order along it, at the profile's height at
 -- the arc's midpoint. A corner whose spirals take the whole turn has an arc of no sweep: its
 -- spirals meet at curvature 1/R, and the circle is there.
-local function circlesOf(path : {geometry.Segment}, p : profiles.Profile) : {Circle}
+local function circlesOf(path : {geometry.Segment}, p : profiles.ProfilePath) : {Circle}
 	local cs : {Circle} = {}
 	local s0 = 0.0 -- the chainage where seg starts
 	for i, seg in ipairs(path) do
@@ -151,7 +153,7 @@ local function circlesOf(path : {geometry.Segment}, p : profiles.Profile) : {Cir
 		end
 		if m ~= nil then
 			local o = geometry.circleCenter(m, v, seg.radius, seg.dir)
-			cs[#cs + 1] = { x = o.x, y = o.y, r = seg.radius, mx = m.x, my = m.y, z = p and profiles.heightAt(p, s) }
+			cs[#cs + 1] = { x = o.x, y = o.y, r = seg.radius, mx = m.x, my = m.y, z = p and profiles.elevationAtClamped(p, s) }
 		end
 		s0 = s0 + len
 	end
@@ -193,7 +195,7 @@ end
 
 -- Every transition spiral of the path (its in and out pieces), each along its piece in pieces like
 -- a leg, at the profile's height at each point's chainage (with no profile p, over the ground).
-local function spiralPoints(path : {geometry.Segment}, p : profiles.Profile, groundAt : function(number, number) : number) : {{{number}}}
+local function spiralPoints(path : {geometry.Segment}, p : profiles.ProfilePath, groundAt : function(number, number) : number) : {{{number}}}
 	local out : {{{number}}} = {}
 	local s0 = 0.0 -- the chainage where seg starts
 	for _, seg in ipairs(path) do
@@ -204,7 +206,7 @@ local function spiralPoints(path : {geometry.Segment}, p : profiles.Profile, gro
 			for k = 0, n do
 				local t = len * k / n
 				local q = geometry.pointAt(seg, t)
-				pts[k + 1] = { q.x, q.y, p and profiles.heightAt(p, s0 + t) or groundAt(q.x, q.y) }
+				pts[k + 1] = { q.x, q.y, p and profiles.elevationAtClamped(p, s0 + t) or groundAt(q.x, q.y) }
 			end
 			out[#out + 1] = pts
 		end
@@ -272,6 +274,19 @@ local function horizontal(sess : sessions.Session, groundAt : function(number, n
 	return out
 end
 
+-- The grade-tangent leg between two consecutive active PVIs, in pieces along the horizontal path,
+-- interpolating linearly between their elevations.
+local function gradeLegPoints(nodes : {alignment.Sample}, s0 : number, z0 : number, s1 : number, z1 : number) : {{number}}
+	local n = pieces(s1 - s0)
+	local pts : {{number}} = {}
+	for k = 0, n do
+		local t = k / n
+		local x, y = alignment.pointAt(nodes, s0 + t * (s1 - s0))
+		pts[k + 1] = { x, y, z0 + t * (z1 - z0) }
+	end
+	return pts
+end
+
 -- Roles: "fixed" at a track end (its height is the track's), "tooClose" at a point too close (it
 -- is not in the profile), "hot" under the mouse or dragged, "selected", "ray" at an elevation point
 -- (it slides along the path), "groundEnd" at a ground end (its height can be set).
@@ -279,10 +294,20 @@ local function vertical(sess : sessions.Session, groundAt : function(number, num
 	local e, r, ray = sess.edit, sess.grab, sess.ray
 	local out : {Shape} = {}
 	if edits.profile(e) == nil then return out end
+	local pts, nodes = edits.points(e), edits.nodes(e)
+	local prevS, prevZ : number, number = nil, nil
+	for _, pt in ipairs(pts) do
+		if not pt.tooClose then
+			if prevS ~= nil and pt.s > prevS then
+				out[#out + 1] = line(gradeLegPoints(nodes, prevS, prevZ, pt.s, pt.z), "leg", w)
+			end
+			prevS, prevZ = pt.s, pt.z
+		end
+	end
 	local h, d = sess.hit, sess.dragEl
 	local hot = d ~= nil and d.i or (h ~= nil and h.kind ~= "track" and h.i or nil)
-	for i, pt in ipairs(edits.points(e)) do
-		local role = not pt.liftable and "fixed" or pt.tooClose and "tooClose" or i == hot and "hot"
+	for i, pt in ipairs(pts) do
+		local role = not pt.slides and not pt.liftable and "fixed" or pt.tooClose and "tooClose" or i == hot and "hot"
 			or i == sess.selected and "selected" or pt.slides and "ray" or "groundEnd"
 		local g = groundAt(pt.x, pt.y)
 		-- (its radius measured up at the point, where the mouse also picks it)

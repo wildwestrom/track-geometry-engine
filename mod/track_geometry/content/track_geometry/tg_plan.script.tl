@@ -135,17 +135,18 @@ function M.path(a : ends.End, b : ends.End, e : edits.Edit, ground : Ground, wat
 	if prof == nil then return nil, pwhy end
 	local denseZ = profiles.sample(prof, chainages(dense))
 	local kinds, structs, note = classify(dense, denseZ, ground, water)
-	-- (a bridge or tunnel may start or end a little off, an elevation point may not: where the
-	-- two are too close for a node each, the elevation point has it)
+	-- (a bridge or tunnel may start or end a little off, a vertical segment boundary may not: where
+	-- the two are too close for a node each, the vertical boundary has it)
+	local vBreaks = profiles.boundaries(prof)
 	local breaks : {number} = {}
 	for _, s in ipairs(kinds ~= nil and structures.changes(dense, kinds) or {}) do
 		local free = true
-		for _, pt in ipairs(prof.points) do
-			if math.abs(pt.s - s) < alignment.MIN_PIECE then free = false end
+		for _, bs in ipairs(vBreaks) do
+			if math.abs(bs - s) < alignment.MIN_PIECE then free = false end
 		end
 		if free then breaks[#breaks + 1] = s end
 	end
-	for _, pt in ipairs(prof.points) do breaks[#breaks + 1] = pt.s end
+	for _, bs in ipairs(vBreaks) do breaks[#breaks + 1] = bs end
 	local built = clearSwitches(alignment.sample(path, math.huge, MAX_TURN, breaks), a, b)
 	pinEnds(built, a, b)
 	if kinds ~= nil then kinds = alignment.carry(dense, kinds, built) end

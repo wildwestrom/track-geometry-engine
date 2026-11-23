@@ -1,121 +1,289 @@
--- The track's vertical profile: a monotone cubic in chainage through the elevation points
--- (Fritsch–Carlson, with Fritsch–Butland grades as in PCHIP). The first and last points are the
--- path's ends and the grades there are the existing tracks' grades, so the new track joins them
--- without a kink (a ground end has none: its grade is free, the one-sided PCHIP formula from its
--- first span, so the end span does not overshoot either). Between two points the profile is the
--- cubic Hermite with their heights and grades. An interior point is level where the profile turns
--- there or a span next to it is level; elsewhere its grade is a weighted harmonic mean of the two
--- spans' grades. So the profile never overshoots between interior points: two points at one height
--- are joined level, and a climb out of a level span does not dip first. The grade is continuous,
--- its rate of change (the vertical curvature) may jump at a point. A span next to an end may still
--- overshoot, when the existing track's grade points away from the next point; the end grades are
--- kept so the joins have no kink. With no interior points it is one Hermite from end to end, like
--- the game's own builder lays a drag (which fixes only the start grade and lets the curve
--- straighten out by the far end).
--- No game API here, so test/profile_test.lua runs it outside the game.
+-- Port of the 1D Lean vertical alignment core (TrackGeometry/Profile.lean), which is the spec.
+-- Each function keeps the Lean operations in the same order so results match the Lean RFloat
+-- build bit-for-bit; test/profile_test.lua checks that against `fixtures.profiles` written by
+-- `lake exe fixtures` (Fixtures.lean). Reuses `resolveSharedLegs` from tg_geometry.
+-- No game API here.
 
-local record Point
-	s : number -- chainage (m)
-	z : number -- height (m)
+local geometry = require("track_geometry_tool::/track_geometry/tg_geometry.script.tl")
+
+-- A vertical point of intersection defining a break in grade along a profile.
+local record PVI
+	station : number -- horizontal distance coordinate along the alignment (m)
+	elevation : number -- vertical height at this point of intersection (m)
 end
 
-local record Profile
-	points : {Point}
-	grades : {number} -- dz/ds at each point
+local enum ProfileSegmentKind
+	"grade"
+	"parabola"
+end
+
+-- A single piece of a vertical alignment profile, either a constant grade or a symmetric
+-- quadratic vertical parabola.
+local record ProfileSegment
+	kind : ProfileSegmentKind
+	startStation : number
+	length : number
+	startElevation : number
+	grade : number -- grade segments only
+	startGrade : number -- parabola segments only
+	endGrade : number -- parabola segments only
+end
+
+-- An ordered sequence of vertical alignment segments forming a continuous profile.
+local record ProfilePath
+	segments : {ProfileSegment}
+end
+
+-- Vertical design policy governing the radius of parabolic vertical curves.
+local record ProfilePolicy
+	maxVerticalAccel : number -- m/s^2; <= 0 disables speed-based formula
+	designSpeed : number -- m/s; default speed at each PVI and upper cap on per-PVI speeds when > 0
+	minVerticalRadius : number -- m; floors V^2 / maxVerticalAccel; <= 0 disables floor
 end
 
 local record ProfileMod
-	Point : Point
-	Profile : Profile
-	solve : function(points : {Point}, g0 : number, gN : number) : Profile, string
-	heightAt : function(p : Profile, s : number) : number
-	gradeAt : function(p : Profile, s : number) : number
-	sample : function(p : Profile, ss : {number}) : {number}, {number}
+	PVI : PVI
+	ProfileSegmentKind : ProfileSegmentKind
+	ProfileSegment : ProfileSegment
+	ProfilePath : ProfilePath
+	ProfilePolicy : ProfilePolicy
+	DEFAULT_POLICY : ProfilePolicy
+
+	segmentEndStation : function(seg : ProfileSegment) : number
+	segmentElevationAt : function(seg : ProfileSegment, u : number) : number
+	segmentGradeAt : function(seg : ProfileSegment, u : number) : number
+	segmentCurvatureAt : function(seg : ProfileSegment, u : number) : number
+	length : function(path : ProfilePath) : number
+	elevationAt : function(path : ProfilePath, s : number) : number
+	gradeAt : function(path : ProfilePath, s : number) : number
+	curvatureAt : function(path : ProfilePath, s : number) : number
+	verticalRadius : function(policy : ProfilePolicy, speed : number) : number
+	buildProfile : function(pvis : {PVI}, policy : ProfilePolicy, pviSpeeds ?: {integer : number}) : ProfilePath
+
+	-- Mod-facing helpers (clamping tiny boundary noise and extracting segment breaks)
+	elevationAtClamped : function(path : ProfilePath, s : number) : number
+	gradeAtClamped : function(path : ProfilePath, s : number) : number
+	sample : function(path : ProfilePath, ss : {number}) : {number}, {number}
+	boundaries : function(path : ProfilePath) : {number}
 end
 
 local M : ProfileMod = {}
 
--- The grades at the points, or nil and why not. Needs two points or more with strictly
--- increasing chainage. An end grade g0 or gN nil is free (a ground end): freeEnd. Interior
--- point i, between spans of length h1, h2 with chord grades d1, d2:
--- 0 if d1 and d2 differ in sign or either is 0, else the harmonic mean of d1 and d2 weighted
---   w1 = 2 h2 + h1, w2 = h2 + 2 h1:  (w1 + w2) / g = w1 / d1 + w2 / d2
--- which keeps |g| within 3 |d| on both sides, so each span between interior points is monotone.
--- The grade at a free end, from its span (length h1, chord grade d1) and the next (h2, d2; nil with
--- no next span): the one-sided three-point formula ((2 h1 + h2) d1 - h1 d2) / (h1 + h2), 0 when
--- it points away from d1, and at most 3 d1 when the profile turns back at the next point. So the
--- end span is monotone (both its grades within 3 d1 and of d1's sign, or 0), like the interior.
--- With one span, the chord grade.
-local function freeEnd(h1 : number, d1 : number, h2 : number, d2 : number) : number
-	if h2 == nil then return d1 end
-	local g = ((2 * h1 + h2) * d1 - h1 * d2) / (h1 + h2)
-	if g * d1 <= 0 then return 0 end
-	if d1 * d2 < 0 and math.abs(g) > 3 * math.abs(d1) then return 3 * d1 end
-	return g
+M.DEFAULT_POLICY = {
+	maxVerticalAccel = 0.3,
+	designSpeed = geometry.DEFAULT_PARAMS.maxDesignSpeed,
+	minVerticalRadius = 500.0,
+}
+
+local function abs(x : number) : number
+	if x < 0 then return -x end
+	return x
 end
 
-function M.solve(points : {Point}, g0 : number, gN : number) : Profile, string
-	local n = #points
-	if n < 2 then return nil, "a profile needs two points" end
-	local h, d : {number}, {number} = {}, {}
-	for i = 1, n - 1 do
-		h[i] = points[i + 1].s - points[i].s
-		if not (h[i] > 0) then return nil, "elevation points out of order at " .. i end
-		d[i] = (points[i + 1].z - points[i].z) / h[i]
+---------------------------------------------------------------------- ProfileSegment
+
+function M.segmentEndStation(seg : ProfileSegment) : number
+	return seg.startStation + seg.length
+end
+
+function M.segmentElevationAt(seg : ProfileSegment, u : number) : number
+	if seg.kind == "grade" then
+		return seg.startElevation + seg.grade * u
 	end
-	local g : {number} = { g0 or freeEnd(h[1], d[1], h[2], d[2]) }
-	for i = 2, n - 1 do
-		local d1, d2 = d[i - 1], d[i]
-		if d1 * d2 <= 0 then
-			g[i] = 0
-		else
-			local w1, w2 = 2 * h[i] + h[i - 1], h[i] + 2 * h[i - 1]
-			g[i] = (w1 + w2) / (w1 / d1 + w2 / d2)
+	return seg.startElevation + seg.startGrade * u + (seg.endGrade - seg.startGrade) / (2 * seg.length) * (u * u)
+end
+
+function M.segmentGradeAt(seg : ProfileSegment, u : number) : number
+	if seg.kind == "grade" then
+		return seg.grade
+	end
+	return seg.startGrade + (seg.endGrade - seg.startGrade) / seg.length * u
+end
+
+function M.segmentCurvatureAt(seg : ProfileSegment, _u : number) : number
+	if seg.kind == "grade" then
+		return 0
+	end
+	return (seg.endGrade - seg.startGrade) / seg.length
+end
+
+---------------------------------------------------------------------- ProfilePath
+
+function M.length(path : ProfilePath) : number
+	local acc = 0.0
+	for _, seg in ipairs(path.segments) do
+		acc = acc + seg.length
+	end
+	return acc
+end
+
+local function sampleAt(f : function(ProfileSegment, number) : number, path : ProfilePath, s : number) : number
+	for _, seg in ipairs(path.segments) do
+		if seg.startStation <= s and s <= M.segmentEndStation(seg) then
+			return f(seg, s - seg.startStation)
 		end
 	end
-	g[n] = gN or freeEnd(h[n - 1], d[n - 1], h[n - 2], d[n - 2])
-	return { points = points, grades = g }, nil
+	return nil
 end
 
--- The span s falls in: the last one starting at or before s (the first before the start).
-local function span(p : Profile, s : number) : integer
-	local i = 1
-	while i < #p.points - 1 and s >= p.points[i + 1].s do i = i + 1 end
-	return i
+function M.elevationAt(path : ProfilePath, s : number) : number
+	return sampleAt(M.segmentElevationAt, path, s)
 end
 
--- Where s sits in its span: the span, t in [0, 1] and the span's length. s outside the profile
--- counts as its end (only float noise puts a node there).
-local function locate(p : Profile, s : number) : integer, number, number
-	local pts = p.points
-	s = math.max(pts[1].s, math.min(pts[#pts].s, s))
-	local i = span(p, s)
-	local h = pts[i + 1].s - pts[i].s
-	return i, (s - pts[i].s) / h, h
+function M.gradeAt(path : ProfilePath, s : number) : number
+	return sampleAt(M.segmentGradeAt, path, s)
 end
 
-function M.heightAt(p : Profile, s : number) : number
-	local i, t, h = locate(p, s)
-	local a, b = p.points[i], p.points[i + 1]
-	local t2, t3 = t * t, t * t * t
-	return (2 * t3 - 3 * t2 + 1) * a.z + (t3 - 2 * t2 + t) * h * p.grades[i]
-		+ (-2 * t3 + 3 * t2) * b.z + (t3 - t2) * h * p.grades[i + 1]
+function M.curvatureAt(path : ProfilePath, s : number) : number
+	return sampleAt(M.segmentCurvatureAt, path, s)
 end
 
-function M.gradeAt(p : Profile, s : number) : number
-	local i, t, h = locate(p, s)
-	local a, b = p.points[i], p.points[i + 1]
-	local t2 = t * t
-	return (6 * t2 - 6 * t) * (a.z - b.z) / h + (3 * t2 - 4 * t + 1) * p.grades[i] + (3 * t2 - 2 * t) * p.grades[i + 1]
+---------------------------------------------------------------------- ProfilePolicy & buildProfile
+
+function M.verticalRadius(policy : ProfilePolicy, speed : number) : number
+	if policy.maxVerticalAccel > 0 and speed > 0 then
+		return math.max(policy.minVerticalRadius, speed * speed / policy.maxVerticalAccel)
+	end
+	return policy.minVerticalRadius
 end
 
--- Heights and grades at the chainages ss (each node's s).
-function M.sample(p : Profile, ss : {number}) : {number}, {number}
+local function filterIncreasingPVIs(pvis : {PVI}, pviSpeeds : {integer : number}) : {PVI}, {integer : number}
+	local kept : {PVI} = {}
+	local keptSpeeds : {integer : number} = {}
+	for i = 1, #pvis do
+		local p = pvis[i]
+		local spd = pviSpeeds ~= nil and pviSpeeds[i] or nil
+		if #kept == 0 or kept[#kept].station < p.station then
+			local idx = #kept + 1
+			kept[idx] = p
+			if spd ~= nil then keptSpeeds[idx] = spd end
+		end
+	end
+	return kept, keptSpeeds
+end
+
+function M.buildProfile(pvis : {PVI}, policy : ProfilePolicy, pviSpeeds ?: {integer : number}) : ProfilePath
+	local kept, keptSpeeds = filterIncreasingPVIs(pvis, pviSpeeds)
+	local n = #kept
+	if n < 2 then return { segments = {} } end
+	local legLengths : {number} = {}
+	local grades : {number} = {}
+	for k = 1, n - 1 do
+		local a, b = kept[k], kept[k + 1]
+		legLengths[k] = b.station - a.station
+		grades[k] = (b.elevation - a.elevation) / (b.station - a.station)
+	end
+	local asks : {integer : number} = {}
+	for i = 2, n - 1 do
+		local gIn = grades[i - 1]
+		local gOut = grades[i]
+		local spd = keptSpeeds[i]
+		local effSpeed : number
+		if spd ~= nil then
+			effSpeed = policy.designSpeed > 0 and math.min(spd, policy.designSpeed) or spd
+		else
+			effSpeed = policy.designSpeed
+		end
+		local rV = M.verticalRadius(policy, effSpeed)
+		if gOut ~= gIn and rV > 0 then
+			asks[i] = rV * abs(gOut - gIn) / 2
+		end
+	end
+	local budgets = geometry.resolveSharedLegs(legLengths, asks)
+	local function budgetHalfLen(i : integer) : number
+		local t = budgets[i]
+		if t ~= nil and t > 0 then return t end
+		return 0
+	end
+	local segs : {ProfileSegment} = {}
+	for k = 1, n - 1 do
+		local a, b = kept[k], kept[k + 1]
+		local g = grades[k]
+		local tStart = budgetHalfLen(k)
+		local tEnd = budgetHalfLen(k + 1)
+		local sStart = a.station + tStart
+		local sEnd = b.station - tEnd
+		local gradeLen = sEnd - sStart
+		if 0 < gradeLen then
+			segs[#segs + 1] = {
+				kind = "grade",
+				startStation = sStart,
+				length = gradeLen,
+				startElevation = a.elevation + g * tStart,
+				grade = g,
+			}
+		end
+		if k + 1 < n and 0 < tEnd then
+			local gNext = grades[k + 1]
+			segs[#segs + 1] = {
+				kind = "parabola",
+				startStation = b.station - tEnd,
+				length = 2 * tEnd,
+				startElevation = b.elevation - g * tEnd,
+				startGrade = g,
+				endGrade = gNext,
+			}
+		end
+	end
+	return { segments = segs }
+end
+
+---------------------------------------------------------------------- Mod-facing helpers
+
+-- Find the segment and clamped local offset u in [0, seg.length] for station s on a non-empty
+-- ProfilePath, clamping stations outside [first.startStation, last.endStation] and bridging any
+-- 1-ULP gap between consecutive segments.
+local function locateClamped(path : ProfilePath, s : number) : ProfileSegment, number
+	local segs = path.segments
+	local n = #segs
+	if n == 0 then return nil, 0 end
+	local s0 = segs[1].startStation
+	local s1 = M.segmentEndStation(segs[n])
+	s = math.max(s0, math.min(s1, s))
+	for i = 1, n - 1 do
+		local seg = segs[i]
+		if s <= M.segmentEndStation(seg) then
+			return seg, math.max(0.0, math.min(seg.length, s - seg.startStation))
+		end
+	end
+	local last = segs[n]
+	return last, math.max(0.0, math.min(last.length, s - last.startStation))
+end
+
+function M.elevationAtClamped(path : ProfilePath, s : number) : number
+	local seg, u = locateClamped(path, s)
+	if seg == nil then return nil end
+	return M.segmentElevationAt(seg, u)
+end
+
+function M.gradeAtClamped(path : ProfilePath, s : number) : number
+	local seg, u = locateClamped(path, s)
+	if seg == nil then return nil end
+	return M.segmentGradeAt(seg, u)
+end
+
+-- Heights and grades at the chainages ss (each node's s), clamped to the profile's span.
+function M.sample(path : ProfilePath, ss : {number}) : {number}, {number}
 	local z, g : {number}, {number} = {}, {}
 	for i, s in ipairs(ss) do
-		z[i], g[i] = M.heightAt(p, s), M.gradeAt(p, s)
+		local seg, u = locateClamped(path, s)
+		if seg ~= nil then
+			z[i], g[i] = M.segmentElevationAt(seg, u), M.segmentGradeAt(seg, u)
+		end
 	end
 	return z, g
+end
+
+-- Distinct segment boundary stations (start and end of every grade and parabola: BVC/EVC) in
+-- increasing order.
+function M.boundaries(path : ProfilePath) : {number}
+	local out : {number} = {}
+	for _, seg in ipairs(path.segments) do
+		local s0, s1 = seg.startStation, M.segmentEndStation(seg)
+		if #out == 0 or s0 > out[#out] then out[#out + 1] = s0 end
+		if s1 > out[#out] then out[#out + 1] = s1 end
+	end
+	return out
 end
 
 return M

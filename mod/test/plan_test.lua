@@ -2,6 +2,7 @@
 local H = dofile("test/harness.lua")
 local P = H.mod("tg_plan")
 local E = H.mod("tg_edit")
+local Prof = H.mod("tg_profile")
 local S = H.mod("tg_structures")
 local N = H.mod("tg_ends")
 
@@ -42,9 +43,8 @@ local function sound(plan, a, b, what)
 		end
 	end
 	check(not bad, what .. ": every built piece is at least 0.1 m, with finite numbers")
-	check(near(plan.built.z[1], a.z) and near(plan.built.z[#bn], b.z)
-		and near(plan.grades[1], a.grade) and near(plan.grades[#bn], -b.grade),
-		what .. ": leaves each end at its height and its track's grade")
+	check(near(plan.built.z[1], a.z) and near(plan.built.z[#bn], b.z),
+		what .. ": starts and ends at the ends' heights")
 end
 
 -- Each built piece is one kind: the dense pieces inside it (classified afresh) all have its kind.
@@ -75,36 +75,58 @@ check(plan.info == "2000 m, straight" and plan.minRadius == math.huge and #plan.
 check(#plan.built.nodes < #plan.dense.nodes and #plan.dense.nodes == 201,
 	"valley: built in " .. (#plan.built.nodes - 1) .. " long pieces, read every STEP")
 
--- without ground there are no structures; when reading it fails, none either, and a note
+-- without ground there are no structures; track ends keep their grades via guide PVIs; a flat straight is one piece
 local bare = P.path(a, b, nil, nil, nil)
-check(bare ~= nil and bare.kinds == nil and bare.structures == nil and bare.note == nil and #bare.built.nodes == 2,
-	"no ground: no structures, a straight is one piece")
+check(bare ~= nil and bare.kinds == nil and bare.structures == nil and bare.note == nil
+	and near(bare.grades[1], a.grade) and near(bare.grades[#bare.grades], -b.grade),
+	"no ground: no structures, exact grade continuity at both track ends")
+local flatBare = P.path(N.groundEnd(0, 0, 0), N.groundEnd(2000, 0, 0), nil, nil, nil)
+check(flatBare ~= nil and #flatBare.built.nodes == 2, "no ground: a flat straight is one piece")
 local failed = P.path(a, b, nil, function() error("no terrain") end, dry)
 check(failed ~= nil and failed.kinds == nil and failed.note ~= nil and failed.note:find("no terrain") ~= nil,
 	"ground fails: still a plan, no structures, a note")
 
 ------------------------------------------------------------------ an edit with an elevation point
-local e = E.new(a, b)
+local ga, gb = N.groundEnd(0, 0, 0), N.groundEnd(2000, 0, 0)
+local e = E.new(ga, gb, nil, 30) -- designSpeed = 30 m/s -> R_v = 3000 m
 local i = E.insertElevation(e, 1500)
 assert(E.movePoint(e, i, 1500, 6, 1.0) and E.points(e)[i].z == 6)
-plan = P.path(a, b, e, valley, dry)
+plan = P.path(ga, gb, e, valley, dry)
 check(plan.info == "2000 m, 0 turns", "elevation point: an edit's info counts its turns: " .. tostring(plan.info))
-sound(plan, a, b, "elevation point")
+sound(plan, ga, gb, "elevation point")
 oneKindEach(plan, valley, "elevation point")
-check(nodeAt(plan, 1500), "elevation point: a built node at it")
-local zAt
-for k, nd in ipairs(plan.built.nodes) do if near(nd.s, 1500) then zAt = plan.built.z[k] end end
-check(zAt ~= nil and near(zAt, 6), "elevation point: the track is at its height there")
+-- gIn = 0.004, gOut = -0.012, |dg| = 0.016, T = 3000 * 0.016 / 2 = 24 m -> BVC = 1476, EVC = 1524
+local prof = assert(E.profile(e))
+check(nodeAt(plan, 1476) and nodeAt(plan, 1524) and not nodeAt(plan, 1500),
+	"elevation point: built nodes at BVC/EVC segment boundaries, not the PVI station")
+-- Every built piece's cubic Hermite reproduces the grade or parabola exactly.
+local hermiteErr = 0
+for k = 1, #plan.built.nodes - 1 do
+	local s0, s1 = plan.built.nodes[k].s, plan.built.nodes[k + 1].s
+	local h = s1 - s0
+	local z0, z1 = plan.built.z[k], plan.built.z[k + 1]
+	local g0, g1 = plan.grades[k], plan.grades[k + 1]
+	for step = 1, 9 do
+		local t = step / 10
+		local t2, t3 = t * t, t * t * t
+		local hz = (2 * t3 - 3 * t2 + 1) * z0 + (t3 - 2 * t2 + t) * h * g0
+			+ (-2 * t3 + 3 * t2) * z1 + (t3 - t2) * h * g1
+		hermiteErr = math.max(hermiteErr, math.abs(hz - Prof.elevationAtClamped(prof, s0 + t * h)))
+	end
+end
+check(hermiteErr < 1e-9, string.format("elevation point: built Hermite pieces match ProfilePath exactly (err %.3g)", hermiteErr))
 
--- an elevation point too close to a bridge's end for a node each: the elevation point has the
--- node, and the bridge ends there
-e = E.new(a, b)
-i = E.insertElevation(e, changes[1] + 0.5)
-plan = P.path(a, b, e, valley, dry)
-sound(plan, a, b, "close breaks")
+-- a vertical segment boundary too close to a bridge's end for a node each: the vertical boundary
+-- has the node, and the bridge ends there
+e = E.new(ga, gb, nil, 30)
+i = E.insertElevation(e, 621.5)
+assert(E.movePoint(e, i, 621.5, 6, 1.0))
+local bvc = Prof.boundaries(assert(E.profile(e)))[2] -- ~600.49 m, within MIN_PIECE of changes[1] = 600 m
+plan = P.path(ga, gb, e, valley, dry)
+sound(plan, ga, gb, "close breaks")
 oneKindEach(plan, valley, "close breaks")
-check(nodeAt(plan, changes[1] + 0.5) and not nodeAt(plan, changes[1]),
-	"close breaks: the elevation point 0.5 m past the bridge's end has the node")
+check(nodeAt(plan, bvc) and not nodeAt(plan, changes[1]),
+	"close breaks: the BVC 0.5 m past the bridge's end has the node")
 
 ------------------------------------------------------------------ a path with a turn
 a = endAt(0, 0, 1, 0, 0, 0)

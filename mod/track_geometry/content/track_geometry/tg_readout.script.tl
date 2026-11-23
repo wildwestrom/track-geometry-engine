@@ -45,7 +45,7 @@ local record Readout
 	curves : function(path : {geometry.Segment}) : {Curve}
 	badges : function(nodes : {alignment.Sample}, z : {number}, speeds : {number}, curves : {Curve}) : {Badge}
 	alongBadges : function(nodes : {alignment.Sample}, z : {number}, speeds : {number}, every : number) : {Badge}
-	profileBadges : function(nodes : {alignment.Sample}, p : profiles.Profile, every : number, limit ?: number) : {Badge}
+	profileBadges : function(nodes : {alignment.Sample}, p : profiles.ProfilePath, pvis : {profiles.PVI}, every : number, limit ?: number) : {Badge}
 	summary : function(nodes : {alignment.Sample}, z : {number}, speeds : {number}, trackSpeed : number, minRadius : number) : {string}
 	pieceSpeeds : function(pieceOf : {integer : integer}, m : integer, edgeSpeed : function(edge : integer) : number) : {number}
 	sketchSpeeds : function(nodes : {alignment.Sample}, curves : {Curve}, cached : function(R : number) : number, measure : function(R : number) : number, prev : {integer : number}) : {number}, {integer : number}
@@ -199,35 +199,34 @@ end
 -- height and grade, one halfway along each span with the grade there, and one every `every` m
 -- with the grade (none closer than half that to a point). A span whose grade at any of the
 -- nodes over it (its ends included) is past limit is marked too steep (none without a limit).
-function M.profileBadges(nodes : {alignment.Sample}, p : profiles.Profile, every : number, limit ?: number) : {Badge}
+function M.profileBadges(nodes : {alignment.Sample}, p : profiles.ProfilePath, pvis : {profiles.PVI}, every : number, limit ?: number) : {Badge}
 	local out : {Badge} = {}
-	if #nodes < 2 then return out end
+	if #nodes < 2 or #p.segments == 0 or #pvis < 2 then return out end
 	local turns = turning(nodes)
 	local function at(kind : string, s : number) : Badge
 		local b = badgeAt(kind, nodes, turns, s)
-		b.z, b.grade, b.steep = profiles.heightAt(p, s), profiles.gradeAt(p, s), false
+		b.z, b.grade, b.steep = profiles.elevationAtClamped(p, s), profiles.gradeAtClamped(p, s), false
 		out[#out + 1] = b
 		return b
 	end
 	local function steep(s0 : number, s1 : number) : boolean
 		if limit == nil then return false end
 		for _, nd in ipairs(nodes) do
-			if nd.s >= s0 and nd.s <= s1 and math.abs(profiles.gradeAt(p, nd.s)) > limit then return true end
+			if nd.s >= s0 and nd.s <= s1 and math.abs(profiles.gradeAtClamped(p, nd.s)) > limit then return true end
 		end
 		return false
 	end
-	local pts = p.points
-	for i, q in ipairs(pts) do
-		at("point", q.s)
-		if i < #pts then at("span", (q.s + pts[i + 1].s) / 2).steep = steep(q.s, pts[i + 1].s) end
+	for i, q in ipairs(pvis) do
+		at("point", q.station)
+		if i < #pvis then at("span", (q.station + pvis[i + 1].station) / 2).steep = steep(q.station, pvis[i + 1].station) end
 	end
-	local len = pts[#pts].s
+	local len = pvis[#pvis].station
 	local s = every
 	while s <= len - every / 2 do
 		local clear = true
-		for i, q in ipairs(pts) do
-			local mid = i < #pts and (q.s + pts[i + 1].s) / 2 or nil
-			if math.abs(q.s - s) < every / 2 or (mid ~= nil and math.abs(mid - s) < every / 2) then clear = false end
+		for i, q in ipairs(pvis) do
+			local mid = i < #pvis and (q.station + pvis[i + 1].station) / 2 or nil
+			if math.abs(q.station - s) < every / 2 or (mid ~= nil and math.abs(mid - s) < every / 2) then clear = false end
 		end
 		if clear then at("grade", s) end
 		s = s + every

@@ -105,6 +105,7 @@ local record Geometry
 	signedCurvatureAt : function(Segment, t : number) : number
 	pullback : function(dp : DesignParams, tanHalf : number, delta : number, R : number) : number
 	solveCornerParams : function(budget : number, tanHalf : number, delta : number, dp : DesignParams) : CornerParams
+	resolveSharedLegs : function(legLengths : {number}, asks : {integer : number}) : {integer : number}
 	cornerGeometry : function(a : Vec, b : Vec, c : Vec, dp : DesignParams) : CornerGeometry
 	cornerLayout : function(a : Vec, b : Vec, c : Vec, dp : DesignParams, override : number) : CornerLayout
 	cornerLayouts : function(pts : {Vec}, dp : DesignParams, overrides : {integer : number}) : {integer : CornerLayout}
@@ -379,7 +380,7 @@ local function desiredBudgets(n : integer, legLengths : {number}, geoms : {integ
 	return asks
 end
 
-local function resolveSharedLegs(legLengths : {number}, asks : {integer : number}) : {integer : number}
+function M.resolveSharedLegs(legLengths : {number}, asks : {integer : number}) : {integer : number}
 	local function share(ai : number, j : integer, k : integer) : number
 		local len = legLengths[k] or 0
 		local aj = asks[j]
@@ -447,7 +448,7 @@ local function resolvePathBudgets(pts : {Vec}, dp : DesignParams, overrides : {i
 		if g ~= nil then geoms[i] = g end
 	end
 	local asks = desiredBudgets(n, legLengths, geoms, dp, overrides)
-	return legLengths, geoms, resolveSharedLegs(legLengths, asks)
+	return legLengths, geoms, M.resolveSharedLegs(legLengths, asks)
 end
 
 -- The corners of a PI polyline, by PI index (nil at the ends and at PIs that do not curve),

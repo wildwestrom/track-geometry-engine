@@ -76,32 +76,34 @@ check(lines[2] == "Grade: -80.0 ‰ to +120.0 ‰, steepest +120.0 ‰ at 150 m"
 -- the profile's badges: at each point (ends too) and halfway along each span
 local P = H.mod("tg_profile")
 local A = H.mod("tg_alignment")
-local prof = assert(P.solve({ { s = 0, z = 0 }, { s = 100, z = 3 }, { s = 300, z = 7 } }, 0.02, 0))
-local pb = R.profileBadges(nodes, prof, 1000)
+local policy = { maxVerticalAccel = 0.3, designSpeed = 30, minVerticalRadius = 500 }
+local pvis = { { station = 0, elevation = 0 }, { station = 100, elevation = 3 }, { station = 300, elevation = 7 } }
+local prof = P.buildProfile(pvis, policy)
+local pb = R.profileBadges(nodes, prof, pvis, 1000)
 check(#pb == 5 and pb[1].kind == "point" and pb[2].kind == "span" and pb[3].kind == "point",
 	"profile badges: a point, a span, a point, ...")
-check(near(pb[2].x, 50) and near(pb[2].grade, P.gradeAt(prof, 50)) and near(pb[3].z, 3) and near(pb[5].x, 300),
+check(near(pb[2].x, 50) and near(pb[2].grade, P.gradeAtClamped(prof, 50))
+	and near(pb[3].z, P.elevationAtClamped(prof, 100)) and near(pb[5].x, 300),
 	"profile badges: on the path at their chainage, with the profile's height and grade")
-local pg = R.profileBadges(nodes, prof, 40)
+local pg = R.profileBadges(nodes, prof, pvis, 40)
 local kinds = {}
 for _, b in ipairs(pg) do kinds[b.kind] = (kinds[b.kind] or 0) + 1 end
 -- grade badges at 40..280 m, but none within 20 m of a point (0, 100, 300) or a span middle (50, 200)
 check(kinds.point == 3 and kinds.span == 2 and kinds.grade == 5 and pg[6].kind == "grade" and near(pg[6].x, 80),
 	"profile badges: every 40 m in the clear")
--- a span too steep: its steepest grade at the nodes over it (ends included) past the limit. This
--- profile peaks at +33.9 ‰ (50 m) on the first span; the second starts at +24.5 ‰ (100 m) and
--- peaks at +27.1 ‰ (140 m).
+-- a span too steep: its steepest grade at the nodes over it (ends included) past the limit.
+-- First leg grade is +30 ‰ (0..100 m), second leg grade is +20 ‰ (100..300 m).
 local function steepSpans(limit)
 	local out = {}
-	for _, b in ipairs(R.profileBadges(nodes, prof, 1000, limit)) do
+	for _, b in ipairs(R.profileBadges(nodes, prof, pvis, 1000, limit)) do
 		if b.kind == "span" then out[#out + 1] = tostring(b.steep)
 		elseif b.steep then out[#out + 1] = "not a span" end
 	end
 	return table.concat(out, ",")
 end
-check(steepSpans(0.03) == "true,false", "profile badges: the span past the limit is too steep: " .. steepSpans(0.03))
-check(steepSpans(0.02) == "true,true", "profile badges: a span past it at its first node is too steep: " .. steepSpans(0.02))
-check(steepSpans(0.04) == "false,false" and steepSpans(nil) == "false,false", "profile badges: none within the limit, or with none")
+check(steepSpans(0.025) == "true,false", "profile badges: the span past the limit is too steep: " .. steepSpans(0.025))
+check(steepSpans(0.015) == "true,true", "profile badges: both spans past a lower limit are too steep: " .. steepSpans(0.015))
+check(steepSpans(0.035) == "false,false" and steepSpans(nil) == "false,false", "profile badges: none within the limit, or with none")
 local sp = {}
 for i = 1, 30 do sp[i] = 1000 end
 sp[12] = 25 -- one slow piece, 110..120 m
@@ -229,8 +231,9 @@ check(ntx == 40 and nty == 0, "screen frame: close up, a metre is enough: " .. n
 -- a tilted camera: a metre across shows up and to the right, sqrt 8 px long; the badge still goes square to the track
 cx, cy = ccorner(50, 1, 2, -2)
 check(at(cx, cy, 455, 300 - 50 * math.sqrt(8) - 25), "curve corner: tilted camera: square to the track, the centre's distance: " .. cx .. "," .. cy)
-local curvyProf = assert(P.solve({ { s = 0, z = 0 }, { s = 120, z = 3 }, { s = 500, z = 0 } }, 0.02, 0))
-local profSides = sides(R.profileBadges(curvy, curvyProf, 1000))
+local curvyPvis = { { station = 0, elevation = 0 }, { station = 120, elevation = 3 }, { station = 500, elevation = 0 } }
+local curvyProf = P.buildProfile(curvyPvis, policy)
+local profSides = sides(R.profileBadges(curvy, curvyProf, curvyPvis, 1000))
 check(profSides == "0:-1 60:-1 120:-1 310:1 500:1", "badge sides: profile badges the same way: " .. profSides)
 check(sides(R.alongBadges(nodes, z, nil, 100), nodes) == "100:0 200:0", "badge sides: none on a path with no curve")
 

@@ -52,12 +52,20 @@ local record Turn
 	budget : number -- the curve's tangent budget the player set (m); nil: automatic
 end
 
+-- Which track end a ray-constrained guide PVI belongs to (nil for a free elevation point).
+local enum Guide
+	"start"
+	"end"
+end
+
 -- An elevation point: where along the path, as a share of its length (0..1), its height (m), and
--- when it was last placed (added or slid; of two too close, the later one gives way).
+-- when it was last placed (added or slid; of two too close, the later one gives way). A guide PVI
+-- (guide ~= nil) derives its height from its track end's grade ray instead of z.
 local record Elevation
 	f : number
 	z : number
 	seq : integer
+	guide : Guide
 end
 
 -- What an elevation point too close is too close to.
@@ -87,17 +95,26 @@ local record Sampled
 	ss : {number}
 end
 
--- A ground end moved onto track and not dropped yet: which end, and the turns as they were on the
--- ground, so the same drag can take it elsewhere.
+-- A ground end moved onto track and not dropped yet: which end, and the turns and elevation points
+-- as they were on the ground, so the same drag can take it elsewhere or restore them on ground.
 local record Held
 	first : boolean
 	turns : {Turn}
+	elevations : {Elevation}
+	placed : integer
 end
+
+-- Lookup for the game's curve speed limit (m/s) on a horizontal curve of radius R (m); nil when
+-- unknown or unavailable.
+local type CurveSpeed = function(R : number) : number
 
 local record Edit
 	a : ends.End
 	b : ends.End
 	dp : geometry.DesignParams
+	policy : profiles.ProfilePolicy
+	curveSpeed : CurveSpeed
+	pviSpeeds : {integer : number} -- last resolved per-PVI curve speeds, to detect external probe changes
 	turns : {Turn}
 	elevations : {Elevation} -- in order along the path, the ends not included
 	placed : integer -- the last elevation point placement (Elevation.seq)
@@ -151,6 +168,7 @@ local record Point
 	y : number
 	slides : boolean
 	liftable : boolean
+	guide : boolean
 	tooClose : boolean
 	near : Near
 	gap : number
@@ -174,6 +192,7 @@ end
 local record EditMod
 	Edit : Edit
 	Turn : Turn
+	CurveSpeed : CurveSpeed
 	CurveRead : CurveRead
 	Hit : Hit
 	Ray : Ray
@@ -187,7 +206,9 @@ local record EditMod
 	bracketAt : function(ray : Ray, x : number, y : number, z : number, r : number) : BracketSize
 	MIN_SPAN : number
 	STEP : number
-	new : function(a : ends.End, b : ends.End, dp ?: geometry.DesignParams) : Edit, string
+	new : function(a : ends.End, b : ends.End, dp ?: geometry.DesignParams, designSpeed ?: number, curveSpeed ?: CurveSpeed) : Edit, string
+	setDesignSpeed : function(e : Edit, speed : number) : boolean
+	setCurveSpeed : function(e : Edit, curveSpeed : CurveSpeed) : boolean
 	-- the horizontal alignment
 	turnCount : function(e : Edit) : integer
 	polyline : function(e : Edit) : {geometry.Vec}
@@ -211,11 +232,12 @@ local record EditMod
 	chainageAt : function(e : Edit, x : number, y : number) : number, number
 	hit : function(e : Edit, vertical : boolean, x : number, y : number, r : number, ray ?: Ray) : Hit
 	chainageOnRay : function(e : Edit, ray : Ray) : number, number
-	trackHeightAt : function(e : Edit, p : profiles.Profile, x : number, y : number) : number
+	trackHeightAt : function(e : Edit, p : profiles.ProfilePath, x : number, y : number) : number
 	onGround : function(e : Edit, h : Hit) : boolean
 	mouseOnTrack : function(e : Edit, x : number, y : number, ray : Ray) : number, number
 	-- the vertical profile
-	profile : function(e : Edit) : profiles.Profile, string
+	profile : function(e : Edit) : profiles.ProfilePath, string
+	activePvis : function(e : Edit) : {profiles.PVI}
 	steepest : function(e : Edit) : number
 	gradeProblem : function(e : Edit, limit : number) : string, number
 	points : function(e : Edit) : {Point}
@@ -239,6 +261,8 @@ M.BRACKET_FAR = { bar = 1.5, tip = 0.75 }
 
 -- Closest two neighbouring turns may get (m).
 local MIN_GAP = 10.0
+-- Minimum separation kept between a guide PVI and any neighbouring PVI so they never cross (m).
+local GUIDE_EPS = 1e-3
 -- Closest two elevation points may be along the path, the ends included, and both be in the
 -- profile (m). A point closer than this is too close.
 M.MIN_SPAN = 20.0
@@ -253,12 +277,90 @@ local function bumpH(e : Edit)
 	e.rev, e.hrev = e.rev + 1, e.hrev + 1
 end
 
-function M.new(a : ends.End, b : ends.End, dp ?: geometry.DesignParams) : Edit, string
+local function policyFor(dp : geometry.DesignParams, speed : number) : profiles.ProfilePolicy
+	return {
+		maxVerticalAccel = profiles.DEFAULT_POLICY.maxVerticalAccel,
+		designSpeed = (speed ~= nil and speed > 0) and speed or dp.maxDesignSpeed,
+		minVerticalRadius = profiles.DEFAULT_POLICY.minVerticalRadius,
+	}
+end
+
+local sampled : function(e : Edit) : Sampled
+local resolveEditSpeeds : function(e : Edit, curveSpeed : CurveSpeed) : {integer : number}
+
+-- The height on a track end's grade ray at fraction f along a path len long.
+local function rayHeight(a : ends.End, b : ends.End, guide : Guide, f : number, len : number) : number
+	if guide == "start" then return a.z + (a.grade or 0) * (f * len) end
+	return b.z + (b.grade or 0) * ((1 - f) * len)
+end
+
+-- The height of elevation point el along a path len long: guide PVIs always sit on their track
+-- end's grade ray (z_end + g_end * dist), free PVIs keep el.z.
+local function elevationOf(a : ends.End, b : ends.End, el : Elevation, len : number) : number
+	if el.guide ~= nil then return rayHeight(a, b, el.guide, el.f, len) end
+	return el.z
+end
+
+local function copyElevations(els : {Elevation}) : {Elevation}
+	local out : {Elevation} = {}
+	for k, el in ipairs(els) do out[k] = { f = el.f, z = el.z, seq = el.seq, guide = el.guide } end
+	return out
+end
+
+-- Initial fraction (0..1) for a new guide PVI at min(LEAD, L/3) from its end, clamped strictly
+-- outside any existing elevation points in els.
+local function guideFraction(kind : Guide, len : number, els : {Elevation}) : number
+	local d = math.min(ends.LEAD, len / 3)
+	if kind == "start" then
+		local f = len > 0 and d / len or 0
+		if #els > 0 and f >= els[1].f then f = els[1].f / 2 end
+		return f
+	end
+	local f = len > 0 and (len - d) / len or 1
+	if #els > 0 and f <= els[#els].f then f = (1 + els[#els].f) / 2 end
+	return f
+end
+
+local function makeGuide(a : ends.End, b : ends.End, kind : Guide, len : number, els : {Elevation}, seq : integer) : Elevation
+	local f = guideFraction(kind, len, els)
+	return { f = f, z = rayHeight(a, b, kind, f, len), seq = seq, guide = kind }
+end
+
+local function initGuides(a : ends.End, b : ends.End, len : number) : {Elevation}, integer
+	local els : {Elevation} = {}
+	local placed = 0
+	if ends.hasHeading(a) then
+		placed = placed + 1
+		els[#els + 1] = makeGuide(a, b, "start", len, els, placed)
+	end
+	if ends.hasHeading(b) then
+		placed = placed + 1
+		els[#els + 1] = makeGuide(a, b, "end", len, els, placed)
+	end
+	return els, placed
+end
+
+function M.new(a : ends.End, b : ends.End, dp ?: geometry.DesignParams, designSpeed ?: number, curveSpeed ?: CurveSpeed) : Edit, string
 	local pis, why = ends.initialPis(a, b)
 	if pis == nil then return nil, why end
 	local turns : {Turn} = {}
 	for i, p in ipairs(pis) do turns[i] = { pos = p } end
-	return { a = a, b = b, dp = dp or geometry.DEFAULT_PARAMS, turns = turns, elevations = {}, placed = 0, rev = 0, hrev = 0 }, why
+	local params = dp or geometry.DEFAULT_PARAMS
+	local e : Edit = { a = a, b = b, dp = params, policy = policyFor(params, designSpeed), curveSpeed = curveSpeed, pviSpeeds = {},
+		turns = turns, elevations = {}, placed = 0, rev = 0, hrev = 0 }
+	e.elevations, e.placed = initGuides(a, b, sampled(e).len)
+	e.pviSpeeds = resolveEditSpeeds(e, curveSpeed)
+	return e, why
+end
+
+-- Update the vertical profile's design speed (m/s; falls back to dp.maxDesignSpeed when unavailable).
+-- Returns true when it changed.
+function M.setDesignSpeed(e : Edit, speed : number) : boolean
+	local nextPolicy = policyFor(e.dp, speed)
+	if e.policy.designSpeed == nextPolicy.designSpeed then return false end
+	e.policy = nextPolicy
+	e.rev = e.rev + 1
+	return true
 end
 
 ------------------------------------------------------------------ the horizontal alignment
@@ -501,10 +603,20 @@ function M.moveEnd(e : Edit, i : integer, to : ends.End) : boolean
 		turns[k].pos, turns[j].pos = geometry.vec(to.x, to.y), geometry.vec(x, y)
 	end
 	if not onTrack then e.held = nil
-	elseif held == nil then e.held = { first = first, turns = before } end
+	elseif held == nil then e.held = { first = first, turns = before, elevations = copyElevations(e.elevations), placed = e.placed } end
 	if first then e.a = to else e.b = to end
 	e.turns = turns
 	bumpH(e)
+	if onTrack then
+		local els = copyElevations(e.held.elevations)
+		local g = makeGuide(e.a, e.b, first and "start" or "end", sampled(e).len, els, 0)
+		if first then table.insert(els, 1, g) else els[#els + 1] = g end
+		e.elevations = els
+		e.placed = e.held.placed
+	elseif held ~= nil then
+		e.elevations = copyElevations(held.elevations)
+		e.placed = held.placed
+	end
 	return true
 end
 
@@ -559,7 +671,7 @@ end
 
 ------------------------------------------------------------------ the path
 
-local function sampled(e : Edit) : Sampled
+sampled = function(e : Edit) : Sampled
 	local c = e.sampled
 	if c ~= nil and c.hrev == e.hrev then return c end
 	local pts, budgets = pisOf(e)
@@ -589,8 +701,8 @@ end
 
 -- The height of e's track (on its profile p) at the chainage nearest (x, y): past an end, the
 -- end's.
-function M.trackHeightAt(e : Edit, p : profiles.Profile, x : number, y : number) : number
-	return profiles.heightAt(p, (M.chainageAt(e, x, y)))
+function M.trackHeightAt(e : Edit, p : profiles.ProfilePath, x : number, y : number) : number
+	return profiles.elevationAtClamped(p, (M.chainageAt(e, x, y)))
 end
 
 -- Is the handle h (M.handles) a ground end? It sits on the ground, the rest at the track's height.
@@ -611,7 +723,7 @@ end
 -- Where the mouse is at the track's height (on e's profile p), as the legs and turns are drawn
 -- (tg_gizmos): where the ray crosses that height, found again from there (the height changes
 -- little over the step, so a few passes settle it).
-local function onTrackHeight(e : Edit, p : profiles.Profile, ray : Ray) : number, number
+local function onTrackHeight(e : Edit, p : profiles.ProfilePath, ray : Ray) : number, number
 	local x, y = ray.gx, ray.gy
 	for _ = 1, 3 do x, y = rayAtHeight(ray, M.trackHeightAt(e, p, x, y)) end
 	return x, y
@@ -665,11 +777,11 @@ function M.chainageOnRay(e : Edit, ray : Ray) : number, number
 	if p == nil or #c.nodes == 0 then return nil, math.huge end
 	local function off(s : number) : number
 		local x, y = alignment.pointAt(c.nodes, s)
-		return offRay(ray, x, y, profiles.heightAt(p, s))
+		return offRay(ray, x, y, profiles.elevationAtClamped(p, s))
 	end
 	local best, bestD = 0.0, math.huge
 	for _, nd in ipairs(c.nodes) do
-		local d = offRay(ray, nd.x, nd.y, profiles.heightAt(p, nd.s)) -- (a node is where it is: no lookup)
+		local d = offRay(ray, nd.x, nd.y, profiles.elevationAtClamped(p, nd.s)) -- (a node is where it is: no lookup)
 		if d < bestD then best, bestD = nd.s, d end
 	end
 	-- (then every 0.5 m, a STEP either side of the nearest node)
@@ -707,7 +819,7 @@ function M.hit(e : Edit, vertical : boolean, x : number, y : number, r : number,
 	-- ground under the mouse with no profile)
 	local function trackRadius(tx : number, ty : number, s : number) : number
 		if ray == nil then return r end
-		return M.grabAt(ray, tx, ty, p ~= nil and profiles.heightAt(p, s) or ray.gz, r)
+		return M.grabAt(ray, tx, ty, p ~= nil and profiles.elevationAtClamped(p, s) or ray.gz, r)
 	end
 	local function trackRadiusAt(s : number) : number
 		local tx, ty = alignment.pointAt(c.nodes, s)
@@ -723,7 +835,7 @@ function M.hit(e : Edit, vertical : boolean, x : number, y : number, r : number,
 			if d <= M.grabAt(ray, h.x, h.y, z, r) and d <= bestD then best, bestD = h, d end
 		end
 		for k, pt in ipairs(M.points(e)) do
-			if pt.liftable then
+			if pt.slides or pt.liftable then
 				consider({ kind = pt.slides and "point" or "end", i = k, s = pt.s, x = pt.x, y = pt.y }, pt.z, pt.slides and 0 or 1e-6)
 			end
 		end
@@ -810,17 +922,86 @@ local function closeness(els : {Elevation}, len : number) : {integer : Closeness
 	return close
 end
 
--- The profile through the elevation points els that are not too close: from end a at its track's
--- grade to end b (the path arrives against b's direction, so its grade there is the opposite). A
--- ground end has no grade: the profile picks its own there (tg_profile.solve).
-local function profileWith(a : ends.End, b : ends.End, els : {Elevation}, len : number) : profiles.Profile, string
+-- The active PVIs (start, elevation points not too close, end) along a path len long.
+local function activePvisWith(a : ends.End, b : ends.End, els : {Elevation}, len : number) : {profiles.PVI}
 	local close = closeness(els, len)
-	local pts : {profiles.Point} = { { s = 0, z = a.z } }
+	local pvis : {profiles.PVI} = { { station = 0, elevation = a.z } }
 	for k, el in ipairs(els) do
-		if close[k] == nil then pts[#pts + 1] = { s = el.f * len, z = el.z } end
+		if close[k] == nil then pvis[#pvis + 1] = { station = el.f * len, elevation = elevationOf(a, b, el, len) } end
 	end
-	pts[#pts + 1] = { s = len, z = b.z }
-	return profiles.solve(pts, a.grade, b.grade ~= nil and -b.grade or nil)
+	pvis[#pvis + 1] = { station = len, elevation = b.z }
+	return pvis
+end
+
+-- The arc radius (m) of the horizontal curve segment (spiral or circular arc) containing station
+-- s, or nil when s lies on a straight (or outside the path). On a boundary between two curves,
+-- takes the tighter radius.
+local function curveRadiusAt(hpath : {geometry.Segment}, s : number) : number
+	local cur = 0.0
+	local best : number = nil
+	for _, seg in ipairs(hpath) do
+		local len = geometry.length(seg)
+		if len > alignment.ZERO then
+			local segEnd = cur + len
+			if s >= cur and s <= segEnd and seg.kind ~= "straight" and seg.radius ~= nil and seg.radius > 0 then
+				local r = seg.radius
+				if best == nil or r < best then best = r end
+			end
+			cur = segEnd
+		end
+	end
+	return best
+end
+
+-- Per-PVI curve speeds for interior active PVIs (indices 2 .. #pvis - 1) whose station sits on a
+-- horizontal curve segment, capped by policy.designSpeed. Straight PVIs and unavailable/invalid
+-- probe answers are omitted so buildProfile falls back cleanly to policy.designSpeed.
+local function resolvePviSpeeds(hpath : {geometry.Segment}, pvis : {profiles.PVI}, policy : profiles.ProfilePolicy, curveSpeed : CurveSpeed) : {integer : number}
+	local speeds : {integer : number} = {}
+	if curveSpeed == nil then return speeds end
+	for i = 2, #pvis - 1 do
+		local r = curveRadiusAt(hpath, pvis[i].station)
+		if r ~= nil then
+			local ok, v = pcall(curveSpeed, r)
+			if ok and v ~= nil and v == v and v > 0 and v < math.huge then
+				speeds[i] = policy.designSpeed > 0 and math.min(v, policy.designSpeed) or v
+			end
+		end
+	end
+	return speeds
+end
+
+resolveEditSpeeds = function(e : Edit, curveSpeed : CurveSpeed) : {integer : number}
+	local c = sampled(e)
+	return resolvePviSpeeds(c.path, activePvisWith(e.a, e.b, e.elevations, c.len), e.policy, curveSpeed)
+end
+
+local function sameSpeeds(a : {integer : number}, b : {integer : number}) : boolean
+	if a == nil then return next(b) == nil end
+	for k, v in pairs(a) do if b[k] ~= v then return false end end
+	for k, v in pairs(b) do if a[k] ~= v then return false end end
+	return true
+end
+
+-- Update the horizontal curve speed lookup (m/s for radius R; nil disables per-PVI curve speeds).
+-- Returns true and bumps rev when any active interior PVI's resolved speed changed.
+function M.setCurveSpeed(e : Edit, curveSpeed : CurveSpeed) : boolean
+	e.curveSpeed = curveSpeed
+	local nextSpeeds = resolveEditSpeeds(e, curveSpeed)
+	if sameSpeeds(e.pviSpeeds, nextSpeeds) then return false end
+	e.pviSpeeds = nextSpeeds
+	e.rev = e.rev + 1
+	return true
+end
+
+-- The profile through the elevation points els that are not too close (tg_profile.buildProfile).
+local function profileWith(a : ends.End, b : ends.End, els : {Elevation}, c : Sampled, policy : profiles.ProfilePolicy, curveSpeed : CurveSpeed) : profiles.ProfilePath, string, {integer : number}
+	if not (c.len > 0) then return nil, "the path is too short", nil end
+	local pvis = activePvisWith(a, b, els, c.len)
+	local pviSpeeds = resolvePviSpeeds(c.path, pvis, policy, curveSpeed)
+	local path = profiles.buildProfile(pvis, policy, pviSpeeds)
+	if #path.segments == 0 then return nil, "a profile needs two points", nil end
+	return path, nil, pviSpeeds
 end
 
 -- e's points too close (kept until the next change).
@@ -833,15 +1014,21 @@ local function closeOf(e : Edit) : {integer : Closeness}
 	return c.close
 end
 
-function M.profile(e : Edit) : profiles.Profile, string
-	return profileWith(e.a, e.b, e.elevations, sampled(e).len)
+function M.activePvis(e : Edit) : {profiles.PVI}
+	return activePvisWith(e.a, e.b, e.elevations, sampled(e).len)
+end
+
+function M.profile(e : Edit) : profiles.ProfilePath, string
+	local path, why, speeds = profileWith(e.a, e.b, e.elevations, sampled(e), e.policy, e.curveSpeed)
+	if speeds ~= nil then e.pviSpeeds = speeds end
+	return path, why
 end
 
 -- The steepest grade of p at the chainages ss, as a magnitude, and where (the first such).
-local function steepestOf(p : profiles.Profile, ss : {number}) : number, number
+local function steepestOf(p : profiles.ProfilePath, ss : {number}) : number, number
 	local worst, at = 0.0, 0.0
 	for _, s in ipairs(ss) do
-		local g = math.abs(profiles.gradeAt(p, s))
+		local g = math.abs(profiles.gradeAtClamped(p, s))
 		if g > worst then worst, at = g, s end
 	end
 	return worst, at
@@ -871,14 +1058,16 @@ function M.points(e : Edit) : {Point}
 	local c = sampled(e)
 	local close = closeOf(e)
 	local function atEnd(en : ends.End, s : number) : Point
-		return { s = s, z = en.z, x = en.x, y = en.y, slides = false, liftable = en.kind == "ground", tooClose = false }
+		return { s = s, z = en.z, x = en.x, y = en.y, slides = false, liftable = en.kind == "ground", guide = false, tooClose = false }
 	end
 	local out : {Point} = { atEnd(e.a, 0.0) }
 	for i, el in ipairs(e.elevations) do
 		local s = el.f * c.len
 		local x, y = alignment.pointAt(c.nodes, s)
 		local cl = close[i]
-		out[i + 1] = { s = s, z = el.z, x = x, y = y, slides = true, liftable = true, tooClose = cl ~= nil, near = cl and cl.near, gap = cl and cl.gap }
+		local isGuide = el.guide ~= nil
+		out[i + 1] = { s = s, z = elevationOf(e.a, e.b, el, c.len), x = x, y = y, slides = true, liftable = not isGuide,
+			guide = isGuide, tooClose = cl ~= nil, near = cl and cl.near, gap = cl and cl.gap }
 	end
 	out[#out + 1] = atEnd(e.b, c.len)
 	return out
@@ -898,9 +1087,18 @@ function M.spacingProblem(e : Edit) : string
 	return nil
 end
 
--- The points in order along the path (of two at one spot, the one placed first comes first).
+local function guideRank(g : Guide) : integer
+	if g == "start" then return -1 end
+	if g == "end" then return 1 end
+	return 0
+end
+
+-- The points in order along the path (start guide first, end guide last; of two free points at one
+-- spot, the one placed first comes first).
 local function sortEls(els : {Elevation})
 	table.sort(els, function(a : Elevation, b : Elevation) : boolean
+		local ra, rb = guideRank(a.guide), guideRank(b.guide)
+		if ra ~= rb then return ra < rb end
 		return a.f < b.f or (a.f == b.f and a.seq < b.seq)
 	end)
 end
@@ -932,14 +1130,22 @@ local function onPath(s : number, len : number) : number
 end
 
 -- Add an elevation point at chainage s on the profile as it is (too close, when it is within
--- MIN_SPAN of an end or another point). Its index (M.points), or nil and why not.
+-- MIN_SPAN of an end or another point). Must lie strictly between any active start and end guide
+-- PVIs. Its index (M.points), or nil and why not.
 function M.insertElevation(e : Edit, s : number) : integer, string
 	local len = sampled(e).len
 	local p, why = M.profile(e)
 	if p == nil then return nil, why end
 	s = onPath(s, len)
+	local els = e.elevations
+	if #els > 0 and els[1].guide == "start" and s <= els[1].f * len then
+		return nil, "must be past the start guide point"
+	end
+	if #els > 0 and els[#els].guide == "end" and s >= els[#els].f * len then
+		return nil, "must be before the end guide point"
+	end
 	e.placed = e.placed + 1
-	local el : Elevation = { f = s / len, z = profiles.heightAt(p, s), seq = e.placed }
+	local el : Elevation = { f = s / len, z = profiles.elevationAtClamped(p, s), seq = e.placed }
 	e.elevations[#e.elevations + 1] = el
 	return put(e, #e.elevations + 1, el), nil
 end
@@ -956,26 +1162,54 @@ local function furthest(fits : function(number) : boolean) : number
 	return good
 end
 
--- Move point k (M.points) towards chainage s (an elevation point: past its neighbours too; an end
--- stays at its end) and height z. The move stops where the steepest grade at the path's nodes
--- would pass the limit (or, on a profile already past it, would get steeper); a point too close is
--- not in the profile, so only the others count until it is clear. A point slid is placed anew: of
--- two too close, it gives way. false when it cannot move at all (or its height cannot be set);
--- and the point's index after the move (the points reorder).
+-- The chainage range [lo, hi] that elevation point els[idx] may slide within: guide PVIs stay
+-- outside all free PVIs (and never cross each other), free PVIs stay strictly between any active
+-- start and end guide PVIs.
+local function slideBounds(els : {Elevation}, idx : integer, len : number) : number, number
+	local el = els[idx]
+	if el.guide == "start" then
+		local hi = #els > 1 and math.max(0, els[2].f * len - GUIDE_EPS) or len
+		return 0, hi
+	end
+	if el.guide == "end" then
+		local lo = #els > 1 and math.min(len, els[#els - 1].f * len + GUIDE_EPS) or 0
+		return lo, len
+	end
+	local lo = (#els > 0 and els[1].guide == "start") and (els[1].f * len + GUIDE_EPS) or 0
+	local hi = (#els > 0 and els[#els].guide == "end") and (els[#els].f * len - GUIDE_EPS) or len
+	if lo > hi then lo, hi = (lo + hi) / 2, (lo + hi) / 2 end
+	return lo, hi
+end
+
+-- Move point k (M.points) towards chainage s (a free elevation point: past its free neighbours too,
+-- staying between any guide PVIs; a guide PVI: slides along its end's grade ray without crossing
+-- any neighbour; an end stays at its end) and height z (ignored for guide PVIs). The move stops
+-- where the steepest grade at the path's nodes would pass the limit (or, on a profile already past
+-- it, would get steeper); a point too close is not in the profile, so only the others count until
+-- it is clear. A point slid is placed anew: of two too close, it gives way. false when it cannot
+-- move at all; and the point's index after the move (the points reorder).
 function M.movePoint(e : Edit, k : integer, s : number, z : number, limit : number) : boolean, integer
 	local p = M.points(e)[k]
-	if p == nil or not p.liftable then return false, k end
+	if p == nil or (not p.slides and not p.liftable) then return false, k end
 	local c = sampled(e)
 	local el = e.elevations[k - 1] -- (nil: an end)
-	s = p.slides and onPath(s, c.len) or p.s
+	if p.slides and el ~= nil then
+		local lo, hi = slideBounds(e.elevations, k - 1, c.len)
+		s = math.max(lo, math.min(hi, onPath(s, c.len)))
+	else
+		s = p.s
+	end
 	local seq = el == nil and 0 or s ~= p.s and e.placed + 1 or el.seq
 	local allowed = math.max(limit, M.steepest(e))
 	local function moved(t : number) : Elevation
-		return { f = (p.s + t * (s - p.s)) / c.len, z = p.z + t * (z - p.z), seq = seq }
+		local f = (p.s + t * (s - p.s)) / c.len
+		local g = el and el.guide
+		local elZ = g ~= nil and rayHeight(e.a, e.b, g, f, c.len) or (p.z + t * (z - p.z))
+		return { f = f, z = elZ, seq = seq, guide = g }
 	end
 	local t = furthest(function(t : number) : boolean
 		local a, b, els = with(e, k, moved(t))
-		local q = profileWith(a, b, els, c.len)
+		local q = profileWith(a, b, els, c, e.policy, e.curveSpeed)
 		return q ~= nil and steepestOf(q, c.ss) <= allowed
 	end)
 	if t == 0 then return false, k end
@@ -996,9 +1230,10 @@ function M.setHeight(e : Edit, k : integer, z : number) : boolean
 	return true
 end
 
--- Remove point k (M.points), an elevation point (the ends stay).
+-- Remove point k (M.points), a free elevation point (ends and guide PVIs stay).
 function M.removeElevation(e : Edit, k : integer) : boolean
-	if e.elevations[k - 1] == nil then return false end
+	local el = e.elevations[k - 1]
+	if el == nil or el.guide ~= nil then return false end
 	table.remove(e.elevations, k - 1)
 	e.rev = e.rev + 1
 	return true

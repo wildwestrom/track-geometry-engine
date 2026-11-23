@@ -97,7 +97,7 @@ do
 	local prof = assert(E.profile(st))
 	local legs = ofColor(shapes(st), "leg")
 	local ok = #legs == 1
-	for _, p in ipairs(legs[1].pts) do ok = ok and near(p[3], P.heightAt(prof, p[1])) end
+	for _, p in ipairs(legs[1].pts) do ok = ok and near(p[3], P.elevationAtClamped(prof, p[1])) end
 	check(ok and near(legs[1].pts[1][3], 100) and near(legs[1].pts[#legs[1].pts][3], 130),
 		"a leg is drawn at the profile's height along the track")
 	local g = ofColor(groundShapes(st), "leg")[1]
@@ -111,7 +111,7 @@ end
 do
 	local sl = assert(E.new(vend(0, 0, 0, 100, 0), vend(500, 400, -90, 130, 0)))
 	local prof = assert(E.profile(sl))
-	local function trackZ(x, y) return P.heightAt(prof, (E.chainageAt(sl, x, y))) end
+	local function trackZ(x, y) return P.elevationAtClamped(prof, (E.chainageAt(sl, x, y))) end
 	local ss = shapes(sl)
 	local turn = E.turn(sl, 2)
 	local tc = ofColor(ss, turn.mobility)[1]
@@ -267,17 +267,26 @@ do
 	local function vshapes(fields) fields = fields or {} fields.mode = "vertical" return shapes(v, fields, flat) end
 	local function roles(ss) local out = {} for _, s in ipairs(ss) do if s.kind == "circle" then out[#out + 1] = s.color end end return table.concat(out, " ") end
 	local idle = vshapes()
-	check(roles(idle) == "fixed ray tooClose ray groundEnd", "vertical: a track end fixed, elevation points slide, one too close, the ground end: " .. roles(idle))
-	check(roles(vshapes({ hit = { kind = "point", i = 2 } })) == "fixed hot tooClose ray groundEnd", "the point under the mouse is hot")
-	check(roles(vshapes({ hit = { kind = "track", i = 1 } })) == "fixed ray tooClose ray groundEnd", "...but not the track")
-	check(roles(vshapes({ dragEl = { i = 4 }, hit = { kind = "point", i = 2 } })) == "fixed ray tooClose hot groundEnd", "the dragged point is hot, over the one under the mouse")
-	check(roles(vshapes({ selected = 4 })) == "fixed ray tooClose selected groundEnd", "the selected point")
-	check(roles(vshapes({ selected = 4, hit = { kind = "point", i = 4 } })) == "fixed ray tooClose hot groundEnd", "hot over selected")
-	check(roles(vshapes({ hit = { kind = "point", i = 1 } })) == "fixed ray tooClose ray groundEnd", "a track end stays fixed under the mouse")
-	-- a post per point more than 0.1 m off the ground (the ground end is on it), from the ground up
-	local ok, k, posts, last = true, 0, 0, nil
+	check(roles(idle) == "fixed ray ray tooClose ray groundEnd", "vertical: a track end fixed, guide and free elevation points slide, one too close, the ground end: " .. roles(idle))
+	check(roles(vshapes({ hit = { kind = "point", i = 2 } })) == "fixed hot ray tooClose ray groundEnd", "the guide point under the mouse is hot")
+	check(roles(vshapes({ hit = { kind = "point", i = 3 } })) == "fixed ray hot tooClose ray groundEnd", "the point under the mouse is hot")
+	check(roles(vshapes({ hit = { kind = "track", i = 1 } })) == "fixed ray ray tooClose ray groundEnd", "...but not the track")
+	check(roles(vshapes({ dragEl = { i = 5 }, hit = { kind = "point", i = 3 } })) == "fixed ray ray tooClose hot groundEnd", "the dragged point is hot, over the one under the mouse")
+	check(roles(vshapes({ selected = 5 })) == "fixed ray ray tooClose selected groundEnd", "the selected point")
+	check(roles(vshapes({ selected = 2 })) == "fixed selected ray tooClose ray groundEnd", "a selected guide point is highlighted")
+	check(roles(vshapes({ selected = 5, hit = { kind = "point", i = 5 } })) == "fixed ray ray tooClose hot groundEnd", "hot over selected")
+	check(roles(vshapes({ hit = { kind = "point", i = 1 } })) == "fixed ray ray tooClose ray groundEnd", "a track end stays fixed under the mouse")
+	-- a post per point more than 0.1 m off the ground (the ground end is on it), from the ground up;
+	-- grade-tangent legs drawn before the circles and posts, connecting consecutive active PVIs
+	-- (skipping the tooClose point)
+	local ok, k, posts, last, seenCircle = true, 0, 0, nil, false
+	local vlegs = {}
 	for _, s in ipairs(idle) do
-		if s.kind == "circle" then
+		if s.color == "leg" then
+			ok = ok and not seenCircle and s.kind == "line" and s.width == W and s.step == Gz.GIZMO_STEP
+			vlegs[#vlegs + 1] = s
+		elseif s.kind == "circle" then
+			seenCircle = true
 			k, last = k + 1, s
 			ok = ok and near(s.x, pts[k].x) and near(s.y, pts[k].y) and s.z == 3 and s.r == R
 		else
@@ -286,8 +295,58 @@ do
 				and #s.pts == 2 and s.pts[1][3] == 3 and near(s.pts[2][3], pts[k].z) and near(s.pts[1][1], pts[k].x)
 		end
 	end
-	check(ok and k == #pts and posts == #pts - 1, "vertical: a circle on the ground at each point, a post up to each one off the ground")
-	check(#ofColor(idle, "leg") == 0 and #ofColor(idle, "osculating") == 0, "vertical: no legs, no osculating circles")
+	check(ok and k == #pts and posts == #pts - 1, "vertical: grade-tangent legs before circles and posts; a circle on the ground at each point, a post up to each one off the ground")
+	local active = {}
+	for _, pt in ipairs(pts) do if not pt.tooClose then active[#active + 1] = pt end end
+	local legsOk = #vlegs == #active - 1 and #active == #pts - 1
+	for i, l in ipairs(vlegs) do
+		local a, b = active[i], active[i + 1]
+		local p0, p1 = l.pts[1], l.pts[#l.pts]
+		legsOk = legsOk and #l.pts >= 2
+			and near(p0[1], a.x) and near(p0[2], a.y) and near(p0[3], a.z)
+			and near(p1[1], b.x) and near(p1[2], b.y) and near(p1[3], b.z)
+		for j, p in ipairs(l.pts) do
+			local t = (j - 1) / (#l.pts - 1)
+			legsOk = legsOk and near(p[3], a.z + t * (b.z - a.z))
+		end
+	end
+	check(legsOk, "vertical: grade-tangent legs connect consecutive active PVIs linearly in height, skipping tooClose PVIs")
+	check(#ofColor(idle, "osculating") == 0, "vertical: no osculating circles")
+	-- on a curved path with a lifted interior PVI: legs follow the horizontal curve in plan,
+	-- interpolate linearly in height, and meet at the PVI elevation above the rounded vertical curve
+	local vc = assert(E.new(vend(0, 0, 0, 100, 0), vend(500, 400, -90, 100, 0)))
+	local cpts0 = E.points(vc)
+	local midS = cpts0[#cpts0].s / 2
+	local midIdx = assert(E.insertElevation(vc, midS))
+	assert(E.setHeight(vc, midIdx, 115))
+	local cpts = E.points(vc)
+	local cprof = assert(E.profile(vc))
+	local cshapes = shapes(vc, { mode = "vertical" }, flat)
+	local clegs = ofColor(cshapes, "leg")
+	local cactive = {}
+	for _, pt in ipairs(cpts) do if not pt.tooClose then cactive[#cactive + 1] = pt end end
+	local curveOk, worstOff = #clegs == #cactive - 1, 0
+	for i, l in ipairs(clegs) do
+		local a, b = cactive[i], cactive[i + 1]
+		for j, p in ipairs(l.pts) do
+			local t = (j - 1) / (#l.pts - 1)
+			local sWant = a.s + t * (b.s - a.s)
+			local zWant = a.z + t * (b.z - a.z)
+			local sGot, off = E.chainageAt(vc, p[1], p[2])
+			worstOff = math.max(worstOff, off)
+			curveOk = curveOk and math.abs(sGot - sWant) < 1e-2 and off < 0.1 and near(p[3], zWant)
+		end
+	end
+	-- find the lifted interior PVI in cactive and check legs meet at its post top (above the vertical curve)
+	local midActive = nil
+	for i, pt in ipairs(cactive) do if near(pt.z, 115) then midActive = i end end
+	local apex = midActive and cactive[midActive]
+	local curveZ = apex and P.elevationAtClamped(cprof, apex.s)
+	local inLegEnd = midActive and clegs[midActive - 1] and clegs[midActive - 1].pts[#clegs[midActive - 1].pts]
+	local outLegStart = midActive and clegs[midActive] and clegs[midActive].pts[1]
+	check(curveOk and apex ~= nil and inLegEnd ~= nil and outLegStart ~= nil
+		and near(inLegEnd[3], 115) and near(outLegStart[3], 115) and curveZ < 115 - 0.1,
+		string.format("vertical curved path: legs follow the horizontal curve (worst off %.4f m) and meet at the lifted PVI apex above the parabolic curve", worstOff))
 	-- with no profile, nothing (the stub stands in for a profile that cannot be solved)
 	check(#withoutProfile(vshapes) == 0, "vertical with no profile: nothing")
 	-- with the eye known, each circle at its point's own grab radius: 1 km over point 2, 20 m
@@ -335,7 +394,7 @@ check(table.concat(kinds, " ") == "straight in out straight" and #zc == 1
 -- on a sloped profile a circle sits at the track's height at its arc's midpoint, not the ground's
 local sl = assert(E.new(vend(0, 0, 0, 100, 0), vend(500, 400, -90, 130, 0)))
 local slc = Gz.circles(sl)[1]
-local slz = P.heightAt(assert(E.profile(sl)), (E.chainageAt(sl, slc.mx, slc.my)))
+local slz = P.elevationAtClamped(assert(E.profile(sl)), (E.chainageAt(sl, slc.mx, slc.my)))
 check(slc.z ~= nil and math.abs(slc.z - slz) < 1e-3 and slz > 101 and slz < 129,
 	"a sloped profile: the circle sits at the profile's height at its arc's midpoint")
 -- ...and a corner of no sweep, at the profile's height where its spirals meet
@@ -343,7 +402,7 @@ local zsl = assert(E.new(vend(0, 0, 0, 100, 0), vend(150 + 150 * math.cos(math.r
 local zsp = E.path(zsl)
 local meet = G.length(zsp[1]) + G.length(zsp[2])
 local zslz = Gz.circles(zsl)[1].z
-check(zsp[3].kind == "out" and zslz ~= nil and math.abs(zslz - P.heightAt(assert(E.profile(zsl)), meet)) < 1e-9
+check(zsp[3].kind == "out" and zslz ~= nil and math.abs(zslz - P.elevationAtClamped(assert(E.profile(zsl)), meet)) < 1e-9
 	and zslz > 100 and zslz < 110,
 	"a sloped corner of no sweep: the circle sits at the profile's height where its spirals meet")
 -- drawn: at that height, as wide as the other gizmos, in steps that grow with the zoom
@@ -399,7 +458,7 @@ do
 	for _, l in ipairs(spiralsOf(sl)) do
 		for _, p in ipairs(l.pts) do
 			n = n + 1
-			ok = ok and math.abs(p[3] - P.heightAt(prof, (E.chainageAt(sl, p[1], p[2])))) < 1e-2
+			ok = ok and math.abs(p[3] - P.elevationAtClamped(prof, (E.chainageAt(sl, p[1], p[2])))) < 1e-2
 		end
 	end
 	check(ok and n > 4, "a sloped route: every spiral point at the profile's height")

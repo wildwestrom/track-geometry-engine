@@ -765,30 +765,37 @@ local function elevationSection() : TreeNodeId
 				children = { line("Elevation"), line("Select an elevation point or a ground end."), matchList({}, nil) } },
 		}
 	end
-	local rows : {TreeNodeId} = {
-		line("Elevation: " .. sel.name),
-		builtin.BoxLayout{
-			orientation = builtin.type.Orientation.Horizontal,
-			children = {
-				line("Height (m) "),
-				builtin.DoubleSpinBox{
-					step = HEIGHT_STEP, -- (no min or max: the box's own clamp is only the UI's)
-					value = sel.z,
-					onValueChange = function(v : number)
-						-- (a drag owns the height while it lasts; the box only follows it. Within half a
-						-- step of the height it was given is the box echoing it, maybe rounded to its
-						-- step: taking that would move the point by itself. And the box is for the selection
-						-- it was drawn for.)
-						if sessions.dragging(sess) or v == nil or v ~= v or sess.selected ~= sel.i then return end
-						if math.abs(v - sel.z) < HEIGHT_STEP / 2 then return end
-						run(sessions.setHeight(sess, v))
-					end,
+	local heightControls = builtin.BoxLayout{
+		orientation = builtin.type.Orientation.Vertical,
+		children = {
+			builtin.BoxLayout{
+				orientation = builtin.type.Orientation.Horizontal,
+				children = {
+					line("Height (m) "),
+					builtin.DoubleSpinBox{
+						step = HEIGHT_STEP, -- (no min or max: the box's own clamp is only the UI's)
+						value = sel.z,
+						onValueChange = function(v : number)
+							-- (a drag owns the height while it lasts; the box only follows it. Within half a
+							-- step of the height it was given is the box echoing it, maybe rounded to its
+							-- step: taking that would move the point by itself. And the box is for the selection
+							-- it was drawn for.)
+							if sessions.dragging(sess) or v == nil or v ~= v or sess.selected ~= sel.i then return end
+							if math.abs(v - sel.z) < HEIGHT_STEP / 2 then return end
+							run(sessions.setHeight(sess, v))
+						end,
+					},
 				},
 			},
+			matchList(sessions.matchSources(sess), sel.i),
 		},
-		matchList(sessions.matchSources(sess), sel.i),
+	}
+	local rows : {TreeNodeId} = {
+		line("Elevation: " .. sel.name),
+		sel.liftable and heightControls or builtin.WithComponentParams{ enabled = false, item = heightControls },
 		line(sel.grade ~= nil and string.format("Grade: %+.1f ‰", sel.grade * 1000) or "Grade: —"),
 	}
+	if sel.guide then rows[#rows + 1] = line("Guide point: height follows the track end's grade.") end
 	if sel.steep ~= nil then rows[#rows + 1] = line(cap(sel.steep)) end
 	if sel.tooClose then
 		rows[#rows + 1] = line(string.format("Too close: not in the profile until %.0f m clear.", edits.MIN_SPAN))
@@ -988,7 +995,7 @@ local function updateVBadges()
 	if key == tool.vbadgesKey and tool.vbadges ~= nil then return end
 	tool.vbadgesKey = key
 	local prof = edits.profile(e)
-	tool.vbadges = prof ~= nil and readout.profileBadges(edits.nodes(e), prof, plans.BADGE_EVERY, gradeLimit()) or nil
+	tool.vbadges = prof ~= nil and readout.profileBadges(edits.nodes(e), prof, edits.activePvis(e), plans.BADGE_EVERY, gradeLimit()) or nil
 end
 
 ------------------------------------------------------------------ the session's adapter
@@ -1033,7 +1040,10 @@ local function worldNow(fresh : boolean) : sessions.World
 		ray = { ex = eye.x, ey = eye.y, ez = eye.z, gx = tool.terrX, gy = tool.terrY, gz = tool.terrZ }
 	end
 	return { terrX = tool.terrX, terrY = tool.terrY, terrZ = tool.terrZ, ray = ray, hovered = tool.hovered,
-		cameraDist = tool.camDist, shift = shiftHeld, gradeLimit = gradeLimit, snap = snapEnd, endThere = world.joinable }
+		cameraDist = tool.camDist, shift = shiftHeld, gradeLimit = gradeLimit,
+		trackSpeed = function() : number return trackType().speed end,
+		curveSpeed = sess.drag ~= nil and gameSpeeds.cached or gameSpeeds.speedAt,
+		snap = snapEnd, endThere = world.joinable }
 end
 
 -- Carry out what the session asks for.

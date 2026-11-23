@@ -352,8 +352,8 @@ check(eh2 ~= nil and eh2.kind == "pi", "drag end: a press on the turn next to a 
 local gz = assert(E.new(gnd(0, 0, 12), { kind = "track", x = 600, y = 0, dx = -1, dy = 0, z = 2, grade = 0 }))
 local gzs = E.points(gz)
 local gp = E.profile(gz)
-check(gzs[1].z == 12 and gzs[2].z == 2 and gp ~= nil and math.abs(H.mod("tg_profile")
-	.heightAt(gp, 0) - 12) < 1e-9, "a ground end: the profile starts at its height")
+check(gzs[1].z == 12 and gzs[#gzs].z == 2 and gp ~= nil and math.abs(H.mod("tg_profile")
+	.elevationAtClamped(gp, 0) - 12) < 1e-9, "a ground end: the profile starts at its height")
 
 -- The vertical profile: elevation points between the ends.
 local function vend(x, y, deg, z, grade)
@@ -361,16 +361,15 @@ local function vend(x, y, deg, z, grade)
 	e.z, e.grade = z, grade
 	return e
 end
-local v = assert(E.new(vend(0, 0, 0, 100, 0), vend(1000, 0, 180, 110, 0)))
+local v = assert(E.new(gnd(0, 0, 100), gnd(1000, 0, 110)))
 local before = E.profile(v)
 local i = E.insertElevation(v, 400)
 local after = E.profile(v)
--- the monotone profile picks its own grade at the new point, so the curve around it reshapes a
--- little (0.42 m at most here), but the point is where the profile was
+-- inserting an elevation point on a straight grade adds a collinear PVI, leaving the profile unchanged
 local Pv = H.mod("tg_profile")
 local moved = 0
-for s = 0, 1000, 10 do moved = math.max(moved, math.abs(Pv.heightAt(before, s) - Pv.heightAt(after, s))) end
-check(i == 2 and math.abs(Pv.heightAt(after, 400) - Pv.heightAt(before, 400)) < 1e-9 and moved < 0.5,
+for s = 0, 1000, 10 do moved = math.max(moved, math.abs(Pv.elevationAtClamped(before, s) - Pv.elevationAtClamped(after, s))) end
+check(i == 2 and math.abs(Pv.elevationAtClamped(after, 400) - Pv.elevationAtClamped(before, 400)) < 1e-9 and moved < 1e-9,
 	string.format("an added elevation point sits on the profile; the rest moves %.2f m at most", moved))
 check(E.insertElevation(v, 700) == 3 and #E.points(v) == 4 and E.points(v)[2].s < E.points(v)[3].s, "points stay in order")
 check(not E.points(v)[2].tooClose and not E.points(v)[3].tooClose and E.spacingProblem(v) == nil, "points 20 m clear are not too close")
@@ -389,7 +388,7 @@ local P = H.mod("tg_profile")
 local function zs(e)
 	local p = assert(E.profile(e))
 	local out = {}
-	for s = 0, length(e), 10 do out[#out + 1] = P.heightAt(p, s) end
+	for s = 0, length(e), 10 do out[#out + 1] = P.elevationAtClamped(p, s) end
 	return out
 end
 local function sameZ(a, b)
@@ -397,12 +396,12 @@ local function sameZ(a, b)
 	for k = 1, #a do if math.abs(a[k] - b[k]) > 1e-9 then return false end end
 	return true
 end
-local sp = assert(E.new(vend(0, 0, 0, 100, 0), vend(1000, 0, 180, 110, 0)))
+local sp = assert(E.new(gnd(0, 0, 100), gnd(1000, 0, 110)))
 E.insertElevation(sp, 300)
 E.insertElevation(sp, 600)
 E.movePoint(sp, 2, 300, 104, 1.0)
 E.movePoint(sp, 3, 600, 108, 1.0)
-local without2 = assert(E.new(vend(0, 0, 0, 100, 0), vend(1000, 0, 180, 110, 0)))
+local without2 = assert(E.new(gnd(0, 0, 100), gnd(1000, 0, 110)))
 E.insertElevation(without2, 300)
 E.movePoint(without2, 2, 300, 104, 1.0)
 local ok2, j = E.movePoint(sp, 3, 312, 108, 1.0)
@@ -419,7 +418,7 @@ q = E.points(sp)
 check(ok2 and j == 2 and math.abs(q[2].s - 250) < 1e-9 and q[2].z == 108 and q[3].z == 104 and q[2].s < q[3].s,
 	"a point dragged past its neighbour comes before it")
 check(not q[2].tooClose and not q[3].tooClose and E.spacingProblem(sp) == nil, "dragged clear: no point too close")
-local swapped = assert(E.new(vend(0, 0, 0, 100, 0), vend(1000, 0, 180, 110, 0)))
+local swapped = assert(E.new(gnd(0, 0, 100), gnd(1000, 0, 110)))
 E.insertElevation(swapped, 250); E.insertElevation(swapped, 300)
 E.movePoint(swapped, 2, 250, 108, 1.0); E.movePoint(swapped, 3, 300, 104, 1.0)
 check(sameZ(zs(sp), zs(swapped)), "the profile follows the new order")
@@ -437,7 +436,7 @@ check(k == 4 and E.points(sp)[4].tooClose and not E.points(sp)[3].tooClose,
 check(E.removeElevation(sp, 4) and E.removeElevation(sp, 2) and E.spacingProblem(sp) == nil, "removing the points too close clears it")
 
 -- the grade limit still stops a drag, also once the point leaves the too-close range
-local gl = assert(E.new(vend(0, 0, 0, 100, 0), vend(1000, 0, 180, 100, 0)))
+local gl = assert(E.new(gnd(0, 0, 100), gnd(1000, 0, 100)))
 E.insertElevation(gl, 500)
 E.insertElevation(gl, 510) -- too close to the first
 ok2 = E.movePoint(gl, 3, 510, 160, 0.04) -- too close, so no grade check: its height goes through
@@ -447,15 +446,14 @@ local g2 = E.points(gl)[j]
 check(ok2 and E.steepest(gl) <= 0.04 + 1e-9, string.format("dragged clear, the grade limit stops it (%.1f permille)", E.steepest(gl) * 1000))
 check(g2.tooClose or g2.s < 700, "it does not reach where the profile would be too steep: " .. string.format("%.1f m", g2.s))
 -- a point too close, slid clear and raised at once: once clear, the grade limit stops it
-local gc = assert(E.new(vend(0, 0, 0, 100, 0), vend(1000, 0, 180, 100, 0)))
+local gc = assert(E.new(gnd(0, 0, 100), gnd(1000, 0, 100)))
 E.insertElevation(gc, 500)
 E.insertElevation(gc, 510)
--- (at 20 ‰ it cannot clear at all: a 20 m span peaking at the point is 1.5 × its chord grade)
-ok2, j = E.movePoint(gc, 3, 700, 106, 0.03)
+ok2, j = E.movePoint(gc, 3, 700, 109, 0.03)
 local g3 = E.points(gc)[j]
 check(ok2 and not g3.tooClose and g3.s > 520 and g3.s < 700 and E.steepest(gc) <= 0.03 + 1e-9,
 	string.format("cleared, the grade limit stops it (%.1f m, %.1f m high, %.1f permille)", g3.s, g3.z, E.steepest(gc) * 1000))
-local gr = assert(E.new(vend(0, 0, 0, 100, 0), vend(1000, 0, 180, 100, 0)))
+local gr = assert(E.new(gnd(0, 0, 100), gnd(1000, 0, 100)))
 E.insertElevation(gr, 500); E.insertElevation(gr, 519.6)
 check(E.spacingProblem(gr) == "elevation point 2 is too close to its neighbour (19 m, needs 20 m)", "a gap is rounded down: " .. tostring(E.spacingProblem(gr)))
 
@@ -471,7 +469,7 @@ check(math.abs(sx - 333) < 1e-6 and math.abs(sy - 4) < 1e-6, "chainage and dista
 
 -- the track up on its profile (a bridge, 100 m over the ground at 0): the mouse's ground point is
 -- behind it, so it is picked along the view ray, from the eye through the ground point
-local hi = assert(E.new(vend(0, 0, 0, 100, 0), vend(1000, 0, 180, 100, 0)))
+local hi = assert(E.new(gnd(0, 0, 100), gnd(1000, 0, 100)))
 -- the eye at (500, -300, 400) looks through the track at (500, 0, 100) to the ground at (500, 100, 0)
 local ray = { ex = 500, ey = -300, ez = 400, gx = 500, gy = 100, gz = 0 }
 check(E.hit(hi, true, 500, 100, 5) == nil, "on the ground alone, the mouse is 100 m off the raised track")
@@ -537,7 +535,7 @@ for _, h in ipairs(E.handles(fc)) do if h.kind == "entry" then fcEntry = h end e
 local bx, by = fcEntry.x - fcEntry.uy * 60, fcEntry.y + fcEntry.ux * 60 -- (60 m along its bar, off the leg)
 check(hitAt(fc, bx, by, 5) == nil and same(E.hit(fc, false, bx, by, 5, eyeRay(bx, by, 3000)), fcEntry),
 	"a bracket's bar scales with its own radius: 60 m out along it, 3 km from the eye")
-local fv = assert(E.new(vend(0, 0, 0, 0, 0), vend(1000, 0, 180, 0, 0)))
+local fv = assert(E.new(gnd(0, 0, 0), gnd(1000, 0, 0)))
 E.insertElevation(fv, 500)
 local fvh = E.hit(fv, true, 500, 20, 5, eyeRay(500, 20, 1500))
 check(E.hit(fv, true, 500, 20, 5) == nil and fvh ~= nil and fvh.kind == "point" and fvh.i == 2,
@@ -552,28 +550,28 @@ end
 local f = E.new(vend(0, 0, 0, 100, 0), vend(1000, 0, 180, 110, 0))
 E.insertOnLeg(f, 1, 500, 0)
 E.insertElevation(f, 300)
-local frac0, hrev0, fn0 = E.points(f)[2].s / length(f), f.hrev, E.nodes(f)
+local frac0, hrev0, fn0 = E.points(f)[3].s / length(f), f.hrev, E.nodes(f)
 E.movePi(f, 3, 500, 150)
-local fp = E.points(f)[2]
+local fp = E.points(f)[3]
 local ax, ay = A.pointAt(E.nodes(f), fp.s)
 check(f.hrev > hrev0 and E.nodes(f) ~= fn0 and length(f) > 1000 + 1, "moving a turn samples the path again")
 check(math.abs(fp.s / length(f) - frac0) < 1e-9 and math.abs(ax - fp.x) + math.abs(ay - fp.y) < 1e-6,
 	"an elevation point keeps its place along the path and sits on it after a turn moves")
 
--- a profile that starts over the limit: moves may not make it steeper, but may ease it (the
--- point at 100 m sits at 4.7 m; raising it towards 7 m eases the climb after it)
-local w = assert(E.new(vend(0, 0, 0, 0, 0), vend(400, 0, 180, 30, 0)))
+-- a profile that starts over the limit: moves may not make it steeper, but may ease it
+local w = assert(E.new(gnd(0, 0, 0), gnd(400, 0, 30)))
 E.insertElevation(w, 100)
+E.setHeight(w, 2, 2) -- pushes the second leg past the straight chord grade
 local start = E.steepest(w)
 check(start > 0.04, "steep profile: over the limit to begin with")
 E.movePoint(w, 2, 100, E.points(w)[2].z - 20, 0.04)
 check(E.steepest(w) <= start + 1e-9, "steep profile: a move does not make it steeper")
 local z0 = E.points(w)[2].z
-E.movePoint(w, 2, 100, 7, 0.04)
+E.movePoint(w, 2, 100, 7.5, 0.04)
 check(E.steepest(w) <= start + 1e-9 and E.points(w)[2].z ~= z0, "steep profile: a move towards easing it goes through")
 
 -- a height set directly goes past the limit; the profile is then too steep and says where
-local hs = assert(E.new(vend(0, 0, 0, 100, 0), vend(1000, 0, 180, 100, 0)))
+local hs = assert(E.new(gnd(0, 0, 100), gnd(1000, 0, 100)))
 E.insertElevation(hs, 500)
 check(E.gradeProblem(hs, 0.04) == nil, "a level profile is not too steep")
 local rev1 = hs.rev
@@ -583,12 +581,12 @@ check(E.steepest(hs) > 0.04, string.format("the profile is past the limit (%.1f 
 local gp, gs = E.gradeProblem(hs, 0.04)
 local worst, worstAt = 0, 0
 for _, nd in ipairs(E.nodes(hs)) do
-	local g = math.abs(P.gradeAt(assert(E.profile(hs)), nd.s))
+	local g = math.abs(P.gradeAtClamped(assert(E.profile(hs)), nd.s))
 	if g > worst then worst, worstAt = g, nd.s end
 end
 check(gs == worstAt and gp == string.format("too steep: %d ‰ at %.0f m (limit 40 ‰)", math.ceil(worst * 1000), worstAt),
 	"why: " .. tostring(gp))
-check(not E.setHeight(hs, 3, 100), "no such point: nothing set")
+check(not E.setHeight(hs, 4, 100), "no such point: nothing set")
 -- a drag on it still does not make it steeper
 local st = E.steepest(hs)
 E.movePoint(hs, 2, 500, 200, 0.04)
@@ -616,11 +614,11 @@ check(E.hit(ge, true, 1000, 100, 5) == nil and geRay ~= nil and geRay.kind == "e
 E.insertElevation(ge, 995) -- too close to the end: the end still wins at the end
 local near = E.hit(ge, true, 1000, 0, 5)
 check(near ~= nil and near.kind == "end", "ground end: hit over a point too close to it")
-E.removeElevation(ge, 2)
+E.removeElevation(ge, 3)
 local revG = ge.rev
 check(E.setHeight(ge, last, 160) and select(2, E.ends(ge)).z == 160 and ge.b.kind == "ground" and ge.rev > revG
 	and E.points(ge)[last].z == 160, "ground end: a height set directly applies as asked")
-check(math.abs(P.heightAt(assert(E.profile(ge)), length(ge)) - 160) < 1e-9, "ground end: the profile ends at its height")
+check(math.abs(P.elevationAtClamped(assert(E.profile(ge)), length(ge)) - 160) < 1e-9, "ground end: the profile ends at its height")
 local why = E.gradeProblem(ge, 0.04)
 check(why ~= nil and E.steepest(ge) > 0.04, "ground end: too-steep checks include it: " .. tostring(why))
 check(not E.setHeight(ge, 1, 120) and ge.a.z == 100, "track end: its height stays")
@@ -629,7 +627,7 @@ check(E.movePoint(ge, last, 0, 200, 0.04) and ge.b.z > 100 and ge.b.z < 200 and 
 	and E.steepest(ge) <= 0.04 + 1e-9 and E.steepest(ge) > 0.039,
 	string.format("ground end: a height drag stops at the limit (%.1f m, %.1f permille)", ge.b.z, E.steepest(ge) * 1000))
 check(not E.movePoint(ge, 1, 0, 200, 0.04), "track end: no height drag")
--- the free grade at a ground end: no overshoot in the end span
+-- the free grade at a ground end: monotone in the end span (never dips below start)
 local gf = assert(E.new(gnd(0, 0, 0), gnd(1000, 0, 0)))
 E.insertElevation(gf, 100)
 E.setHeight(gf, 2, 1)
@@ -637,8 +635,30 @@ E.insertElevation(gf, 400)
 E.setHeight(gf, 3, 20)
 local gpf = assert(E.profile(gf))
 local dips = false
-for s = 0, 100, 1 do if P.heightAt(gpf, s) < -1e-9 or P.heightAt(gpf, s) > 1 + 1e-9 then dips = true end end
-check(not dips, "ground end: no overshoot in its span")
+for s = 0, 100, 1 do if P.elevationAtClamped(gpf, s) < -1e-9 or P.gradeAtClamped(gpf, s) < -1e-9 then dips = true end end
+check(not dips, "ground end: no dip below start in its span")
+
+-- designSpeed policy: defaults to maxDesignSpeed, uses track type top speed when set, updates curve radius
+do
+	local ds = assert(E.new(gnd(0, 0, 0), gnd(1000, 0, 0)))
+	check(ds.policy.maxVerticalAccel == 0.3 and ds.policy.minVerticalRadius == 500
+		and ds.policy.designSpeed == G.DEFAULT_PARAMS.maxDesignSpeed,
+		"policy: defaults to a_v=0.3, minR=500, designSpeed=maxDesignSpeed")
+	E.insertElevation(ds, 500)
+	E.setHeight(ds, 2, 10)
+	local pFast = assert(E.profile(ds))
+	local rev0 = ds.rev
+	check(E.setDesignSpeed(ds, 25) and ds.rev > rev0 and ds.policy.designSpeed == 25,
+		"policy: setDesignSpeed updates policy and bumps rev")
+	check(not E.setDesignSpeed(ds, 25) and ds.rev == rev0 + 1,
+		"policy: setting the same designSpeed is a no-op")
+	local pSlow = assert(E.profile(ds))
+	-- slower design speed -> smaller R_v -> shorter parabola -> higher crest near PVI
+	check(P.elevationAtClamped(pSlow, 500) > P.elevationAtClamped(pFast, 500),
+		"policy: slower designSpeed produces tighter vertical curve")
+	check(E.setDesignSpeed(ds, 0) and ds.policy.designSpeed == G.DEFAULT_PARAMS.maxDesignSpeed,
+		"policy: non-positive designSpeed falls back to maxDesignSpeed")
+end
 
 -- brackets that show their curve: each opens towards its own curve, and is picked by its shape
 -- (bk: a straight bent at turn 3, a turn added on the leg after it, curve 3 as wide as it goes:
@@ -723,4 +743,248 @@ check(E.turnIndex(sr, sr.turns[ti]) == ti and E.turnIndex(sr, {}) == nil, "turnI
 local gone = sr.turns[ti]
 sr.turns = { sr.turns[1], sr.turns[#sr.turns] }
 check(E.turnIndex(sr, gone) == nil, "turnIndex: nil once the turn is gone")
+
+-- Ray-constrained guide PVIs at track ends
+;(function()
+	local Ends = H.mod("tg_ends")
+	-- 1. Initialization: two track ends -> 2 guide PVIs at min(LEAD, L/3); one track end -> 1; two ground ends -> 0
+	local tt = assert(E.new(vend(0, 0, 0, 10, 0.02), vend(1000, 0, 180, 20, -0.01)))
+	local tpts = E.points(tt)
+	check(#tpts == 4, "guide init (track-track): 2 ends + 2 guide PVIs (" .. #tpts .. ")")
+	check(tpts[2].guide and tpts[2].slides and not tpts[2].liftable
+		and math.abs(tpts[2].s - Ends.LEAD) < 1e-6
+		and math.abs(tpts[2].z - (10 + 0.02 * Ends.LEAD)) < 1e-6,
+		"guide init (track-track): start guide at LEAD on start grade ray")
+	check(tpts[3].guide and tpts[3].slides and not tpts[3].liftable
+		and math.abs(tpts[3].s - (1000 - Ends.LEAD)) < 1e-6
+		and math.abs(tpts[3].z - (20 + (-0.01) * Ends.LEAD)) < 1e-6,
+		"guide init (track-track): end guide at L-LEAD on end grade ray")
+	local prof = assert(E.profile(tt))
+	check(math.abs(P.gradeAtClamped(prof, 0) - 0.02) < 1e-6
+		and math.abs(P.gradeAtClamped(prof, 1000) - 0.01) < 1e-6,
+		"guide init (track-track): exact grade continuity at both ends")
+
+	-- short track (L = 300 < 3 * LEAD): guide PVIs at L/3 = 100 and 2L/3 = 200
+	local ts = assert(E.new(vend(0, 0, 0, 0, 0.015), vend(300, 0, 180, 5, 0.01)))
+	local tspts = E.points(ts)
+	check(#tspts == 4 and math.abs(tspts[2].s - 100) < 1e-6 and math.abs(tspts[3].s - 200) < 1e-6,
+		"guide init (short): guide PVIs at L/3 and 2L/3")
+
+	-- one track end + one ground end -> 1 guide PVI
+	local tg1 = assert(E.new(vend(0, 0, 0, 10, 0.02), gnd(1000, 0, 15)))
+	local tg1pts = E.points(tg1)
+	check(#tg1pts == 3 and tg1pts[2].guide and math.abs(tg1pts[2].s - Ends.LEAD) < 1e-6
+		and math.abs(tg1pts[2].z - (10 + 0.02 * Ends.LEAD)) < 1e-6,
+		"guide init (track-ground): one start guide PVI")
+
+	local gt1 = assert(E.new(gnd(0, 0, 15), vend(1000, 0, 180, 10, 0.02)))
+	local gt1pts = E.points(gt1)
+	check(#gt1pts == 3 and gt1pts[2].guide and math.abs(gt1pts[2].s - (1000 - Ends.LEAD)) < 1e-6
+		and math.abs(gt1pts[2].z - (10 + 0.02 * Ends.LEAD)) < 1e-6,
+		"guide init (ground-track): one end guide PVI")
+
+	-- two ground ends -> no guide PVIs
+	local gg0 = assert(E.new(gnd(0, 0, 0), gnd(1000, 0, 10)))
+	check(#E.points(gg0) == 2, "guide init (ground-ground): no guide PVIs")
+
+	-- 2. Horizontal edits preserve grade continuity (guide elevation recomputed from ray)
+	local he = assert(E.new(vend(0, 0, 0, 10, 0.02), vend(1000, 0, 180, 20, -0.01)))
+	E.insertOnLeg(he, 1, 500, 0)
+	E.movePi(he, 3, 500, 200)
+	local newLen = length(he)
+	check(newLen > 1020, "guide horizontal edit: path got longer")
+	local hpts = E.points(he)
+	check(math.abs(hpts[2].z - (10 + 0.02 * hpts[2].s)) < 1e-6
+		and math.abs(hpts[3].z - (20 + (-0.01) * (newLen - hpts[3].s))) < 1e-6,
+		"guide horizontal edit: guide elevations stay on grade rays after length change")
+	local hprof = assert(E.profile(he))
+	check(math.abs(P.gradeAtClamped(hprof, 0) - 0.02) < 1e-6
+		and math.abs(P.gradeAtClamped(hprof, newLen) - 0.01) < 1e-6,
+		"guide horizontal edit: exact grade continuity preserved at both joins")
+
+	-- 3. Sliding guide PVI updates elevation along ray; cannot remove or setHeight; hit in vertical mode
+	local okSlide, newIdx = E.movePoint(tt, 2, 300, 999, 0.085)
+	local afterSlide = E.points(tt)
+	check(okSlide and newIdx == 2 and math.abs(afterSlide[2].s - 300) < 1e-6
+		and math.abs(afterSlide[2].z - (10 + 0.02 * 300)) < 1e-6,
+		"guide slide: slides to new station and updates elevation on ray (ignoring z)")
+	check(not E.setHeight(tt, 2, 50) and math.abs(E.points(tt)[2].z - (10 + 0.02 * 300)) < 1e-6,
+		"guide setHeight: rejected")
+	check(not E.removeElevation(tt, 2) and #E.points(tt) == 4, "guide remove: rejected")
+	local gh = E.hit(tt, true, afterSlide[2].x + 1, afterSlide[2].y, 5)
+	check(gh ~= nil and gh.kind == "point" and gh.i == 2, "guide hit: hit as point in vertical mode")
+
+	-- 4. Free PVIs stay strictly between active start and end guide PVIs
+	local r1, why1 = E.insertElevation(tt, 100) -- before start guide at 300
+	check(r1 == nil and why1 ~= nil, "guide bounds: cannot insert before start guide")
+	local r2, why2 = E.insertElevation(tt, 900) -- after end guide at 800
+	check(r2 == nil and why2 ~= nil, "guide bounds: cannot insert after end guide")
+	local fi = E.insertElevation(tt, 500)
+	check(fi == 3 and #E.points(tt) == 5 and not E.points(tt)[3].guide, "guide bounds: insert between guides succeeds")
+	-- drag free PVI past start guide -> stops strictly after start guide
+	local okD1, idxD1 = E.movePoint(tt, 3, 100, E.points(tt)[3].z, 1.0)
+	local ptsD1 = E.points(tt)
+	check(okD1 and idxD1 == 3 and ptsD1[3].s > ptsD1[2].s and ptsD1[3].tooClose,
+		"guide bounds: free PVI cannot be dragged past start guide (triggers tooClose)")
+	-- drag free PVI past end guide -> stops strictly before end guide
+	local okD2, idxD2 = E.movePoint(tt, 3, 950, E.points(tt)[3].z, 1.0)
+	local ptsD2 = E.points(tt)
+	check(okD2 and idxD2 == 3 and ptsD2[3].s < ptsD2[4].s and ptsD2[3].tooClose,
+		"guide bounds: free PVI cannot be dragged past end guide (triggers tooClose)")
+	-- drag start guide past free PVI -> stops strictly before free PVI
+	E.movePoint(tt, 3, 500, E.points(tt)[3].z, 1.0)
+	local okG, idxG = E.movePoint(tt, 2, 700, 0, 1.0)
+	local ptsG = E.points(tt)
+	check(okG and idxG == 2 and ptsG[2].s < ptsG[3].s and ptsG[2].tooClose,
+		"guide bounds: start guide cannot be dragged past free PVI")
+
+	-- 5. Dragging ground end onto track adds guide PVI; dragging back off restores prior PVI state
+	local me = assert(E.new(gnd(0, 0, 0), gnd(1000, 0, 0)))
+	E.insertElevation(me, 400)
+	E.setHeight(me, 2, 5)
+	check(#E.points(me) == 3, "moveEnd guide: starts with 1 free PVI")
+	local trk = trackAt(1000, 0, 180)
+	trk.z, trk.grade = 2, 0.015
+	check(E.moveEnd(me, 2, trk), "moveEnd guide: drag ground end onto track")
+	local meOn = E.points(me)
+	check(#meOn == 4 and not meOn[2].guide and math.abs(meOn[2].z - 5) < 1e-6
+		and meOn[3].guide and math.abs(meOn[3].z - (2 + 0.015 * (length(me) - meOn[3].s))) < 1e-6,
+		"moveEnd guide: end guide PVI added cleanly, free PVI kept")
+	local meProf = assert(E.profile(me))
+	check(math.abs(P.gradeAtClamped(meProf, length(me)) - (-0.015)) < 1e-6,
+		"moveEnd guide: exact grade continuity at newly snapped track end")
+	-- drag back onto ground before dropping -> restores prior PVI state
+	check(E.moveEnd(me, #E.polyline(me), gnd(1000, 50, 0)), "moveEnd guide: drag back off onto ground")
+	local meBack = E.points(me)
+	check(#meBack == 3 and not meBack[2].guide and math.abs(meBack[2].z - 5) < 1e-6,
+		"moveEnd guide: prior PVI state restored on return to ground")
+	-- drag onto track and drop -> guide PVI stays
+	check(E.moveEnd(me, 2, trk), "moveEnd guide: drag back onto track")
+	E.dropEnd(me)
+	check(#E.points(me) == 4 and E.points(me)[3].guide, "moveEnd guide: after dropEnd, guide PVI stays")
+end)()
+
+------------------------------------------------------------------ per-PVI curve speeds
+;(function()
+	local function segStations(path)
+		local out, s = {}, 0.0
+		for _, seg in ipairs(path) do
+			local len = G.length(seg)
+			if len > 1e-6 then
+				out[#out + 1] = { kind = seg.kind, radius = seg.radius, s0 = s, s1 = s + len }
+				s = s + len
+			end
+		end
+		return out
+	end
+	local function findSeg(segs, kind)
+		for _, sg in ipairs(segs) do
+			if sg.kind == kind then return sg end
+		end
+		return nil
+	end
+	local function parabolaRadiusAt(prof, s)
+		for _, seg in ipairs(prof.segments) do
+			if seg.kind == "parabola" and seg.startStation <= s and s <= seg.startStation + seg.length then
+				return seg.length / math.abs(seg.endGrade - seg.startGrade)
+			end
+		end
+		return nil
+	end
+
+	-- Ground-to-ground alignment with a 90-deg turn sized to R = 250 m: entry straight, entry spiral ("in"), arc, exit spiral ("out"), exit straight.
+	local function makeTurnEdit(designSpeed, curveSpeed)
+		local ce = assert(E.new(gnd(0, 0, 0), gnd(1000, 1000, 0), nil, designSpeed, curveSpeed))
+		local ti = assert(E.insertOnLeg(ce, 1, 500, 500))
+		assert(E.movePi(ce, ti, 1000, 0))
+		assert(E.setRadius(ce, ti, 250))
+		return ce
+	end
+
+	-- 1. Curve (arc) vs straight: PVI in arc uses curveSpeed; PVI on straight uses designSpeed
+	local designV, curveV = 40.0, 20.0
+	local expectedDesignR = designV * designV / P.DEFAULT_POLICY.maxVerticalAccel
+	local expectedCurveR = curveV * curveV / P.DEFAULT_POLICY.maxVerticalAccel
+	local queriedR = {}
+	local ce = makeTurnEdit(designV, function(R)
+		queriedR[#queriedR + 1] = R
+		return curveV
+	end)
+	local segs = segStations(E.path(ce))
+	local stSeg = assert(findSeg(segs, "straight"))
+	local inSeg = assert(findSeg(segs, "in"))
+	local arcSeg = assert(findSeg(segs, "arc"))
+	local sStraight = (stSeg.s0 + stSeg.s1) / 2
+	local sSpiral = (inSeg.s0 + inSeg.s1) / 2
+	local sArc = (arcSeg.s0 + arcSeg.s1) / 2
+
+	local iSt = assert(E.insertElevation(ce, sStraight))
+	assert(E.setHeight(ce, iSt, 12))
+	local iArc = assert(E.insertElevation(ce, sArc))
+	assert(E.setHeight(ce, iArc, 2))
+	local prof = assert(E.profile(ce))
+	local rSt = parabolaRadiusAt(prof, sStraight)
+	local rArc = parabolaRadiusAt(prof, sArc)
+	check(rSt ~= nil and math.abs(rSt - expectedDesignR) < 1e-3,
+		string.format("curve speed: PVI on straight uses designSpeed (rV=%.1f, want %.1f)", rSt or -1, expectedDesignR))
+	check(rArc ~= nil and math.abs(rArc - expectedCurveR) < 1e-3,
+		string.format("curve speed: PVI in arc uses curveSpeed (rV=%.1f, want %.1f)", rArc or -1, expectedCurveR))
+	check(#queriedR > 0 and math.abs(queriedR[#queriedR] - arcSeg.radius) < 1e-6,
+		"curve speed: lookup queried with the horizontal arc's radius")
+
+	-- 2. PVI inside an entry spiral also uses curveSpeed for that curve's radius
+	local spEdit = makeTurnEdit(designV, function() return curveV end)
+	local iSp = assert(E.insertElevation(spEdit, sSpiral))
+	assert(E.setHeight(spEdit, iSp, 10))
+	local rSp = parabolaRadiusAt(assert(E.profile(spEdit)), sSpiral)
+	check(rSp ~= nil and math.abs(rSp - expectedCurveR) < 1e-3,
+		string.format("curve speed: PVI in spiral uses curveSpeed (rV=%.1f, want %.1f)", rSp or -1, expectedCurveR))
+
+	-- 3. Curve speed higher than designSpeed is capped by designSpeed
+	assert(E.setCurveSpeed(ce, function() return 80.0 end) == true, "curve speed: setCurveSpeed bumps when speed changes")
+	local rCapped = parabolaRadiusAt(assert(E.profile(ce)), sArc)
+	check(rCapped ~= nil and math.abs(rCapped - expectedDesignR) < 1e-3,
+		string.format("curve speed: speed above designSpeed is capped (rV=%.1f, want %.1f)", rCapped or -1, expectedDesignR))
+
+	-- 4. Unmeasured (nil), throwing, zero, NaN, and nil lookup all fall back cleanly to designSpeed
+	for _, case in ipairs({
+		{ name = "nil result", fn = function() return nil end },
+		{ name = "throwing", fn = function() error("probe failed") end },
+		{ name = "zero", fn = function() return 0 end },
+		{ name = "NaN", fn = function() return 0 / 0 end },
+		{ name = "nil lookup", fn = nil },
+	}) do
+		E.setCurveSpeed(ce, case.fn)
+		local okP, p = pcall(E.profile, ce)
+		local rFb = okP and p ~= nil and parabolaRadiusAt(p, sArc) or nil
+		check(okP and rFb ~= nil and math.abs(rFb - expectedDesignR) < 1e-3,
+			"curve speed fallback (" .. case.name .. "): falls back to designSpeed without throwing")
+	end
+
+	-- 5. setCurveSpeed bumps rev only when effective per-PVI speeds change
+	local revBefore = ce.rev
+	check(E.setCurveSpeed(ce, function() return 25.0 end) == true and ce.rev == revBefore + 1,
+		"curve speed: setCurveSpeed returns true and bumps rev on change")
+	local r25 = parabolaRadiusAt(assert(E.profile(ce)), sArc)
+	local expected25 = 25.0 * 25.0 / P.DEFAULT_POLICY.maxVerticalAccel
+	check(r25 ~= nil and math.abs(r25 - expected25) < 1e-3,
+		"curve speed: profile recomputes with updated curve speed")
+	check(E.setCurveSpeed(ce, function() return 25.0 end) == false and ce.rev == revBefore + 1,
+		"curve speed: setCurveSpeed is a no-op when speeds are unchanged")
+
+	-- 6. Resizing a horizontal curve updates the vertical curve radius for a PVI inside it
+	local rsEdit = makeTurnEdit(designV, function(R) return math.sqrt(R) end)
+	local rsArc0 = assert(findSeg(segStations(E.path(rsEdit)), "arc"))
+	local iMid = assert(E.insertElevation(rsEdit, (rsArc0.s0 + rsArc0.s1) / 2))
+	assert(E.setHeight(rsEdit, iMid, 10))
+	local rBefore = parabolaRadiusAt(assert(E.profile(rsEdit)), E.points(rsEdit)[iMid].s)
+	assert(E.setRadius(rsEdit, 2, 180))
+	local rsArc1 = assert(findSeg(segStations(E.path(rsEdit)), "arc"))
+	local ptAfter = E.points(rsEdit)[iMid]
+	local rAfter = parabolaRadiusAt(assert(E.profile(rsEdit)), ptAfter.s)
+	local wantAfter = rsArc1.radius / P.DEFAULT_POLICY.maxVerticalAccel -- (sqrt(R))^2 / a = R / a (> minVerticalRadius 500)
+	check(rBefore ~= nil and rAfter ~= nil and rAfter < rBefore and math.abs(rAfter - wantAfter) < 1e-2,
+		string.format("curve speed: resizing curve updates vertical radius (%.1f -> %.1f, want %.1f)",
+			rBefore or -1, rAfter or -1, wantAfter))
+end)()
 H.done()

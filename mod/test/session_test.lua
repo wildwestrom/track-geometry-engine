@@ -307,11 +307,12 @@ local nodes = E.nodes(e)
 local mid = nodes[math.floor(#nodes / 2)]
 moveTo(t, mid.x, mid.y)
 check(t.s.hit ~= nil and t.s.hit.kind == "track" and math.abs(t.s.hit.s - mid.s) < 1, "vertical: over the track, a point can be added")
-check(press(t) == true and #E.points(e) == 3 and t.s.dragEl ~= nil and not t.s.dragEl.height, "vertical: a press adds an elevation point and grabs it")
-local f = E.points(e)[2].s
+-- (two track ends start with 2 guide PVIs, so adding a free point makes 5 points: Start, Guide1, Free(3), Guide2, End)
+check(press(t) == true and #E.points(e) == 5 and t.s.dragEl ~= nil and not t.s.dragEl.height, "vertical: a press adds an elevation point and grabs it")
+local f = E.points(e)[3].s
 local further = nodes[math.floor(#nodes / 2) + 10]
 moveTo(t, further.x, further.y)
-check(E.points(e)[2].s > f, "vertical: the point slides along the track with the mouse")
+check(E.points(e)[3].s > f, "vertical: the point slides along the track with the mouse")
 letGo(t)
 check(t.s.dragEl == nil and asked(t, "askBuild") == 0, "vertical: letting go ends the drag; its click does not build")
 -- Shift-drag: its height follows the mouse up the screen
@@ -320,22 +321,22 @@ mouse(t, 0, "moved", 500)
 check(press(t) == true and t.s.dragEl ~= nil and t.s.dragEl.height, "vertical: Shift at the press grabs the point's height")
 mouse(t, 0, "moved", 499)
 tick(t)
-check(math.abs(E.points(e)[2].z - 1) < 1e-6, string.format("vertical: a pixel up raises it 1 m at 1000 m (%.3f m)", E.points(e)[2].z))
+check(math.abs(E.points(e)[3].z - 1) < 1e-6, string.format("vertical: a pixel up raises it 1 m at 1000 m (%.3f m)", E.points(e)[3].z))
 letGo(t)
 t.shift = false
 rightClick(t)
-check(#E.points(e) == 2 and t.s.phase == "done", "vertical: a right-click on the point removes it")
+check(#E.points(e) == 4 and t.s.phase == "done", "vertical: a right-click on the point removes it")
 
 -- too close: a drag is not stopped by the 20 m spacing; the build waits until the point is clear
 local n1, n2 = nodes[math.floor(#nodes / 2)], nodes[math.floor(#nodes / 2) + 20]
 moveTo(t, n1.x, n1.y); press(t); letGo(t)
 moveTo(t, n2.x, n2.y); press(t)
-check(#E.points(e) == 4 and t.s.dragEl ~= nil and t.s.dragEl.i == 3, "too close: a second point, grabbed")
+check(#E.points(e) == 6 and t.s.dragEl ~= nil and t.s.dragEl.i == 4, "too close: a second point, grabbed")
 local n3 = nodes[math.floor(#nodes / 2) + 1]
 moveTo(t, n3.x, n3.y)
-check(E.points(e)[3].tooClose and math.abs(E.points(e)[3].s - n3.s) < 1, "too close: the drag goes within 20 m of the neighbour")
+check(E.points(e)[4].tooClose and math.abs(E.points(e)[4].s - n3.s) < 1, "too close: the drag goes within 20 m of the neighbour")
 letGo(t)
-check(t.s.dragEl == nil and E.points(e)[3].tooClose, "too close: let go there, it stays too close")
+check(t.s.dragEl == nil and E.points(e)[4].tooClose, "too close: let go there, it stays too close")
 moveTo(t, FAR_X, FAR_Y)
 check(click(t) == true and asked(t, "askBuild") == 0 and t.s.editMsg ~= nil
 	and t.s.editMsg:find("too close", 1, true) ~= nil, "too close: the build is refused: " .. tostring(t.s.editMsg))
@@ -343,34 +344,34 @@ check(click(t) == true and asked(t, "askBuild") == 0 and t.s.editMsg ~= nil
 moveTo(t, n3.x, n3.y); press(t)
 local n4 = nodes[math.floor(#nodes / 2) - 5]
 moveTo(t, n4.x, n4.y)
-check(t.s.dragEl ~= nil and t.s.dragEl.i == 2 and math.abs(E.points(e)[2].s - n4.s) < 1 and E.points(e)[3].s > E.points(e)[2].s,
-	"too close: dragged past its neighbour, it is point 1 now and still grabbed")
+check(t.s.dragEl ~= nil and t.s.dragEl.i == 3 and math.abs(E.points(e)[3].s - n4.s) < 1 and E.points(e)[4].s > E.points(e)[3].s,
+	"too close: dragged past its neighbour, it comes before it and is still grabbed")
 local n5 = nodes[math.floor(#nodes / 2) - 10]
 moveTo(t, n5.x, n5.y)
-check(math.abs(E.points(e)[2].s - n5.s) < 1 and not E.points(e)[2].tooClose, "too close: the drag goes on with the new index, clear")
+check(math.abs(E.points(e)[3].s - n5.s) < 1 and not E.points(e)[3].tooClose, "too close: the drag goes on with the new index, clear")
 letGo(t)
 moveTo(t, FAR_X, FAR_Y)
 check(click(t) == true and asked(t, "askBuild") == 1, "too close: once clear, a click asks to build")
 note(t, S.confirmOpened(t.s)); S.confirmClosed(t.s); tick(t, 3)
-moveTo(t, E.points(e)[2].x, E.points(e)[2].y); rightClick(t)
-moveTo(t, E.points(e)[2].x, E.points(e)[2].y); rightClick(t)
-check(#E.points(e) == 2, "too close: both points removed again")
+moveTo(t, E.points(e)[3].x, E.points(e)[3].y); rightClick(t)
+moveTo(t, E.points(e)[3].x, E.points(e)[3].y); rightClick(t)
+check(#E.points(e) == 4, "too close: both points removed again")
 
 -- too steep: a height set directly passes the limit, and the build waits until it is eased
 moveTo(t, n1.x, n1.y); press(t); letGo(t)
-check(E.setHeight(e, 2, 200) and E.steepest(e) > LIMIT, "too steep: a height set directly passes the limit")
+check(E.setHeight(e, 3, 200) and E.steepest(e) > LIMIT, "too steep: a height set directly passes the limit")
 moveTo(t, FAR_X, FAR_Y)
 check(click(t) == true and asked(t, "askBuild") == 0 and t.s.editMsg ~= nil
 	and t.s.editMsg:find("too steep", 1, true) ~= nil and t.s.editMsg:find("too close", 1, true) == nil,
 	"too steep: the build is refused: " .. tostring(t.s.editMsg))
 -- too steep and too close at once: the refusal names both
-E.insertElevation(e, E.points(e)[2].s + 15)
-check(#E.points(e) == 4 and E.points(e)[3].tooClose, "too steep: and a point too close")
+E.insertElevation(e, E.points(e)[3].s + 15)
+check(#E.points(e) == 6 and E.points(e)[4].tooClose, "too steep: and a point too close")
 moveTo(t, FAR_X, FAR_Y)
 check(click(t) == true and asked(t, "askBuild") == 0 and t.s.editMsg:find("too steep", 1, true) ~= nil
 	and t.s.editMsg:find("too close", 1, true) ~= nil, "too steep and too close: the refusal names both: " .. tostring(t.s.editMsg))
-moveTo(t, E.points(e)[3].x, E.points(e)[3].y); rightClick(t)
-E.setHeight(e, 2, E.points(e)[2].z - 190)
+moveTo(t, E.points(e)[4].x, E.points(e)[4].y); rightClick(t)
+E.setHeight(e, 3, E.points(e)[3].z - 190)
 check(E.steepest(e) <= LIMIT, "too steep: eased")
 moveTo(t, FAR_X, FAR_Y)
 check(click(t) == true and asked(t, "askBuild") == 1, "too steep: once eased, a click asks to build")
@@ -391,10 +392,10 @@ local bm = math.floor(#nodes / 2)
 lookAt(nodes[bm])
 check(t.s.hit ~= nil and t.s.hit.kind == "track" and math.abs(t.s.hit.s - nodes[bm].s) < 1,
 	"bridge: the raised track is under the mouse along its view ray")
-check(press(t) == true and #E.points(e) == 3 and math.abs(E.points(e)[2].s - nodes[bm].s) < 1,
+check(press(t) == true and #E.points(e) == 5 and math.abs(E.points(e)[3].s - nodes[bm].s) < 1,
 	"bridge: a press on it adds a point there (not a build)")
 lookAt(nodes[bm + 10])
-check(math.abs(E.points(e)[2].s - nodes[bm + 10].s) < 1, "bridge: the point slides along the ray: " .. string.format("%.1f m", E.points(e)[2].s))
+check(math.abs(E.points(e)[3].s - nodes[bm + 10].s) < 1, "bridge: the point slides along the ray: " .. string.format("%.1f m", E.points(e)[3].s))
 letGo(t)
 check(asked(t, "askBuild") == 0, "bridge: the press and its click do not ask to build")
 t.w.ray = nil
@@ -427,37 +428,37 @@ S.setMode(t.s, "vertical")
 nodes = E.nodes(e)
 local m = math.floor(#nodes / 2)
 check(S.selection(t.s, LIMIT) == nil, "select: nothing selected at first")
--- a press on the track adds a point, selected
+-- a press on the track adds a point, selected (index 3, after Start and start guide)
 moveTo(t, nodes[m].x, nodes[m].y); press(t); letGo(t)
-check(t.s.selected == 2, "select: a point just added is selected")
+check(t.s.selected == 3, "select: a point just added is selected")
 local sel = S.selection(t.s, LIMIT)
-check(sel ~= nil and sel.name == "Point 1" and sel.i == 2 and math.abs(sel.s - nodes[m].s) < 1 and sel.grade ~= nil and not sel.tooClose and sel.steep == nil,
+check(sel ~= nil and sel.name == "Point 2" and sel.i == 3 and sel.liftable and math.abs(sel.s - nodes[m].s) < 1 and sel.grade ~= nil and not sel.tooClose and sel.steep == nil,
 	"select: the selection reads out its name, chainage, height and grade")
 -- a click on another point selects it; a click on nothing keeps the selection and asks to build
 moveTo(t, nodes[m + 20].x, nodes[m + 20].y); press(t); letGo(t)
-check(t.s.selected == 3, "select: a second point added is selected")
-moveTo(t, E.points(e)[2].x, E.points(e)[2].y); press(t); letGo(t)
-check(t.s.selected == 2 and #E.points(e) == 4, "select: a click on a point selects it (and adds none)")
+check(t.s.selected == 4, "select: a second point added is selected")
+moveTo(t, E.points(e)[3].x, E.points(e)[3].y); press(t); letGo(t)
+check(t.s.selected == 3 and #E.points(e) == 6, "select: a click on a point selects it (and adds none)")
 moveTo(t, FAR_X, FAR_Y)
-check(click(t) == true and asked(t, "askBuild") == 1 and t.s.selected == 2, "select: a click on nothing keeps it and asks to build")
+check(click(t) == true and asked(t, "askBuild") == 1 and t.s.selected == 3, "select: a click on nothing keeps it and asks to build")
 -- setting its height applies at once, past the limit too
 note(t, S.setHeight(t.s, 200))
-check(E.points(e)[2].z == 200, "select: a height set applies as asked")
+check(E.points(e)[3].z == 200, "select: a height set applies as asked")
 local rev2 = e.rev
 check(#S.setHeight(t.s, 200) == 0 and e.rev == rev2, "select: the height it has already asks nothing (the box echoing its value)")
 sel = S.selection(t.s, LIMIT)
 check(sel.z == 200 and sel.steep ~= nil and sel.steep:find("too steep", 1, true) ~= nil, "select: the selection says it is too steep: " .. tostring(sel.steep))
 -- a drag past its neighbour: the selection follows the point
-moveTo(t, E.points(e)[2].x, E.points(e)[2].y); press(t)
+moveTo(t, E.points(e)[3].x, E.points(e)[3].y); press(t)
 moveTo(t, nodes[m + 30].x, nodes[m + 30].y)
 check(t.s.selected == t.s.dragEl.i and E.points(e)[t.s.selected].z == 200, "select: the dragged point is selected and the selection follows it")
 letGo(t)
 local held = t.s.selected
 -- a Shift-drag selects the point it grabs, and the selection reads its height live
-moveTo(t, E.points(e)[5 - held].x, E.points(e)[5 - held].y)
+moveTo(t, E.points(e)[7 - held].x, E.points(e)[7 - held].y)
 t.shift = true
 mouse(t, 0, "moved", 500); press(t)
-check(t.s.selected == 5 - held, "select: a Shift-drag selects the point it grabs")
+check(t.s.selected == 7 - held, "select: a Shift-drag selects the point it grabs")
 mouse(t, 0, "moved", 490); tick(t)
 check(math.abs(S.selection(t.s, LIMIT).z - E.points(e)[t.s.selected].z) < 1e-9, "select: the selection follows a Shift-drag's height")
 letGo(t)
@@ -473,28 +474,32 @@ check(t.s.selected == ci and sel.tooClose and sel.grade == nil, "select: a point
 note(t, S.setHeight(t.s, 50))
 check(E.points(e)[ci].z == 50, "select: a point too close can still have its height set")
 -- removing a point before the selected one keeps the same point selected; removing it clears it
-local keep = E.points(e)[4]
-t.s.selected = 4
-moveTo(t, E.points(e)[2].x, E.points(e)[2].y); rightClick(t)
-check(#E.points(e) == 4 and t.s.selected == 3 and E.points(e)[3].s == keep.s, "select: removing a point before it keeps it selected")
+local keep = E.points(e)[5]
+t.s.selected = 5
 moveTo(t, E.points(e)[3].x, E.points(e)[3].y); rightClick(t)
-check(#E.points(e) == 3 and t.s.selected == nil and S.selection(t.s, LIMIT) == nil, "select: removing the selected point clears it")
+check(#E.points(e) == 6 and t.s.selected == 4 and E.points(e)[4].s == keep.s, "select: removing a point before it keeps it selected")
+moveTo(t, E.points(e)[4].x, E.points(e)[4].y); rightClick(t)
+check(#E.points(e) == 5 and t.s.selected == nil and S.selection(t.s, LIMIT) == nil, "select: removing the selected point clears it")
 check(#S.setHeight(t.s, 10) == 0, "select: with nothing selected, a height does nothing")
 -- the mode switching to horizontal, and leaving the edit, clear it
-moveTo(t, E.points(e)[2].x, E.points(e)[2].y); press(t); letGo(t)
-check(t.s.selected == 2, "select: selected again")
+moveTo(t, E.points(e)[3].x, E.points(e)[3].y); press(t); letGo(t)
+check(t.s.selected == 3, "select: selected again")
 S.setMode(t.s, "horizontal")
 check(t.s.selected == nil, "select: switching to horizontal clears it")
 S.setMode(t.s, "vertical")
-moveTo(t, E.points(e)[2].x, E.points(e)[2].y); press(t); letGo(t)
+moveTo(t, E.points(e)[3].x, E.points(e)[3].y); press(t); letGo(t)
 esc(t)
 check(t.s.phase == "to" and t.s.selected == nil, "select: leaving the edit clears it")
 
 ------------------------------------------------------------------ matching another point's height
--- ends at different heights: the start 36.4 m up, the end 1.9 m
-local hiA = { kind = "track", node = 1, x = 0, y = 0, dx = 1, dy = 0, z = 36.4, grade = 0 }
-local loB = { kind = "track", node = 2, x = 1500, y = 800, dx = 0, dy = -1, z = 1.9, grade = 0 }
-t = editing(hiA, loB)
+-- ends at different heights: the start 36.4 m up, the end 1.9 m (ground ends: no guide PVIs)
+local hiA = Ends.groundEnd(0, 0, 36.4)
+local loB = Ends.groundEnd(1500, 800, 1.9)
+t = newTool()
+t.free = {}
+t.groundZ = 36.4; moveTo(t, hiA.x, hiA.y); click(t)
+t.groundZ = 1.9; moveTo(t, loB.x, loB.y); click(t)
+t.groundZ = 0
 e = t.s.edit
 S.setMode(t.s, "vertical")
 nodes = E.nodes(e)
@@ -560,7 +565,7 @@ t = editing(endA, Ends.groundEnd(600, 300, 0))
 e = t.s.edit
 local gx, gy = to(t).x, to(t).y -- (the ground under the second click)
 S.setMode(t.s, "vertical")
-local gi = #E.points(e)
+local gi = #E.points(e) -- (Start, start guide, End -> gi = 3)
 moveTo(t, gx + 2, gy + 1)
 check(t.s.hit ~= nil and t.s.hit.kind == "end" and t.s.hit.i == gi, "ground end: under the mouse in vertical mode")
 local gh = S.hint(t.s)
@@ -571,7 +576,7 @@ check(cur ~= nil and cur.x == gx and cur.y == gy and cur.state == "handle", "gro
 -- a press selects it and never slides it
 check(press(t) == true and t.s.selected == gi and t.s.dragEl == nil, "ground end: a press selects it")
 moveTo(t, 500, 250)
-check(to(t).x == gx and to(t).y == gy and to(t).z == 0 and #E.points(e) == 2, "ground end: a drag without Shift never slides it")
+check(to(t).x == gx and to(t).y == gy and to(t).z == 0 and #E.points(e) == 3, "ground end: a drag without Shift never slides it")
 letGo(t)
 check(asked(t, "askBuild") == 0 and t.s.selected == gi, "ground end: the click that selects it does not build")
 local sel = S.selection(t.s, LIMIT)
@@ -580,18 +585,20 @@ check(sel ~= nil and sel.name == "End" and sel.z == 0 and sel.s == E.nodes(e)[#E
 -- the height box
 note(t, S.setHeight(t.s, 9))
 check(to(t).z == 9, "ground end: the height box sets its height")
--- the match list: the start and the points, not itself
-moveTo(t, E.nodes(e)[20].x, E.nodes(e)[20].y); press(t); letGo(t)
+-- the match list: the start and the points (guide + free), not itself
+local midNode = E.nodes(e)[math.floor(#E.nodes(e) / 2)]
+moveTo(t, midNode.x, midNode.y); press(t); letGo(t)
 note(t, S.setHeight(t.s, 2.5))
 moveTo(t, gx, gy); press(t); letGo(t)
 local glabels = {}
 for k, m in ipairs(S.matchSources(t.s)) do glabels[k] = m.label end
-check(table.concat(glabels, " | ") == "Start · 0.0 m | Point 1 · 2.5 m", "ground end: match list without itself: " .. table.concat(glabels, " | "))
-note(t, S.match(t.s, S.matchSources(t.s)[2]))
+check(table.concat(glabels, " | ") == "Start · 0.0 m | Point 1 · 0.0 m | Point 2 · 2.5 m",
+	"ground end: match list without itself: " .. table.concat(glabels, " | "))
+note(t, S.match(t.s, S.matchSources(t.s)[3]))
 check(to(t).z == 2.5 and t.s.selected == #E.points(e), "ground end: matched to a point's height; still selected")
 -- selecting a point clears the end's selection, and back
-moveTo(t, E.points(e)[2].x, E.points(e)[2].y); press(t); letGo(t)
-check(t.s.selected == 2, "ground end: selecting a point unselects the end")
+moveTo(t, E.points(e)[3].x, E.points(e)[3].y); press(t); letGo(t)
+check(t.s.selected == 3, "ground end: selecting a point unselects the end")
 moveTo(t, gx, gy); press(t); letGo(t)
 -- Shift-drag: its height, stopping at the limit
 t.shift = true
@@ -706,7 +713,7 @@ for _, mob in ipairs({ "fixed", "ray", "free" }) do
 end
 check(seen.fixed and seen.ray and seen.free and seen.bracket, "hint: every kind of turn and a bracket was tried")
 
--- vertical: the track, and a point
+-- vertical: the track, a guide point, and a free point
 t = editing()
 e = t.s.edit
 S.setMode(t.s, "vertical")
@@ -715,15 +722,22 @@ m = math.floor(#nodes / 2)
 moveTo(t, nodes[m].x, nodes[m].y)
 hint = S.hint(t.s)
 press(t); letGo(t)
-check(says(hint, "Click: add point") and #E.points(e) == 3, "hint: over the track (vertical): " .. tostring(hint))
+check(says(hint, "Click: add point") and #E.points(e) == 5, "hint: over the track (vertical): " .. tostring(hint))
 t.s.selected = nil
 moveTo(t, nodes[m].x, nodes[m].y)
 hint = S.hint(t.s)
 press(t); letGo(t)
-check(says(hint, "Click: select") and says(hint, "Shift+drag: height") and t.s.selected == 2 and #E.points(e) == 3,
+check(says(hint, "Click: select") and says(hint, "Shift+drag: height") and t.s.selected == 3 and #E.points(e) == 5,
 	"hint: over a point: " .. tostring(hint))
 rightClick(t)
-check(says(hint, "Right-click: remove") and #E.points(e) == 2, "hint: a point's right-click removes it")
+check(says(hint, "Right-click: remove") and #E.points(e) == 4, "hint: a point's right-click removes it")
+-- over a guide point: slide along the end, no Shift+drag height, no right-click remove
+local g1 = E.points(e)[2]
+moveTo(t, g1.x, g1.y)
+hint = S.hint(t.s)
+check(says(hint, "Click: select") and says(hint, "Drag: slide along the end")
+	and not says(hint, "Shift+drag") and not says(hint, "Right-click"),
+	"hint: over a guide point: " .. tostring(hint))
 moveTo(t, FAR_X, FAR_Y)
 check(S.hint(t.s) == "Click: build · Esc: back", "hint: over nothing (vertical)")
 
@@ -901,5 +915,151 @@ check(math.abs(S.curveSelection(ct.s, game).radius - 277.78) < 0.01, "curve: a s
 
 S.setMode(ct.s, "vertical")
 check(#S.pickCurve(ct.s, ci) == 0, "curve: no picking while the profile is edited")
+
+-- switching track type updates the edit's vertical design speed
+do
+	local st = editing()
+	local speed = 30
+	st.w.trackSpeed = function() return speed end
+	tick(st)
+	check(st.s.edit.policy.designSpeed == 30, "track speed: tick applies active track type top speed")
+	local rev0 = st.s.edit.rev
+	speed = 50
+	tick(st)
+	check(st.s.edit.policy.designSpeed == 50 and st.s.edit.rev > rev0, "track speed: switching track type updates designSpeed and bumps rev")
+end
+
+-- guide PVIs in session: slide along ray, no Shift+drag height, no setHeight/match, no right-click remove
+;(function()
+	local slopedA = Ends.trackEnd(1, 0, 0, 10, 1, 0, 0.02)
+	local slopedB = Ends.trackEnd(2, 1000, 0, 20, -1, 0, -0.01)
+	local gt = editing(slopedA, slopedB)
+	local ge = gt.s.edit
+	S.setMode(gt.s, "vertical")
+	local g1 = E.points(ge)[2]
+	-- select guide PVI
+	moveTo(gt, g1.x, g1.y); press(gt); letGo(gt)
+	local gsel = S.selection(gt.s, LIMIT)
+	check(gsel ~= nil and gsel.i == 2 and not gsel.liftable and #S.matchSources(gt.s) == 0,
+		"session guide: selected guide PVI has liftable=false and empty matchSources")
+	local z0 = gsel.z
+	note(gt, S.setHeight(gt.s, 99))
+	check(E.points(ge)[2].z == z0, "session guide: setHeight does not change guide PVI elevation")
+	-- Shift+drag on guide PVI does not start height drag
+	gt.shift = true
+	mouse(gt, 0, "moved", 500)
+	check(press(gt) == true and gt.s.dragEl == nil and gt.s.selected == 2,
+		"session guide: Shift+drag does not grab guide PVI height")
+	mouse(gt, 0, "moved", 450); tick(gt)
+	check(E.points(ge)[2].z == z0, "session guide: guide PVI height unchanged during Shift+drag")
+	letGo(gt)
+	gt.shift = false
+	-- slide guide PVI along path -> elevation updates on grade ray
+	moveTo(gt, g1.x, g1.y); press(gt)
+	check(gt.s.dragEl ~= nil and not gt.s.dragEl.height, "session guide: drag slides guide PVI")
+	moveTo(gt, 300, 0)
+	letGo(gt)
+	local g1After = E.points(ge)[2]
+	check(math.abs(g1After.s - 300) < 1 and math.abs(g1After.z - (10 + 0.02 * g1After.s)) < 1e-6,
+		"session guide: sliding updates elevation along grade ray")
+	-- right-click refuses removal
+	moveTo(gt, g1After.x, g1After.y); rightClick(gt)
+	check(#E.points(ge) == 4 and gt.s.phase == "done" and gt.s.editMsg ~= nil,
+		"session guide: right-click refuses removal and stays in editing")
+	-- clicking track before start guide refuses insertion
+	gt.s.editMsg = nil
+	moveTo(gt, 100, 0); press(gt); letGo(gt)
+	check(#E.points(ge) == 4 and gt.s.editMsg ~= nil and asked(gt, "askBuild") == 0,
+		"session guide: clicking track outside guide PVI refuses insertion without building")
+end)()
+
+-- per-PVI curve speeds through session World.curveSpeed (unmeasured -> measured, track switch)
+;(function()
+	local G = H.mod("tg_geometry")
+	local Prof = H.mod("tg_profile")
+	local function findArcMid(path)
+		local s = 0.0
+		for _, seg in ipairs(path) do
+			local len = G.length(seg)
+			if len > 1e-6 then
+				if seg.kind == "arc" then return s + len / 2 end
+				s = s + len
+			end
+		end
+		return nil
+	end
+	local function parabolaRadiusAt(prof, s)
+		for _, seg in ipairs(prof.segments) do
+			if seg.kind == "parabola" and seg.startStation <= s and s <= seg.startStation + seg.length then
+				return seg.length / math.abs(seg.endGrade - seg.startGrade)
+			end
+		end
+		return nil
+	end
+
+	local st = editing(Ends.groundEnd(0, 0, 0), Ends.groundEnd(1000, 1000, 0))
+	local se = st.s.edit
+	local ti = assert(E.insertOnLeg(se, 1, 500, 500))
+	assert(E.movePi(se, ti, 1000, 0))
+	local arcMid = assert(findArcMid(E.path(se)))
+	local pi = assert(E.insertElevation(se, arcMid))
+	assert(E.setHeight(se, pi, 15))
+	local curveV = nil
+	st.w.trackSpeed = function() return 40.0 end
+	st.w.curveSpeed = function(_R) return curveV end
+	tick(st)
+	local rDesign = 40.0 * 40.0 / Prof.DEFAULT_POLICY.maxVerticalAccel
+	local r0 = parabolaRadiusAt(assert(E.profile(se)), arcMid)
+	check(r0 ~= nil and math.abs(r0 - rDesign) < 1e-3,
+		"session curveSpeed: unmeasured (nil) falls back to trackSpeed")
+
+	local rev0 = se.rev
+	curveV = 18.0
+	tick(st)
+	local r18 = 18.0 * 18.0 / Prof.DEFAULT_POLICY.maxVerticalAccel
+	local r1 = parabolaRadiusAt(assert(E.profile(se)), arcMid)
+	check(se.rev > rev0 and r1 ~= nil and math.abs(r1 - r18) < 1e-3,
+		"session curveSpeed: measured curve speed bumps rev and resizes vertical curve")
+
+	local rev1 = se.rev
+	tick(st)
+	check(se.rev == rev1, "session curveSpeed: steady state does not bump rev")
+
+	-- track type switch with same top speed but different curve speed
+	curveV = 26.0
+	tick(st)
+	local r26 = 26.0 * 26.0 / Prof.DEFAULT_POLICY.maxVerticalAccel
+	local r2 = parabolaRadiusAt(assert(E.profile(se)), arcMid)
+	check(se.rev > rev1 and r2 ~= nil and math.abs(r2 - r26) < 1e-3,
+		"session curveSpeed: track switch with new curve speed bumps rev and updates vertical curve")
+
+	-- horizontal drag with cached miss (nil) followed by release measuring the same speed as pre-drag
+	-- must still bump rev so cached ghosts/badges rebuild from the fallback designSpeed
+	local cachedOnly = false
+	local rPre = E.curve(se, 2).radius
+	st.w.curveSpeed = function(R)
+		if cachedOnly and math.abs(R - rPre) > 0.1 then return nil end
+		return 26.0
+	end
+	tick(st)
+	assert(E.profile(se))
+	-- drag bracket to resize curve while probe is cached-only
+	cachedOnly = true
+	local br = nil
+	for _, h in ipairs(E.handles(se)) do if h.kind == "entry" then br = h; break end end
+	assert(br ~= nil)
+	moveTo(st, br.x, br.y); press(st)
+	moveTo(st, br.x - 40, br.y)
+	local rDrag = parabolaRadiusAt(assert(E.profile(se)), E.points(se)[pi].s)
+	local revAtDrag = se.rev
+	check(rDrag ~= nil and math.abs(rDrag - rDesign) < 1e-3,
+		"session curveSpeed: uncached radius during horizontal drag falls back to designSpeed")
+	letGo(st)
+	cachedOnly = false
+	tick(st)
+	local rPost = parabolaRadiusAt(assert(E.profile(se)), E.points(se)[pi].s)
+	check(se.rev > revAtDrag and rPost ~= nil and math.abs(rPost - r26) < 1e-3,
+		"session curveSpeed: release after cached miss bumps rev even when measured speed matches pre-drag speed")
+end)()
 
 H.done()

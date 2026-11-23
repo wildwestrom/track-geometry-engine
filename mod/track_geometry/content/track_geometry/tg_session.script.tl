@@ -86,6 +86,8 @@ local record Selection
 	s : number
 	z : number
 	grade : number
+	liftable : boolean
+	guide : boolean
 	tooClose : boolean
 	steep : string
 end
@@ -120,6 +122,8 @@ local record World
 	cameraDist : number -- the camera's distance (m), for a Shift-drag's height; nil when unknown
 	shift : function() : boolean -- is Shift held (asked at a press)
 	gradeLimit : function() : number -- the steepest grade the track type may be laid at
+	trackSpeed : function() : number -- the track type's top speed (m/s); nil offline -> maxDesignSpeed
+	curveSpeed : function(R : number) : number -- the game's curve speed on radius R (m/s); nil offline -> designSpeed
 	snap : function(x : number, y : number, z : number, hovered : integer, exclude : End) : End, string -- what the mouse at (x, y, z) picks (tg_ends.snap), or nil and why
 	endThere : function(e : End) : boolean -- is this end still there (a free track end still free)
 end
@@ -318,13 +322,15 @@ function M.click(s : Session, w : World) : {Request}
 		-- (a node's direction is locked here, toward the other end)
 		local from = ends.aim(s.from, e.x, e.y)
 		e = ends.aim(e, from.x, from.y)
-		local edit, how = edits.new(from, e)
+		local edit, how = edits.new(from, e, nil, w.trackSpeed ~= nil and w.trackSpeed() or nil, w.curveSpeed)
 		if edit == nil then
 			s.hoverMsg = "Cannot end the track here: " .. how .. "."
 			s.log("tool: cannot end at " .. ends.name(e) .. ": " .. how)
 			return {}
 		end
 		s.from, s.phase, s.edit = nil, "done", edit
+		-- (the GUI's speed probe is only ready once s.edit exists, so sync curve speeds now)
+		if w.curveSpeed ~= nil then edits.setCurveSpeed(edit, w.curveSpeed) end
 		s.mode = s.mode or "horizontal"
 		reqs[1] = "openMode"
 		s.log("tool: end at " .. ends.name(e) .. ", laid as " .. how)
@@ -384,6 +390,7 @@ local function pressV(s : Session, w : World) : boolean
 	s.selected = i -- (a click, a drag or adding one selects it)
 	local height = w.shift ~= nil and w.shift() == true
 	local pt = edits.points(e)[i]
+	if height and not pt.liftable then return true end
 	if not height and not pt.slides then return true end
 	s.dragEl = { i = i, height = height, pressY = s.mouseSY, pressZ = pt.z }
 	s.log("edit: grab " .. pointName(e, i))
@@ -452,8 +459,14 @@ local function remove(s : Session, w : World) : boolean
 	local h, e = s.hit, s.edit
 	if M.vertical(s) then
 		if h == nil or h.kind ~= "point" then return false end
+		local ok = edits.removeElevation(e, h.i)
+		if not ok then
+			s.editMsg = "Cannot remove this point: a guide point next to a track end stays."
+			s.log("edit: remove " .. pointName(e, h.i) .. ": guide point")
+			s.hit = nil
+			return true
+		end
 		s.log("edit: remove " .. pointName(e, h.i))
-		edits.removeElevation(e, h.i)
 		local sel = s.selected
 		if sel == h.i then s.selected = nil elseif sel ~= nil and sel > h.i then s.selected = sel - 1 end
 		s.hit = nil
@@ -578,17 +591,20 @@ function M.selection(s : Session, limit : number) : Selection
 	local pt = i ~= nil and edits.points(e)[i] or nil
 	if pt == nil then return nil end
 	local p = edits.profile(e)
-	return { i = i, name = pointName(e, i), s = pt.s, z = pt.z, grade = not pt.tooClose and p ~= nil and profiles.gradeAt(p, pt.s) or nil,
-		tooClose = pt.tooClose, steep = (edits.gradeProblem(e, limit)) }
+	return { i = i, name = pointName(e, i), s = pt.s, z = pt.z, grade = not pt.tooClose and p ~= nil and profiles.gradeAtClamped(p, pt.s) or nil,
+		liftable = pt.liftable, guide = pt.guide, tooClose = pt.tooClose, steep = (edits.gradeProblem(e, limit)) }
 end
 
 -- What the selected point's (or ground end's) height can be matched to, in order along the track:
 -- the start, every other point (one too close too: its height is its own), the end; never itself.
--- Empty when none is selected.
+-- Empty when none is selected or the selected point's height cannot be set (a guide point).
 function M.matchSources(s : Session) : {MatchSource}
 	local out : {MatchSource} = {}
 	if s.selected == nil then return out end
-	for k, pt in ipairs(edits.points(s.edit)) do
+	local pts = edits.points(s.edit)
+	local cur = pts[s.selected]
+	if cur == nil or not cur.liftable then return out end
+	for k, pt in ipairs(pts) do
 		local shown = math.abs(pt.z) < 0.05 and 0.0 or pt.z -- (never "-0.0 m")
 		if k ~= s.selected then out[#out + 1] = { label = string.format("%s · %.1f m", pointName(s.edit, k), shown), z = pt.z } end
 	end
@@ -693,7 +709,11 @@ function M.hint(s : Session) : string
 	if M.dragging(s) then return nil end
 	local h = s.hit
 	if h == nil then return "Click: build · Esc: back" end
-	if h.kind == "point" then return "Click: select · Drag: slide · Shift+drag: height · Right-click: remove" end
+	if h.kind == "point" then
+		local pt = edits.points(s.edit)[h.i]
+		if pt ~= nil and pt.guide then return "Click: select · Drag: slide along the end" end
+		return "Click: select · Drag: slide · Shift+drag: height · Right-click: remove"
+	end
 	if h.kind == "track" then return "Click: add point" end
 	if h.kind == "leg" then return "Click: add turn" end
 	if h.kind == "end" then
@@ -757,6 +777,8 @@ function M.tick(s : Session, w : World) : {Request}
 		reqs = { "closeConfirm", "closeMode" }
 	end
 	if s.phase == "done" then
+		if w.trackSpeed ~= nil then edits.setDesignSpeed(s.edit, w.trackSpeed()) end
+		if w.curveSpeed ~= nil then edits.setCurveSpeed(s.edit, w.curveSpeed) end
 		dragTick(s, w)
 		if not M.dragging(s) then findHit(s, w) end
 	else
