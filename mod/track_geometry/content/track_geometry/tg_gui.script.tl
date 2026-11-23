@@ -11,6 +11,7 @@
 local react = ug_require "::/gui/main/react.lua" as React
 local builtin = ug_require "::/gui/main/builtin.lua" as Builtin
 local styleutil = ug_require "::/gui/main/styleutil.tl" as StyleUtil
+local color_util = ug_require "::/gui/main/color_util.tl" as ColorUtil
 local engine_react_util = ug_require "::/gui/main/engine_react_util.tl" as EngineReactUtil
 local construction_react_util = ug_require "::/gui/construction/construction_react_util.tl" as ConstructionReactUtil
 local dialog_react_util = ug_require "::/gui/menu/dialog_react_util.tl" as DialogReactUtil
@@ -1621,9 +1622,49 @@ local function closeMenu(abort : function())
 	if not ok then say("esc: closing the menu: " .. tostring(err)) end
 end
 
+-- Terrain contour lines, matching the game's own track builder (construction_react_util.tl).
+-- Built once on first use; a failure is logged once and latched (never retried per tick: NOTES.md).
+local cachedContours : LayerConfig = nil
+local noContours = false
+local function contourLayerConfig() : LayerConfig
+	if noContours then return nil end
+	if cachedContours ~= nil then return cachedContours end
+	local ok, cfg = pcall(function() : LayerConfig
+		local layerColors = api.gui.genericRep.get(api.gui.genericRep.find("::/gui/layers/layer_colors.gres")).data as LayerColors
+		local metric = api.util.getAppConfig().distanceSpeedUnit == api.type["enum"].DistanceSpeedUnit.Metric
+		local list = metric and layerColors.Terrain.Contours or layerColors.Terrain.ContoursImperial
+		local mapContours : {LayerConfig.TerrainContours.Contour} = {}
+		for _, cc in ipairs(list) do
+			local c = api.type.LayerConfig.TerrainContours.Contour.new()
+			c.color = color_util.toVec4(cc.color)
+			c.level = cc.level
+			c.thickness = cc.thickness
+			c.fadeDistance = cc.fadeDistance
+			mapContours[#mapContours + 1] = c
+		end
+		local terrainContours = api.type.LayerConfig.TerrainContours.new()
+		terrainContours.contours = mapContours
+		local res = api.type.LayerConfig.new()
+		res.contours = terrainContours
+		return res
+	end)
+	if not ok or cfg == nil then
+		noContours = true
+		say("contours: " .. tostring(cfg))
+		return nil
+	end
+	cachedContours = cfg as LayerConfig
+	return cachedContours
+end
+
 -- The tool in the world: the selector (clicks), the ghost, the gizmos, the cursor and the tooltip.
 local function toolAction(abort : function()) : TreeNodeId
 	tool.active = true
+	local prefLayer : ReactStateT<LayerConfig> = react.useState(tool.gameCtx ~= nil and tool.gameCtx.preferredLayerConfig:get() or nil)
+	react.onEvent("preferredLayerConfig", function(_ : string, param : table)
+		local ev = param as LayersButtonRidge.PreferredLayerConfigEvent
+		prefLayer:set(ev and ev.config or nil)
+	end)
 	-- Picking another track entry opens that entry's tool before the last one's closes (seen in
 	-- game: the new entry's tool ran, then the old one unmounted). The tool's state is shared, so
 	-- only the last one open to close puts it away: else the open one counts as closed, and
@@ -1739,6 +1780,11 @@ local function toolAction(abort : function()) : TreeNodeId
 		children[#children + 1] = builtin.FullScreenComponent{ recipe = TgBadges as Recipe<any>, param = { items = tool.screen } as BadgesParam }
 	end
 	if fresh then children[#children + 1] = builtin.ActionTooltip(tooltip()) end
+	local layerCfg = construction_react_util.mergeLayerConfig(contourLayerConfig(), prefLayer:old())
+	if layerCfg ~= nil then
+		-- (builtin.d.tl declares LayerConfig : Recipe<LayerConfig>, but builtin.lua / construction.tl pass { config = ... })
+		children[#children + 1] = builtin.LayerConfig({ config = layerCfg } as any as LayerConfig)
+	end
 	local param : Builtin.ActionDescriptorParam = {
 		tool = "construction",
 		onBack = function()
