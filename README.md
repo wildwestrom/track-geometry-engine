@@ -24,6 +24,7 @@ TrackGeometry/
   Clothoid.lean             Gauss–Legendre clothoid quadrature and shift
   Design.lean               SpeedModel, LayoutPolicy, CornerParams, bisection solver, PI budgets
   Planar.lean               2D horizontal alignment (Vec2, TurnDir, Segment2D, buildPath2D)
+  Profile.lean              1D vertical alignment (PVI, ProfileSegment, ProfilePath, ProfilePolicy, buildProfile)
   Vec.lean                  Vec3 3D vector operations
   Segment.lean              3D Segment, clothoid placement, Frame/RMF, closed-form sampling
   Cant.lean                 Design cant from curvature and speed
@@ -33,6 +34,7 @@ TrackGeometry/
   Bisection.lean            Bisection corner-solver convergence and pullback proofs
   Budget.lean               Shared-leg budget resolution non-overlap proofs
   PlanarContinuity.lean     G⁰/G¹/G² proofs for the 2D planar corner
+  ProfileContinuity.lean    Exact ℝ calculus and C⁰/C¹ junction continuity for vertical profiles
   Continuity.lean           G¹/G² proofs for the 3D spiral corner
   History.lean              Generic undo/redo *tree* (used by the UI)
   Raylib.lean               Generated Raylib FFI bindings (do not edit)
@@ -89,5 +91,6 @@ New to the code? Start at `TrackGeometry/Lib.lean` (the barrel re-export of the 
 
 1. **Shared scalar core:** `TrackGeometry/Scalar.lean` (`TrackScalar`), `TrackGeometry/Clothoid.lean` (Gauss–Legendre clothoid quadrature and shift), and `TrackGeometry/Design.lean` (`SpeedModel`, `LayoutPolicy`, `CornerParams`, bisection corner solver, and PI budget allocation).
 2. **2D horizontal alignment:** `TrackGeometry/Planar.lean` (`Vec2`, `TurnDir`, `Segment2D`, `AlignmentPath2D`, `buildPath2D`).
-3. **3D alignment:** `TrackGeometry/Vec.lean` (`Vec3`), `TrackGeometry/Segment.lean` (`Segment`, RMF frames), `TrackGeometry/Cant.lean` (design cant), and `TrackGeometry/Path.lean` (`solveCorner`, `buildPath`).
-4. **Scalar instances & proofs:** `TrackGeometry/RFloat.lean` (computable `Float`), `TrackGeometry/Real.lean` (exact `ℝ`), `TrackGeometry/Bisection.lean`, `TrackGeometry/Budget.lean`, `TrackGeometry/PlanarContinuity.lean`, and `TrackGeometry/Continuity.lean`.
+3. **1D vertical alignment:** `TrackGeometry/Profile.lean` (`PVI`, `ProfileSegment`, `ProfilePath`, `ProfilePolicy`, `buildProfile`).
+4. **3D alignment:** `TrackGeometry/Vec.lean` (`Vec3`), `TrackGeometry/Segment.lean` (`Segment`, RMF frames), `TrackGeometry/Cant.lean` (design cant), and `TrackGeometry/Path.lean` (`solveCorner`, `buildPath`).
+5. **Scalar instances & proofs:** `TrackGeometry/RFloat.lean` (computable `Float`), `TrackGeometry/Real.lean` (exact `ℝ`), `TrackGeometry/Bisection.lean`, `TrackGeometry/Budget.lean`, `TrackGeometry/PlanarContinuity.lean`, `TrackGeometry/ProfileContinuity.lean`, and `TrackGeometry/Continuity.lean`.
